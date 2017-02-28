@@ -68,6 +68,13 @@ SELECT 1 AS i UNION SELECT 2 ORDER BY i;
  2
 (2 rows)
 
+-- ? operator
+select '{"a":1, "b":2}'::jsonb ? 'b';
+ ?column? 
+----------
+ t
+(1 row)
+
 -- cte
 WITH t(f) AS (
   VALUES (1.0), (2.0)
@@ -79,24 +86,35 @@ WITH t(f) AS (
  2.0
 (2 rows)
 
+-- prepared statement
+PREPARE pgss_test (int) AS SELECT $1 LIMIT 1;
+EXECUTE pgss_test(1);
+ ?column? 
+----------
+        1
+(1 row)
+
+DEALLOCATE pgss_test;
 SELECT query, calls, rows FROM pg_stat_statements ORDER BY query COLLATE "C";
-                  query                  | calls | rows 
------------------------------------------+-------+------
- SELECT ?                               +|     4 |    4
-                                        +|       | 
-   AS "text"                             |       | 
- SELECT ? + ?                            |     2 |    2
- SELECT ? + ? + ? AS "add"               |     3 |    3
- SELECT ? AS "float"                     |     1 |    1
- SELECT ? AS "int"                       |     2 |    2
- SELECT ? AS i UNION SELECT ? ORDER BY i |     1 |    2
- SELECT ? || ?                           |     1 |    1
- SELECT pg_stat_statements_reset()       |     1 |    1
- WITH t(f) AS (                         +|     1 |    2
-   VALUES (?), (?)                      +|       | 
- )                                      +|       | 
-   SELECT f FROM t ORDER BY f            |       | 
-(9 rows)
+                    query                     | calls | rows 
+----------------------------------------------+-------+------
+ PREPARE pgss_test (int) AS SELECT $1 LIMIT ? |     1 |    1
+ SELECT ?                                    +|     4 |    4
+                                             +|       | 
+   AS "text"                                  |       | 
+ SELECT ? + ?                                 |     2 |    2
+ SELECT ? + ? + ? AS "add"                    |     3 |    3
+ SELECT ? AS "float"                          |     1 |    1
+ SELECT ? AS "int"                            |     2 |    2
+ SELECT ? AS i UNION SELECT ? ORDER BY i      |     1 |    2
+ SELECT ? || ?                                |     1 |    1
+ SELECT pg_stat_statements_reset()            |     1 |    1
+ WITH t(f) AS (                              +|     1 |    2
+   VALUES (?), (?)                           +|       | 
+ )                                           +|       | 
+   SELECT f FROM t ORDER BY f                 |       | 
+ select ?::jsonb ? ?                          |     1 |    1
+(11 rows)
 
 --
 -- CRUD: INSERT SELECT UPDATE DELETE on test table
@@ -125,6 +143,8 @@ BEGIN \;
 UPDATE test SET b = '555' WHERE a = 5 \;
 UPDATE test SET b = '666' WHERE a = 6 \;
 COMMIT ;
+-- many INSERT values
+INSERT INTO test (a, b) VALUES (1, 'a'), (2, 'b'), (3, 'c');
 -- SELECT with constants
 SELECT * FROM test WHERE a > 5 ORDER BY a ;
  a |          b           
@@ -147,8 +167,11 @@ SELECT *
 SELECT * FROM test ORDER BY a;
  a |          b           
 ---+----------------------
+ 1 | a                   
  1 | 111                 
+ 2 | b                   
  2 | 222                 
+ 3 | c                   
  3 | 333                 
  4 | 444                 
  5 | 555                 
@@ -156,19 +179,35 @@ SELECT * FROM test ORDER BY a;
  7 | aaa                 
  8 | bbb                 
  9 | bbb                 
-(9 rows)
+(12 rows)
+
+-- SELECT with IN clause
+SELECT * FROM test WHERE a IN (1, 2, 3, 4, 5);
+ a |          b           
+---+----------------------
+ 1 | 111                 
+ 2 | 222                 
+ 3 | 333                 
+ 4 | 444                 
+ 5 | 555                 
+ 1 | a                   
+ 2 | b                   
+ 3 | c                   
+(8 rows)
 
 SELECT query, calls, rows FROM pg_stat_statements ORDER BY query COLLATE "C";
-                       query                       | calls | rows 
----------------------------------------------------+-------+------
- DELETE FROM test WHERE a > ?                      |     1 |    1
- INSERT INTO test VALUES(generate_series(?, ?), ?) |     1 |   10
- SELECT * FROM test ORDER BY a                     |     1 |    9
- SELECT * FROM test WHERE a > ? ORDER BY a         |     2 |    4
- SELECT pg_stat_statements_reset()                 |     1 |    1
- UPDATE test SET b = ? WHERE a = ?                 |     6 |    6
- UPDATE test SET b = ? WHERE a > ?                 |     1 |    3
-(7 rows)
+                         query                         | calls | rows 
+-------------------------------------------------------+-------+------
+ DELETE FROM test WHERE a > ?                          |     1 |    1
+ INSERT INTO test (a, b) VALUES (?, ?), (?, ?), (?, ?) |     1 |    3
+ INSERT INTO test VALUES(generate_series(?, ?), ?)     |     1 |   10
+ SELECT * FROM test ORDER BY a                         |     1 |   12
+ SELECT * FROM test WHERE a > ? ORDER BY a             |     2 |    4
+ SELECT * FROM test WHERE a IN (?, ?, ?, ?, ?)         |     1 |    8
+ SELECT pg_stat_statements_reset()                     |     1 |    1
+ UPDATE test SET b = ? WHERE a = ?                     |     6 |    6
+ UPDATE test SET b = ? WHERE a > ?                     |     1 |    3
+(9 rows)
 
 --
 -- pg_stat_statements.track = none
