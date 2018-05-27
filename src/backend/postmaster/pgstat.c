@@ -42,6 +42,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_proc.h"
 #include "common/ip.h"
+#include "lib/dshash.h"
 #include "libpq/libpq.h"
 #include "libpq/pqsignal.h"
 #include "mb/pg_wchar.h"
@@ -60,7 +61,9 @@
 #include "storage/pg_shmem.h"
 #include "storage/procsignal.h"
 #include "storage/sinvaladt.h"
+#include "storage/shm_toc.h"
 #include "utils/ascii.h"
+#include "utils/dsa.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -336,6 +339,9 @@ static void pgstat_recv_funcpurge(PgStat_MsgFuncpurge *msg, int len);
 static void pgstat_recv_recoveryconflict(PgStat_MsgRecoveryConflict *msg, int len);
 static void pgstat_recv_deadlock(PgStat_MsgDeadlock *msg, int len);
 static void pgstat_recv_tempfile(PgStat_MsgTempFile *msg, int len);
+
+static void experiment_postmaster_init();
+static void experiment_update();
 
 /* ------------------------------------------------------------
  * Public functions called from postmaster follow
@@ -797,7 +803,6 @@ allow_immediate_pgstat_restart(void)
  *------------------------------------------------------------
  */
 
-
 /* ----------
  * pgstat_report_stat() -
  *
@@ -897,6 +902,12 @@ pgstat_report_stat(bool force)
 			   tsa->tsa_used * sizeof(PgStat_TableStatus));
 		tsa->tsa_used = 0;
 	}
+
+	ereport(DEBUG1,
+			(errmsg("*** regular msg entries: %d | shared msg entries: %d",
+					regular_msg.m_nentries, shared_msg.m_nentries)));
+
+	experiment_update();
 
 	/*
 	 * Send partial messages.  Make sure that any pending xact commit/abort
@@ -2586,6 +2597,12 @@ pgstat_fetch_global(void)
  * ------------------------------------------------------------
  */
 
+typedef struct GlobalStatsState {
+	dsm_handle dsm_handle;
+} GlobalStatsState;
+
+static GlobalStatsState *GlobalStats = NULL;
+
 static PgBackendStatus *BackendStatusArray = NULL;
 static PgBackendStatus *MyBEEntry = NULL;
 static char *BackendAppnameBuffer = NULL;
@@ -2635,6 +2652,8 @@ CreateSharedBackendStatus(void)
 	bool		found;
 	int			i;
 	char	   *buffer;
+
+	experiment_postmaster_init();
 
 	/* Create or attach to the shared array */
 	size = mul_size(sizeof(PgBackendStatus), NumBackendStatSlots);
@@ -6376,4 +6395,159 @@ pgstat_clip_activity(const char *raw_activity)
 	activity[cliplen] = '\0';
 
 	return activity;
+}
+
+static void experiment_postmaster_init() {
+	bool		found;
+
+	ereport(DEBUG1, (errmsg("EXPERIMENT INIT")));
+
+	GlobalStats = (GlobalStatsState *) ShmemInitStruct("Global Stats", sizeof(GlobalStatsState), &found);
+	if (!found)
+	{
+		MemSet(GlobalStats, 0, sizeof(GlobalStatsState));
+		GlobalStats->dsm_handle = DSM_HANDLE_INVALID;
+	}
+
+	ereport(DEBUG1, (errmsg("/EXPERIMENT INIT")));
+}
+
+
+typedef struct SharedStatsTestKey {
+	int i;
+} SharedStatsTestKey;
+
+typedef struct SharedStatsTestEntry {
+	int value;
+} SharedStatsTestEntry;
+
+static int shared_stats_compare(const void *a, const void *b, size_t size, void *arg)
+{
+	return 0; // TODO
+}
+
+static uint32 shared_stats_hash(const void *a, size_t size, void *arg)
+{
+	return 0; // TODO
+}
+
+static const dshash_parameters shared_stats_test_params = {
+	sizeof(SharedStatsTestKey),
+	sizeof(SharedStatsTestEntry),
+	shared_stats_compare,
+	shared_stats_hash,
+	LWTRANCHE_STATS_SHARED_TEST
+};
+
+typedef struct SharedStats
+{
+	dshash_table_handle test_handle;
+} SharedStats;
+
+typedef struct BackendStatsState {
+	dshash_table *shared_stats;
+} BackendStatsState;
+static BackendStatsState *BackendStats = NULL;
+
+#define STATS_DSA_SIZE					0x30000
+
+#define STATS_DSM_MAGIC					0xcafecafe
+#define STATS_DSM_DSA						UINT64CONST(0xFFFFFFFFFFFF0001) // Not used
+#define STATS_DSM_SHARED_STATS	UINT64CONST(0xFFFFFFFFFFFF0002)
+
+static void experiment_update() {
+	shm_toc_estimator estimator;
+	shm_toc    *toc;
+	Size size;
+	void	   *shared_stats_space;
+	dsm_segment *seg;
+	dsa_area *dsa;
+	void	   *dsa_space;
+	dshash_table *shared_stats;
+	SharedStatsTestKey test_key;
+	SharedStatsTestEntry *test_entry;
+	bool found;
+
+	ereport(DEBUG1, (errmsg("EXPERIMENT UPDATE")));
+
+	if (BackendStats == NULL) {
+		BackendStats = MemoryContextAllocZero(TopMemoryContext, sizeof(BackendStatsState));
+
+		LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+		if (GlobalStats->dsm_handle == DSM_HANDLE_INVALID) {
+			shm_toc_initialize_estimator(&estimator);
+
+			shm_toc_estimate_keys(&estimator, 1);
+			shm_toc_estimate_chunk(&estimator, STATS_DSA_SIZE);
+
+			shm_toc_estimate_keys(&estimator, 1);
+			shm_toc_estimate_chunk(&estimator, sizeof(SharedStats));
+
+			size = shm_toc_estimate(&estimator);
+
+			seg = dsm_create(size, DSM_CREATE_NULL_IF_MAXSEGMENTS);
+			if (seg == NULL)
+				elog(ERROR, "could not create stats DSM segment");
+
+			toc = shm_toc_create(STATS_DSM_MAGIC, dsm_segment_address(seg), size);
+
+			dsa_space = shm_toc_allocate(toc, STATS_DSA_SIZE);
+			dsa = dsa_create_in_place(dsa_space, STATS_DSA_SIZE, LWTRANCHE_STATS_DSA, seg);
+			shm_toc_insert(toc, STATS_DSM_DSA, dsa_space);
+
+			shared_stats_space = shm_toc_allocate(toc, sizeof(SharedStats));
+
+			shared_stats = dshash_create(dsa, &shared_stats_test_params, NULL);
+			((SharedStats *) shared_stats_space)->test_handle = dshash_get_hash_table_handle(shared_stats);
+
+			shm_toc_insert(toc, STATS_DSM_SHARED_STATS, shared_stats_space);
+
+			GlobalStats->dsm_handle = dsm_segment_handle(seg);
+
+			dsm_pin_mapping(seg);
+			dsa_pin_mapping(dsa);
+
+			BackendStats->shared_stats = shared_stats;
+		} else {
+			seg = dsm_attach(GlobalStats->dsm_handle);
+			if (seg == NULL)
+				elog(ERROR, "could not attach to stats DSM segment");
+			toc = shm_toc_attach(STATS_DSM_MAGIC, dsm_segment_address(seg));
+
+			dsa_space = shm_toc_lookup(toc, STATS_DSM_DSA, false);
+			dsa = dsa_attach_in_place(dsa_space, seg);
+
+			shared_stats_space = shm_toc_lookup(toc, STATS_DSM_SHARED_STATS, false);
+
+			shared_stats = dshash_attach(dsa,
+										 &shared_stats_test_params,
+										 ((SharedStats *) shared_stats_space)->test_handle,
+										 dsa);
+
+			dsm_pin_mapping(seg);
+			dsa_pin_mapping(dsa);
+
+			BackendStats->shared_stats = shared_stats;
+		}
+
+		LWLockRelease(AddinShmemInitLock);
+	} else {
+		shared_stats = BackendStats->shared_stats;
+	}
+
+	test_key.i = 1;
+	test_entry = dshash_find_or_insert(shared_stats, &test_key, &found);
+	if (!found)
+	{
+		ereport(DEBUG1, (errmsg("NOT FOUND")));
+		test_entry->value = 10;
+	} else {
+		test_entry->value += 1;
+	}
+	dshash_release_lock(shared_stats, test_entry);
+
+	ereport(DEBUG1, (errmsg("dshash value: %d", test_entry->value)));
+
+	ereport(DEBUG1, (errmsg("/EXPERIMENT UPDATE")));
 }
