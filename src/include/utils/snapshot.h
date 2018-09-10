@@ -37,7 +37,8 @@ typedef struct SnapshotData
 	/*
 	 * The remaining fields are used only for MVCC snapshots, and are normally
 	 * just zeroes in special snapshots.  (But xmin and xmax are used
-	 * specially by HeapTupleSatisfiesDirty.)
+	 * specially by HeapTupleSatisfiesDirty, and xmin is used specially by
+	 * HeapTupleSatisfiesNonVacuumable.)
 	 *
 	 * An MVCC snapshot can never see the effects of XIDs >= xmax. It can see
 	 * the effects of all older XIDs except those listed in the snapshot. xmin

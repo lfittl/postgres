@@ -42,6 +42,13 @@ extern PGDLLIMPORT SnapshotData SnapshotToastData;
 	((snapshot)->satisfies == HeapTupleSatisfiesMVCC)
 
 /*
+ * Similarly, some initialization is required for a NonVacuumable snapshot.
+ * The caller must supply the xmin horizon to use (e.g., RecentGlobalXmin).
+ */
+#define InitNonVacuumableSnapshot(snapshot, xmin_horizon)  \
+	((snapshot).satisfies = HeapTupleSatisfiesNonVacuumable)
+
+/*
  * HeapTupleSatisfiesVisibility
  *		True iff heap tuple satisfies a time qual.
  *
@@ -77,6 +84,8 @@ extern bool HeapTupleSatisfiesToast(HeapTupleHeader tuple,
 						Snapshot snapshot, Buffer buffer);
 extern bool HeapTupleSatisfiesDirty(HeapTupleHeader tuple,
 						Snapshot snapshot, Buffer buffer);
+extern bool HeapTupleSatisfiesNonVacuumable(HeapTupleHeader htup,
+								Snapshot snapshot, Buffer buffer);
 
 /* Special "satisfies" routines with different APIs */
 extern HTSU_Result HeapTupleSatisfiesUpdate(HeapTupleHeader tuple,
@@ -91,4 +100,4 @@ extern void HeapTupleSetHintBits(HeapTupleHeader tuple, Buffer buffer,
 					 uint16 infomask, TransactionId xid);
 extern bool HeapTupleHeaderIsOnlyLocked(HeapTupleHeader tuple);
 
-#endif   /* TQUAL_H */
+#endif							/* TQUAL_H */
