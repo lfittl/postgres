@@ -46,7 +46,8 @@ extern PGDLLIMPORT SnapshotData SnapshotToastData;
  * The caller must supply the xmin horizon to use (e.g., RecentGlobalXmin).
  */
 #define InitNonVacuumableSnapshot(snapshot, xmin_horizon)  \
-	((snapshot).satisfies = HeapTupleSatisfiesNonVacuumable)
+	((snapshot).satisfies = HeapTupleSatisfiesNonVacuumable, \
+	 (snapshot).xmin = (xmin_horizon))
 
 /*
  * HeapTupleSatisfiesVisibility
