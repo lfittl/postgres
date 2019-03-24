@@ -90,8 +90,12 @@ extern void dshash_destroy(dshash_table *hash_table);
 /* Finding, creating, deleting entries. */
 extern void *dshash_find(dshash_table *hash_table,
 			const void *key, bool exclusive);
+extern void *dshash_find_extended(dshash_table *hash_table, const void *key,
+			bool exclusive, bool nowait, bool *lock_acquired);
 extern void *dshash_find_or_insert(dshash_table *hash_table,
 					  const void *key, bool *found);
+extern void *dshash_find_or_insert_extended(dshash_table *hash_table,
+			const void *key, bool *found, bool nowait);
 extern bool dshash_delete_key(dshash_table *hash_table, const void *key);
 extern void dshash_delete_entry(dshash_table *hash_table, void *entry);
 extern void dshash_release_lock(dshash_table *hash_table, void *entry);

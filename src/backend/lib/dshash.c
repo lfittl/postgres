@@ -395,9 +395,23 @@ dshash_get_hash_table_handle(dshash_table *hash_table)
 void *
 dshash_find(dshash_table *hash_table, const void *key, bool exclusive)
 {
+	return dshash_find_extended(hash_table, key, exclusive, false, NULL);
+}
+
+/*
+ * Addition to dshash_find, returns immediately when nowait is true and lock
+ * was not acquired. Lock status is set to *lock_failed if any.
+ */
+void *
+dshash_find_extended(dshash_table *hash_table, const void *key,
+					 bool exclusive, bool nowait, bool *lock_acquired)
+{
 	dshash_hash hash;
 	size_t		partition;
 	dshash_table_item *item;
+
+	/* allowing !nowait returning the result is just not sensible */
+	Assert(nowait || !lock_acquired);
 
 	hash = hash_key(hash_table, key);
 	partition = PARTITION_FOR_HASH(hash);
@@ -405,8 +419,23 @@ dshash_find(dshash_table *hash_table, const void *key, bool exclusive)
 	Assert(hash_table->control->magic == DSHASH_MAGIC);
 	Assert(!hash_table->find_locked);
 
-	LWLockAcquire(PARTITION_LOCK(hash_table, partition),
-				  exclusive ? LW_EXCLUSIVE : LW_SHARED);
+	if (nowait)
+	{
+		if (!LWLockConditionalAcquire(PARTITION_LOCK(hash_table, partition),
+									  exclusive ? LW_EXCLUSIVE : LW_SHARED))
+		{
+			if (lock_acquired)
+				*lock_acquired = false;
+			return NULL;
+		}
+	}
+	else
+		LWLockAcquire(PARTITION_LOCK(hash_table, partition),
+					  exclusive ? LW_EXCLUSIVE : LW_SHARED);
+
+	if (lock_acquired)
+		*lock_acquired = true;
+
 	ensure_valid_bucket_pointers(hash_table);
 
 	/* Search the active bucket. */
@@ -442,6 +471,22 @@ dshash_find_or_insert(dshash_table *hash_table,
 					  const void *key,
 					  bool *found)
 {
+	return dshash_find_or_insert_extended(hash_table, key, found, false);
+}
+
+/*
+ * Addition to dshash_find_or_insert, returns NULL if nowait is true and lock
+ * was not acquired.
+ *
+ * Notes above dshash_find_extended() regarding locking and error handling
+ * equally apply here.
+ */
+void *
+dshash_find_or_insert_extended(dshash_table *hash_table,
+							   const void *key,
+							   bool *found,
+							   bool nowait)
+{
 	dshash_hash hash;
 	size_t		partition_index;
 	dshash_partition *partition;
@@ -455,8 +500,16 @@ dshash_find_or_insert(dshash_table *hash_table,
 	Assert(!hash_table->find_locked);
 
 restart:
-	LWLockAcquire(PARTITION_LOCK(hash_table, partition_index),
-				  LW_EXCLUSIVE);
+	if (nowait)
+	{
+		if (!LWLockConditionalAcquire(
+				PARTITION_LOCK(hash_table, partition_index),
+				LW_EXCLUSIVE))
+			return NULL;
+	}
+	else
+		LWLockAcquire(PARTITION_LOCK(hash_table, partition_index),
+					  LW_EXCLUSIVE);
 	ensure_valid_bucket_pointers(hash_table);
 
 	/* Search the active bucket. */
@@ -626,9 +679,11 @@ dshash_memhash(const void *v, size_t size, void *arg)
  * As opposed to the equivalent for dynanash, the caller is not supposed to
  * delete the returned element before continuing the scan.
  *
- * If consistent is set for dshash_seq_init, the whole hash table is
- * non-exclusively locked. Otherwise a part of the hash table is locked in the
- * same mode (partition lock).
+ * If consistent is set for dshash_seq_init, the all hash table
+ * partitions are locked in the requested mode (as determined by the
+ * exclusive flag), and the locks are held until the end of the scan.
+ * Otherwise the partition locks are acquired and released as needed
+ * during the scan (up to two partitions may be locked at the same time).
  */
 void
 dshash_seq_init(dshash_seq_status *status, dshash_table *hash_table,
