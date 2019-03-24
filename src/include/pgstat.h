@@ -715,6 +715,7 @@ typedef struct PgStat_GlobalStats
  */
 typedef enum BackendType
 {
+	B_ARCHIVER,
 	B_AUTOVAC_LAUNCHER,
 	B_AUTOVAC_WORKER,
 	B_BACKEND,

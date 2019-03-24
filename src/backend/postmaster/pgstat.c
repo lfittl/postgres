@@ -2892,6 +2892,9 @@ pgstat_bestart(void)
 			case BgWriterProcess:
 				beentry->st_backendType = B_BG_WRITER;
 				break;
+			case ArchiverProcess:
+				beentry->st_backendType = B_ARCHIVER;
+				break;
 			case CheckpointerProcess:
 				beentry->st_backendType = B_CHECKPOINTER;
 				break;
@@ -4147,6 +4150,9 @@ pgstat_get_backend_desc(BackendType backendType)
 
 	switch (backendType)
 	{
+		case B_ARCHIVER:
+			backendDesc = "archiver";
+			break;
 		case B_AUTOVAC_LAUNCHER:
 			backendDesc = "autovacuum launcher";
 			break;
