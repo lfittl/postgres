@@ -440,7 +440,8 @@ dsm_create(Size size, int flags)
 	uint32		i;
 	uint32		nitems;
 
-	Assert(dsm_control != NULL);
+	/* Unsafe in postmaster (and pointless in a stand-alone backend). */
+	Assert(IsUnderPostmaster);
 
 	if (!dsm_init_done)
 		dsm_backend_startup();
@@ -536,7 +537,8 @@ dsm_attach(dsm_handle h)
 	uint32		i;
 	uint32		nitems;
 
-	Assert(dsm_control != NULL);
+	/* Unsafe in postmaster (and pointless in a stand-alone backend). */
+	Assert(IsUnderPostmaster);
 
 	if (!dsm_init_done)
 		dsm_backend_startup();
