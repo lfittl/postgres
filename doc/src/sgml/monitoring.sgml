@@ -1049,6 +1049,10 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
          the oldest transaction id available to it.</entry>
         </row>
         <row>
+         <entry><literal>StatsLock</literal></entry>
+         <entry>Waiting to update statistic counters.</entry>
+        </row>
+        <row>
          <entry><literal>clog</literal></entry>
          <entry>Waiting for I/O on a clog (transaction status) buffer.</entry>
         </row>

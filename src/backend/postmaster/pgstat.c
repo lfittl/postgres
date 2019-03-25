@@ -111,11 +111,9 @@ int			pgstat_track_activity_query_size = 1024;
  */
 char	   *pgstat_stat_directory = PG_STAT_TMP_DIR;
 
-LWLock		StatsMainLock;
-#define		StatsLock (&StatsMainLock)
-
 /* Shared stats bootstrap information */
-typedef struct StatsShmemStruct {
+typedef struct StatsShmemStruct
+{
 	dsa_handle stats_dsa_handle;
 	dshash_table_handle db_hash_handle;
 	dsa_pointer	global_stats;
