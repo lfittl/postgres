@@ -104,15 +104,12 @@ bool		pgstat_track_counts = false;
 int			pgstat_track_functions = TRACK_FUNC_OFF;
 int			pgstat_track_activity_query_size = 1024;
 
-/* ----------
- * Built from GUC parameter
- * ----------
+/*
+ * This used to be a GUC variable and is no longer used in this file, but left
+ * alone just for backward comptibility for extensions, having the default
+ * value.
  */
-char	   *pgstat_stat_directory = NULL;
-
-/* No longer used, but will be removed with GUC */
-char	   *pgstat_stat_filename = NULL;
-char	   *pgstat_stat_tmpname = NULL;
+char	   *pgstat_stat_directory = PG_STAT_TMP_DIR;
 
 LWLock		StatsMainLock;
 #define		StatsLock (&StatsMainLock)

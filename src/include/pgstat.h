@@ -31,7 +31,10 @@
 #define PGSTAT_STAT_PERMANENT_FILENAME		"pg_stat/global.stat"
 #define PGSTAT_STAT_PERMANENT_TMPFILE		"pg_stat/global.tmp"
 
-/* Default directory to store temporary statistics data in */
+/*
+ * This used to be the directory to store temporary statistics data in but is
+ * no longer used. Defined here for backward compatibility.
+ */
 #define PG_STAT_TMP_DIR		"pg_stat_tmp"
 
 /* Values for track_functions GUC variable --- order is significant! */
