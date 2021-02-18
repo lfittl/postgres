@@ -137,7 +137,7 @@ static void SlabCheck(MemoryContext context);
 /*
  * This is the virtual function table for Slab contexts.
  */
-static MemoryContextMethods SlabMethods = {
+static const MemoryContextMethods SlabMethods = {
 	SlabAlloc,
 	SlabFree,
 	SlabRealloc,
