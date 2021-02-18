@@ -638,7 +638,7 @@ MemoryContextContains(MemoryContext context, void *pointer)
  */
 MemoryContext
 MemoryContextCreate(NodeTag tag, Size size,
-					MemoryContextMethods *methods,
+					const MemoryContextMethods *methods,
 					MemoryContext parent,
 					const char *name)
 {
