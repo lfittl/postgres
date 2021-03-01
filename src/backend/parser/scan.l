@@ -223,7 +223,7 @@ non_newline		[^\n\r]
 
 comment			("--"{non_newline}*)
 
-whitespace		({space}+|{comment})
+whitespace		({space}+)
 
 /*
  * SQL requires at least one newline in the whitespace separating
@@ -232,8 +232,8 @@ whitespace		({space}+|{comment})
  * it, whereas {whitespace} should generally have a * after it...
  */
 
-special_whitespace		({space}+|{comment}{newline})
-horiz_whitespace		({horiz_space}|{comment})
+special_whitespace		({space}+)
+horiz_whitespace		({horiz_space})
 whitespace_with_newline	({horiz_whitespace}*{newline}{special_whitespace}*)
 
 quote			'
@@ -276,6 +276,9 @@ xeoctesc		[\\][0-7]{1,3}
 xehexesc		[\\]x[0-9A-Fa-f]{1,2}
 xeunicode		[\\](u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})
 xeunicodefail	[\\](u[0-9A-Fa-f]{0,3}|U[0-9A-Fa-f]{0,7})
+
+/* Normalized escaped string */
+xe_normalized  [eE]\?
 
 /* Extended quote
  * xqdouble implements embedded quote, ''''
@@ -343,8 +346,9 @@ xcinside		[^*/]+
 digit			[0-9]
 ident_start		[A-Za-z\200-\377_]
 ident_cont		[A-Za-z\200-\377_0-9\$]
+ident_end     [\?]
 
-identifier		{ident_start}{ident_cont}*
+identifier		{ident_start}{ident_cont}*{ident_end}*
 
 /* Assorted special-case operators and operator-like tokens */
 typecast		"::"
@@ -375,7 +379,7 @@ not_equals		"!="
  * If you change either set, adjust the character lists appearing in the
  * rule for "operator"!
  */
-self			[,()\[\].;\:\+\-\*\/\%\^\<\>\=]
+self			[,()\[\].;\:\+\-\*\/\%\^\<\>\=\?]
 op_chars		[\~\!\@\#\^\&\|\`\?\+\-\*\/\%\<\>\=]
 operator		{op_chars}+
 
@@ -419,6 +423,11 @@ other			.
 					/* ignore */
 				}
 
+{comment}	{
+					SET_YYLLOC();
+					return SQL_COMMENT;
+				}
+
 {xcstart}		{
 					/* Set location in case of syntax error in comment */
 					SET_YYLLOC();
@@ -437,7 +446,11 @@ other			.
 
 {xcstop}		{
 					if (yyextra->xcdepth <= 0)
+					{
 						BEGIN(INITIAL);
+						yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
+						return C_COMMENT;
+					}
 					else
 						(yyextra->xcdepth)--;
 				}
@@ -513,6 +526,7 @@ other			.
 					{
 						/* If NCHAR isn't a keyword, just return "n" */
 						yylval->str = pstrdup("n");
+						yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 						return IDENT;
 					}
 				}
@@ -581,9 +595,11 @@ other			.
 					{
 						case xb:
 							yylval->str = litbufdup(yyscanner);
+							yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 							return BCONST;
 						case xh:
 							yylval->str = litbufdup(yyscanner);
+							yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 							return XCONST;
 						case xq:
 						case xe:
@@ -596,9 +612,11 @@ other			.
 											   yyextra->literallen,
 											   false);
 							yylval->str = litbufdup(yyscanner);
+							yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 							return SCONST;
 						case xus:
 							yylval->str = litbufdup(yyscanner);
+							yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 							return USCONST;
 						default:
 							yyerror("unhandled previous state in xqs");
@@ -736,6 +754,7 @@ other			.
 						yyextra->dolqstart = NULL;
 						BEGIN(INITIAL);
 						yylval->str = litbufdup(yyscanner);
+						yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 						return SCONST;
 					}
 					else
@@ -781,6 +800,7 @@ other			.
 					if (yyextra->literallen >= NAMEDATALEN)
 						truncate_identifier(ident, yyextra->literallen, true);
 					yylval->str = ident;
+					yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 					return IDENT;
 				}
 <xui>{dquote}	{
@@ -789,6 +809,7 @@ other			.
 						yyerror("zero-length delimited identifier");
 					/* can't truncate till after we de-escape the ident */
 					yylval->str = litbufdup(yyscanner);
+					yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 					return UIDENT;
 				}
 <xd,xui>{xddouble}	{
@@ -808,7 +829,13 @@ other			.
 					/* and treat it as {identifier} */
 					ident = downcase_truncate_identifier(yytext, yyleng, true);
 					yylval->str = ident;
+					yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 					return IDENT;
+				}
+
+{xe_normalized} {
+					/* ignore E */
+					return yytext[1];
 				}
 
 {typecast}		{
@@ -917,6 +944,26 @@ other			.
 						}
 					}
 
+					/* We don't accept leading ? in any multi-character operators
+					 * except for those in use by hstore, JSON and geometric operators.
+					 *
+					 * We don't accept contained or trailing ? in any
+					 * multi-character operators, except for those in use by JSON operators.
+					 *
+					 * This is necessary in order to support normalized queries without
+					 * spacing between ? as a substition character and a simple operator (e.g. "?=?")
+					 */
+					if (yytext[0] == '?' &&
+					  strcmp(yytext, "?|") != 0 && strcmp(yytext, "?&") != 0 &&
+					  strcmp(yytext, "?#") != 0 && strcmp(yytext, "?-") != 0 &&
+					  strcmp(yytext, "?-|") != 0 && strcmp(yytext, "?||") != 0)
+						nchars = 1;
+
+					if (yytext[0] != '?' && strchr(yytext, '?') &&
+					  strcmp(yytext, "@?") != 0)
+						/* Lex up to just before the ? character */
+						nchars = strchr(yytext, '?') - yytext;
+
 					SET_YYLLOC();
 
 					if (nchars < yyleng)
@@ -930,7 +977,7 @@ other			.
 						 * that the "self" rule would have.
 						 */
 						if (nchars == 1 &&
-							strchr(",()[].;:+-*/%^<>=", yytext[0]))
+							strchr(",()[].;:+-*/%^<>=?", yytext[0]))
 							return yytext[0];
 						/*
 						 * Likewise, if what we have left is two chars, and
@@ -1012,14 +1059,19 @@ other			.
 {identifier}	{
 					int			kwnum;
 					char	   *ident;
+					char *keyword_text = pstrdup(yytext);
 
 					SET_YYLLOC();
 
 					/* Is it a keyword? */
-					kwnum = ScanKeywordLookup(yytext,
+					if (yytext[yyleng - 1] == '?')
+					  keyword_text[yyleng - 1] = '\0';
+					kwnum = ScanKeywordLookup(keyword_text,
 											  yyextra->keywordlist);
 					if (kwnum >= 0)
 					{
+						if (keyword_text[yyleng - 1] == '\0')
+						  yyless(yyleng - 1);
 						yylval->keyword = GetScanKeyword(kwnum,
 														 yyextra->keywordlist);
 						return yyextra->keyword_tokens[kwnum];
@@ -1031,6 +1083,7 @@ other			.
 					 */
 					ident = downcase_truncate_identifier(yytext, yyleng, true);
 					yylval->str = ident;
+					yyextra->yyllocend = yytext - yyextra->scanbuf + yyleng;
 					return IDENT;
 				}
 
