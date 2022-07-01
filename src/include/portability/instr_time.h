@@ -4,10 +4,12 @@
  *	  portable high-precision interval timing
  *
  * This file provides an abstraction layer to hide portability issues in
- * interval timing.  On Unix we use clock_gettime() if available, else
- * gettimeofday().  On Windows, gettimeofday() gives a low-precision result
- * so we must use QueryPerformanceCounter() instead.  These macros also give
- * some breathing room to use other high-precision-timing APIs.
+ * interval timing.  On Linux/x86 we use the rdtsc instruction when a TSC
+ * clocksource is also used on the host OS.  Otherwise, and on other
+ * Unix-like systems we use clock_gettime() if available, else gettimeofday().
+ * On Windows, gettimeofday() gives a low-precision result so we must use
+ * QueryPerformanceCounter() instead.  These macros also give some breathing
+ * room to use other high-precision-timing APIs.
  *
  * The basic data type is instr_time, which all callers should treat as an
  * opaque typedef.  instr_time can store either an absolute time (of
@@ -59,9 +61,14 @@
 
 #ifdef HAVE_CLOCK_GETTIME
 
-/* Use clock_gettime() */
+/* Uses rdtsc on Linux/x86 if available, otherwise clock_gettime() */
 
 #include <time.h>
+
+#if defined(__x86_64__) && defined(__linux__)
+#include <x86intrin.h>
+#include <cpuid.h>
+#endif
 
 /*
  * The best clockid to use according to the POSIX spec is CLOCK_MONOTONIC,
@@ -83,7 +90,9 @@
 #define PG_INSTR_CLOCK	CLOCK_REALTIME
 #endif
 
+/* time in cpu reference cycles (when using rdtsc), otherwise nanoseconds */
 typedef int64 instr_time;
+
 #define NS_PER_S INT64CONST(1000000000)
 #define US_PER_S INT64CONST(1000000)
 #define MS_PER_S INT64CONST(1000)
@@ -95,17 +104,37 @@ typedef int64 instr_time;
 
 #define INSTR_TIME_SET_ZERO(t)	((t) = 0)
 
-static inline instr_time pg_clock_gettime_ns(void)
+extern double cycles_to_sec;
+
+bool use_rdtsc;
+
+#if defined(__x86_64__) && defined(__linux__)
+extern void pg_clock_gettime_initialize_rdtsc(void);
+#endif
+
+static inline instr_time pg_clock_gettime_ref_cycles(void)
 {
 	struct timespec tmp;
+
+#if defined(__x86_64__) && defined(__linux__)
+	if (use_rdtsc)
+		return __rdtsc();
+#endif
 
 	clock_gettime(PG_INSTR_CLOCK, &tmp);
 
 	return tmp.tv_sec * NS_PER_S + tmp.tv_nsec;
 }
 
+#if defined(__x86_64__) && defined(__linux__)
+#define INSTR_TIME_INITIALIZE() \
+	pg_clock_gettime_initialize_rdtsc()
+#else
+#define INSTR_TIME_INITIALIZE()
+#endif
+
 #define INSTR_TIME_SET_CURRENT(t) \
-	(t) = pg_clock_gettime_ns()
+	(t) = pg_clock_gettime_ref_cycles()
 
 #define INSTR_TIME_ADD(x,y) \
 	do { \
@@ -123,13 +152,13 @@ static inline instr_time pg_clock_gettime_ns(void)
 	} while (0)
 
 #define INSTR_TIME_GET_DOUBLE(t) \
-	((double) (t) / NS_PER_S)
+	((double) (t) * cycles_to_sec)
 
 #define INSTR_TIME_GET_MILLISEC(t) \
-	((double) (t) / NS_PER_MS)
+	((double) (t) * (cycles_to_sec * MS_PER_S))
 
 #define INSTR_TIME_GET_MICROSEC(t) \
-	((double) (t) / NS_PER_US)
+	((uint64) (t) * (cycles_to_sec * US_PER_S))
 
 #else							/* !HAVE_CLOCK_GETTIME */
 
@@ -142,6 +171,8 @@ typedef struct timeval instr_time;
 #define INSTR_TIME_IS_ZERO(t)	((t).tv_usec == 0 && (t).tv_sec == 0)
 
 #define INSTR_TIME_SET_ZERO(t)	((t).tv_sec = 0, (t).tv_usec = 0)
+
+#define INSTR_TIME_INITIALIZE()
 
 #define INSTR_TIME_SET_CURRENT(t)	gettimeofday(&(t), NULL)
 
@@ -206,6 +237,8 @@ typedef LARGE_INTEGER instr_time;
 #define INSTR_TIME_IS_ZERO(t)	((t).QuadPart == 0)
 
 #define INSTR_TIME_SET_ZERO(t)	((t).QuadPart = 0)
+
+#define INSTR_TIME_INITIALIZE()
 
 #define INSTR_TIME_SET_CURRENT(t)	QueryPerformanceCounter(&(t))
 

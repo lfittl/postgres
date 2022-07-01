@@ -735,6 +735,9 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	/* Initialize portal manager */
 	EnablePortalManager();
 
+	/* initialize high-precision interval timing */
+	INSTR_TIME_INITIALIZE();
+
 	/* Initialize status reporting */
 	pgstat_beinit();
 
