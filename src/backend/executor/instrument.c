@@ -61,6 +61,14 @@ StartSamplingTimeout(int sample_rate_hz, bool disable_old_timeout)
 	enable_timeout_every(INSTRUMENT_SAMPLING_TIMEOUT, fin_time, timeout_delay_ms);
 }
 
+/*
+ * Start sampling timing information with the given rate (or higher)
+ *
+ * Note this may be called multiple times in a nested manner, for example when
+ * a query calls a function which calls a query. Further, it is possible for
+ * different statement nesting levels to have different sampling rates. In such
+ * cases we pick the highest sampling rate of all currently in effect.
+ */
 void
 InstrStartSampling(int sample_rate_hz)
 {
@@ -90,6 +98,13 @@ InstrStartSampling(int sample_rate_hz)
 	MemoryContextSwitchTo(old_ctx);
 }
 
+/*
+ * Stop sampling timing information at the current rate
+ *
+ * When called in a nested manner this will go back to the lower sampling rate
+ * (if applicable), if this is the highest nesting level it will stop sampling
+ * timing altogether.
+ */
 void
 InstrStopSampling()
 {
