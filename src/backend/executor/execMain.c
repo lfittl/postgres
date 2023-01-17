@@ -251,6 +251,7 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	estate->es_crosscheck_snapshot = RegisterSnapshot(queryDesc->crosscheck_snapshot);
 	estate->es_top_eflags = eflags;
 	estate->es_instrument = queryDesc->instrument_options;
+	estate->es_sample_freq_hz = queryDesc->sample_freq_hz;
 	estate->es_jit_flags = queryDesc->plannedstmt->jitFlags;
 
 	/*
@@ -2835,6 +2836,7 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	/* es_trig_target_relations must NOT be copied */
 	rcestate->es_top_eflags = parentestate->es_top_eflags;
 	rcestate->es_instrument = parentestate->es_instrument;
+	rcestate->es_sample_freq_hz = parentestate->es_sample_freq_hz;
 	/* es_auxmodifytables must NOT be copied */
 
 	/*

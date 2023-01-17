@@ -78,6 +78,7 @@ typedef struct FixedParallelExecutorState
 	dsa_pointer param_exec;
 	int			eflags;
 	int			jit_flags;
+	int			sample_freq_hz;	/* frequency of sampling mode for EXPLAIN ANALYZE timings, if enabled */
 } FixedParallelExecutorState;
 
 /*
@@ -740,6 +741,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	fpes->param_exec = InvalidDsaPointer;
 	fpes->eflags = estate->es_top_eflags;
 	fpes->jit_flags = estate->es_jit_flags;
+	fpes->sample_freq_hz = estate->es_sample_freq_hz;
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_EXECUTOR_FIXED, fpes);
 
 	/* Store query string */
@@ -1446,7 +1448,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	if (instrument_options & INSTRUMENT_TIMER_SAMPLING)
 	{
 		queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
-		queryDesc->sample_freq_hz = 1000; // TODO: Pass the correct value here
+		queryDesc->sample_freq_hz = fpes->sample_freq_hz;
 	}
 
 	/* Setting debug_query_string for individual workers */
