@@ -1022,6 +1022,9 @@ static void
 register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 {
 	FileTag		tag;
+	int			ret;
+	instr_time	io_start,
+				io_time;
 
 	INIT_MD_FILETAG(tag, reln->smgr_rlocator.locator, forknum, seg->mdfd_segno);
 
@@ -1030,6 +1033,16 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 
 	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
 	{
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
+
+		ereport(DEBUG1,
+				(errmsg_internal("could not forward fsync request because request queue is full")));
+
+		ret = FileSync(seg->mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC);
+
 		/*
 		 * We have no way of knowing if the current IOContext is
 		 * IOCONTEXT_NORMAL or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
@@ -1043,10 +1056,14 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 		 */
 		pgstat_count_io_op(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
 
-		ereport(DEBUG1,
-				(errmsg_internal("could not forward fsync request because request queue is full")));
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC_TIME, INSTR_TIME_GET_MICROSEC(io_time));
+		}
 
-		if (FileSync(seg->mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC) < 0)
+		if (ret < 0)
 			ereport(data_sync_elevel(ERROR),
 					(errcode_for_file_access(),
 					 errmsg("could not fsync file \"%s\": %m",
@@ -1403,6 +1420,8 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 	bool		need_to_close;
 	int			result,
 				save_errno;
+	instr_time	io_start,
+				io_time;
 
 	/* See if we already have the file open, or need to open it. */
 	if (ftag->segno < reln->md_num_open_segs[ftag->forknum])
@@ -1425,6 +1444,11 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		need_to_close = true;
 	}
 
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+	else
+		INSTR_TIME_SET_ZERO(io_start);
+
 	/* Sync the file. */
 	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
 	save_errno = errno;
@@ -1433,6 +1457,13 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		FileClose(file);
 
 	pgstat_count_io_op(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC);
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL, IOOP_FSYNC_TIME, INSTR_TIME_GET_MICROSEC(io_time));
+	}
 
 	errno = save_errno;
 	return result;

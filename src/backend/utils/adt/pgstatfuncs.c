@@ -1261,6 +1261,10 @@ typedef enum io_stat_col
 	IO_COL_EVICTIONS,
 	IO_COL_REUSES,
 	IO_COL_FSYNCS,
+	IO_COL_READ_TIME,
+	IO_COL_WRITE_TIME,
+	IO_COL_EXTEND_TIME,
+	IO_COL_FSYNC_TIME,
 	IO_COL_RESET_TIME,
 	IO_NUM_COLUMNS,
 } io_stat_col;
@@ -1289,6 +1293,29 @@ pgstat_get_io_op_index(IOOp io_op)
 	}
 
 	elog(ERROR, "unrecognized IOOp value: %d", io_op);
+	pg_unreachable();
+}
+
+/*
+ * When adding a new IOOpTime, add a new io_stat_col and add a case to this
+ * function returning the corresponding io_stat_col.
+ */
+static io_stat_col
+pgstat_get_io_op_time_index(IOOpTime io_op_time)
+{
+	switch (io_op_time)
+	{
+		case IOOP_READ_TIME:
+			return IO_COL_READ_TIME;
+		case IOOP_WRITE_TIME:
+			return IO_COL_WRITE_TIME;
+		case IOOP_EXTEND_TIME:
+			return IO_COL_EXTEND_TIME;
+		case IOOP_FSYNC_TIME:
+			return IO_COL_FSYNC_TIME;
+	}
+
+	elog(ERROR, "unrecognized IOOpTime value: %d", io_op_time);
 	pg_unreachable();
 }
 
@@ -1375,6 +1402,20 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 					values[col_idx] =
 						Int64GetDatum(bktype_stats->data[io_obj][io_context][io_op]);
+				}
+
+				for (IOOpTime io_op_time = IOOP_TIME_FIRST; io_op_time < IOOP_TIME_NUM_TYPES; io_op_time++)
+				{
+					int			col_idx = pgstat_get_io_op_time_index(io_op_time);
+
+					nulls[col_idx] = !pgstat_tracks_io_op_time(bktype, io_obj, io_context, io_op_time);
+
+					if (nulls[col_idx])
+						continue;
+
+					/* Convert timings from microsec to millisec for display */
+					values[col_idx] =
+						Float8GetDatum(((double) bktype_stats->timings[io_obj][io_context][io_op_time]) / 1000.0);
 				}
 
 				tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,

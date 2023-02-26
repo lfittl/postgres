@@ -1129,6 +1129,10 @@ SELECT
        b.evictions,
        b.reuses,
        b.fsyncs,
+       b.read_time,
+       b.write_time,
+       b.extend_time,
+       b.fsync_time,
        b.stats_reset
 FROM pg_stat_get_io() b;
 

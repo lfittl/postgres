@@ -314,9 +314,21 @@ typedef enum IOOp
 #define IOOP_FIRST IOOP_EVICT
 #define IOOP_NUM_TYPES (IOOP_WRITE + 1)
 
+typedef enum IOOpTime
+{
+	IOOP_EXTEND_TIME,
+	IOOP_FSYNC_TIME,
+	IOOP_READ_TIME,
+	IOOP_WRITE_TIME,
+} IOOpTime;
+
+#define IOOP_TIME_FIRST IOOP_EXTEND_TIME
+#define IOOP_TIME_NUM_TYPES (IOOP_WRITE_TIME + 1)
+
 typedef struct PgStat_BktypeIO
 {
 	PgStat_Counter data[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	PgStat_Counter timings[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_TIME_NUM_TYPES];
 } PgStat_BktypeIO;
 
 typedef struct PgStat_IO
@@ -510,6 +522,7 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *context_ops,
 										 BackendType bktype);
 extern void pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op);
+extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOpTime io_op_time, int64 time_us);
 extern PgStat_IO *pgstat_fetch_stat_io(void);
 extern const char *pgstat_get_io_context_name(IOContext io_context);
 extern const char *pgstat_get_io_object_name(IOObject io_object);
@@ -519,6 +532,8 @@ extern bool pgstat_tracks_io_object(BackendType bktype,
 									IOObject io_object, IOContext io_context);
 extern bool pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 								IOContext io_context, IOOp io_op);
+extern bool pgstat_tracks_io_op_time(BackendType bktype, IOObject io_object,
+									 IOContext io_context, IOOpTime io_op_time);
 
 
 /*

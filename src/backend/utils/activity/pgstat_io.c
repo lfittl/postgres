@@ -77,6 +77,17 @@ pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op)
 	have_iostats = true;
 }
 
+void
+pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOpTime io_op_time, int64 time_us)
+{
+	Assert(io_object < IOOBJECT_NUM_TYPES);
+	Assert(io_context < IOCONTEXT_NUM_TYPES);
+	Assert(io_op_time < IOOP_TIME_NUM_TYPES);
+	Assert(pgstat_tracks_io_op_time(MyBackendType, io_object, io_context, io_op_time));
+
+	PendingIOStats.timings[io_object][io_context][io_op_time] += time_us;
+}
+
 PgStat_IO *
 pgstat_fetch_stat_io(void)
 {
@@ -119,8 +130,16 @@ pgstat_flush_io(bool nowait)
 		{
 			for (IOOp io_op = IOOP_FIRST;
 				 io_op < IOOP_NUM_TYPES; io_op++)
+			{
 				bktype_shstats->data[io_object][io_context][io_op] +=
 					PendingIOStats.data[io_object][io_context][io_op];
+			}
+			for (IOOpTime io_op_time = IOOP_TIME_FIRST;
+				 io_op_time < IOOP_TIME_NUM_TYPES; io_op_time++)
+			{
+				bktype_shstats->timings[io_object][io_context][io_op_time] +=
+					PendingIOStats.timings[io_object][io_context][io_op_time];
+			}
 		}
 	}
 
@@ -388,4 +407,23 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	return true;
+}
+
+bool
+pgstat_tracks_io_op_time(BackendType bktype, IOObject io_object,
+						   IOContext io_context, IOOpTime io_op_time)
+{
+	switch (io_op_time)
+	{
+		case IOOP_EXTEND_TIME:
+			return pgstat_tracks_io_op(bktype, io_object, io_context, IOOP_EXTEND);
+		case IOOP_FSYNC_TIME:
+			return pgstat_tracks_io_op(bktype, io_object, io_context, IOOP_FSYNC);
+		case IOOP_READ_TIME:
+			return pgstat_tracks_io_op(bktype, io_object, io_context, IOOP_READ);
+		case IOOP_WRITE_TIME:
+			return pgstat_tracks_io_op(bktype, io_object, io_context, IOOP_WRITE);
+		default:
+			return false;
+	}
 }
