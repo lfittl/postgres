@@ -3167,6 +3167,8 @@ show_memoize_info(MemoizeState *mstate, List *ancestors, ExplainState *es)
 	{
 		ExplainPropertyText("Cache Key", keystr.data, es);
 		ExplainPropertyText("Cache Mode", mstate->binary_mode ? "binary" : "logical", es);
+		if (es->costs)
+			ExplainPropertyFloat("Cache Hit Ratio Estimated", "", ((Memoize *) plan)->hit_ratio, 2, es);
 	}
 	else
 	{
@@ -3174,6 +3176,11 @@ show_memoize_info(MemoizeState *mstate, List *ancestors, ExplainState *es)
 		appendStringInfo(es->str, "Cache Key: %s\n", keystr.data);
 		ExplainIndentText(es);
 		appendStringInfo(es->str, "Cache Mode: %s\n", mstate->binary_mode ? "binary" : "logical");
+		if (es->costs)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "Cache Hit Ratio Estimated: %0.2f\n", ((Memoize *) plan)->hit_ratio);
+		}
 	}
 
 	pfree(keystr.data);
