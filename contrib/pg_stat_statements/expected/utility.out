@@ -560,3 +560,32 @@ SELECT pg_stat_statements_reset();
  
 (1 row)
 
+-- CREATE/ALTER/DROP SUBSCRIPTION statements.
+CREATE SUBSCRIPTION mysub
+         CONNECTION 'host=192.168.1.50 port=5432 user=foo password=secret dbname=foodb'
+        PUBLICATION mypublication, insert_only
+               WITH (connect = FALSE);
+WARNING:  subscription was created, but is not connected
+HINT:  To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.
+ALTER SUBSCRIPTION mysub CONNECTION 'host=192.168.1.42 port=5432 user=foo password=moresecret dbname=foodb';
+ALTER SUBSCRIPTION mysub SET (slot_name = NONE);
+DROP SUBSCRIPTION mysub;
+SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+ calls | rows |                                                    query                                                    
+-------+------+-------------------------------------------------------------------------------------------------------------
+     1 |    0 | ALTER SUBSCRIPTION mysub CONNECTION 'host=192.168.1.42 port=5432 user=foo password=moresecret dbname=foodb'
+     1 |    0 | ALTER SUBSCRIPTION mysub SET (slot_name = NONE)
+     1 |    0 | CREATE SUBSCRIPTION mysub                                                                                  +
+       |      |          CONNECTION 'host=192.168.1.50 port=5432 user=foo password=secret dbname=foodb'                    +
+       |      |         PUBLICATION mypublication, insert_only                                                             +
+       |      |                WITH (connect = FALSE)
+     1 |    0 | DROP SUBSCRIPTION mysub
+     1 |    1 | SELECT pg_stat_statements_reset()
+(5 rows)
+
+SELECT pg_stat_statements_reset();
+ pg_stat_statements_reset 
+--------------------------
+ 
+(1 row)
+
