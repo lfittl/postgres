@@ -824,13 +824,13 @@ vacuum_open_relation(Oid relid, RangeVar *relation, bits32 options,
 		if (!rel_lock)
 			ereport(elevel,
 					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
-					 errmsg("skipping vacuum of \"%s\" --- lock not available",
-							relation->relname)));
+					 errmsg("skipping vacuum of \"%s.%s.%s\" --- lock not available",
+							relation->catalogname, relation->schemaname, relation->relname)));
 		else
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("skipping vacuum of \"%s\" --- relation no longer exists",
-							relation->relname)));
+					 errmsg("skipping vacuum of \"%s.%s.%s\" --- relation no longer exists",
+							relation->catalogname, relation->schemaname, relation->relname)));
 
 		/*
 		 * For VACUUM ANALYZE, both logs could show up, but just generate
@@ -845,13 +845,13 @@ vacuum_open_relation(Oid relid, RangeVar *relation, bits32 options,
 		if (!rel_lock)
 			ereport(elevel,
 					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
-					 errmsg("skipping analyze of \"%s\" --- lock not available",
-							relation->relname)));
+					 errmsg("skipping analyze of \"%s.%s.%s\" --- lock not available",
+							relation->catalogname, relation->schemaname, relation->relname)));
 		else
 			ereport(elevel,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("skipping analyze of \"%s\" --- relation no longer exists",
-							relation->relname)));
+					 errmsg("skipping analyze of \"%s.%s.%s\" --- relation no longer exists",
+							relation->catalogname, relation->schemaname, relation->relname)));
 	}
 
 	return NULL;
