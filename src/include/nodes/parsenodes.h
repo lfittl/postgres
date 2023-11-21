@@ -4014,6 +4014,7 @@ typedef struct CreateSubscriptionStmt
 	NodeTag		type;
 	char	   *subname;		/* Name of the subscription */
 	char	   *conninfo;		/* Connection string to publisher */
+	int			conninfo_location pg_node_attr(query_jumble_location); /* location of connection string, or -1 if unknown */
 	List	   *publication;	/* One or more publication to subscribe to */
 	List	   *options;		/* List of DefElem nodes */
 } CreateSubscriptionStmt;
@@ -4036,6 +4037,7 @@ typedef struct AlterSubscriptionStmt
 	AlterSubscriptionType kind; /* ALTER_SUBSCRIPTION_OPTIONS, etc */
 	char	   *subname;		/* Name of the subscription */
 	char	   *conninfo;		/* Connection string to publisher */
+	int			conninfo_location pg_node_attr(query_jumble_location); /* location of connection string, or -1 if unknown */
 	List	   *publication;	/* One or more publication to subscribe to */
 	List	   *options;		/* List of DefElem nodes */
 } AlterSubscriptionStmt;

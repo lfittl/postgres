@@ -277,3 +277,15 @@ RESET enable_seqscan;
 
 SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
 SELECT pg_stat_statements_reset();
+
+-- CREATE/ALTER/DROP SUBSCRIPTION statements.
+CREATE SUBSCRIPTION mysub
+         CONNECTION 'host=192.168.1.50 port=5432 user=foo password=secret dbname=foodb'
+        PUBLICATION mypublication, insert_only
+               WITH (connect = FALSE);
+ALTER SUBSCRIPTION mysub CONNECTION 'host=192.168.1.42 port=5432 user=foo password=moresecret dbname=foodb';
+ALTER SUBSCRIPTION mysub SET (slot_name = NONE);
+DROP SUBSCRIPTION mysub;
+
+SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+SELECT pg_stat_statements_reset();

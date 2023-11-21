@@ -10569,6 +10569,7 @@ CreateSubscriptionStmt:
 						makeNode(CreateSubscriptionStmt);
 					n->subname = $3;
 					n->conninfo = $5;
+					n->conninfo_location = @5;
 					n->publication = $7;
 					n->options = $8;
 					$$ = (Node *) n;
@@ -10589,6 +10590,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_OPTIONS;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->options = $5;
 					$$ = (Node *) n;
 				}
@@ -10600,6 +10602,7 @@ AlterSubscriptionStmt:
 					n->kind = ALTER_SUBSCRIPTION_CONNECTION;
 					n->subname = $3;
 					n->conninfo = $5;
+					n->conninfo_location = @5;
 					$$ = (Node *) n;
 				}
 			| ALTER SUBSCRIPTION name REFRESH PUBLICATION opt_definition
@@ -10609,6 +10612,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_REFRESH;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->options = $6;
 					$$ = (Node *) n;
 				}
@@ -10619,6 +10623,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_ADD_PUBLICATION;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->publication = $6;
 					n->options = $7;
 					$$ = (Node *) n;
@@ -10630,6 +10635,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_DROP_PUBLICATION;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->publication = $6;
 					n->options = $7;
 					$$ = (Node *) n;
@@ -10641,6 +10647,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_SET_PUBLICATION;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->publication = $6;
 					n->options = $7;
 					$$ = (Node *) n;
@@ -10652,6 +10659,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_ENABLED;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->options = list_make1(makeDefElem("enabled",
 											(Node *) makeBoolean(true), @1));
 					$$ = (Node *) n;
@@ -10663,6 +10671,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_ENABLED;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->options = list_make1(makeDefElem("enabled",
 											(Node *) makeBoolean(false), @1));
 					$$ = (Node *) n;
@@ -10674,6 +10683,7 @@ AlterSubscriptionStmt:
 
 					n->kind = ALTER_SUBSCRIPTION_SKIP;
 					n->subname = $3;
+					n->conninfo_location = -1;
 					n->options = $5;
 					$$ = (Node *) n;
 				}
