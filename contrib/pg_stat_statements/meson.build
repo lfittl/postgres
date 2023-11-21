@@ -23,6 +23,7 @@ install_data(
   'pg_stat_statements--1.4.sql',
   'pg_stat_statements--1.11--1.12.sql',
   'pg_stat_statements--1.10--1.11.sql',
+  'pg_stat_statements--1.12--1.13.sql',
   'pg_stat_statements--1.9--1.10.sql',
   'pg_stat_statements--1.8--1.9.sql',
   'pg_stat_statements--1.7--1.8.sql',

@@ -63,4 +63,8 @@ AlTER EXTENSION pg_stat_statements UPDATE TO '1.12';
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 
+-- New functions and views for pg_stat_statements_info in 1.13
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.13';
+SELECT pg_get_functiondef('pg_stat_statements_info'::regproc);
+
 DROP EXTENSION pg_stat_statements;
