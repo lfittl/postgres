@@ -58,7 +58,7 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_deform_count int8,
     OUT jit_deform_time float8,
     OUT stats_since timestamp with time zone,
-    OUT minmax_stats_since timestamp with time zone
+    OUT time_distribution_stats_since timestamp with time zone
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11'
@@ -72,7 +72,7 @@ GRANT SELECT ON pg_stat_statements TO PUBLIC;
 CREATE FUNCTION pg_stat_statements_reset(IN userid Oid DEFAULT 0,
 	IN dbid Oid DEFAULT 0,
 	IN queryid bigint DEFAULT 0,
-	IN minmax_only boolean DEFAULT false
+	IN time_distribution_only boolean DEFAULT false
 )
 RETURNS timestamp with time zone
 AS 'MODULE_PATHNAME', 'pg_stat_statements_reset_1_11'

@@ -229,7 +229,7 @@ typedef struct pgssEntry
 	int			query_len;		/* # of valid bytes in query string, or -1 */
 	int			encoding;		/* query text encoding */
 	TimestampTz stats_since;	/* timestamp of entry allocation */
-	TimestampTz minmax_stats_since; /* timestamp of last min/max values reset */
+	TimestampTz time_dist_stats_since; /* timestamp of last reset of time distribution stats (min/max/mean/stddev) */
 	slock_t		mutex;			/* protects the counters only */
 } pgssEntry;
 
@@ -362,7 +362,7 @@ static char *qtext_fetch(Size query_offset, int query_len,
 						 char *buffer, Size buffer_size);
 static bool need_gc_qtexts(void);
 static void gc_qtexts(void);
-static TimestampTz entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only);
+static TimestampTz entry_reset(Oid userid, Oid dbid, uint64 queryid, bool time_distribution_only);
 static char *generate_normalized_query(JumbleState *jstate, const char *query,
 									   int query_loc, int *query_len_p);
 static void fill_in_constant_lengths(JumbleState *jstate, const char *query,
@@ -658,7 +658,7 @@ pgss_shmem_startup(void)
 		/* copy in the actual stats */
 		entry->counters = temp.counters;
 		entry->stats_since = temp.stats_since;
-		entry->minmax_stats_since = temp.minmax_stats_since;
+		entry->time_dist_stats_since = temp.time_dist_stats_since;
 	}
 
 	/* Read global statistics for pg_stat_statements */
@@ -1518,14 +1518,14 @@ pg_stat_statements_reset_1_11(PG_FUNCTION_ARGS)
 	Oid			userid;
 	Oid			dbid;
 	uint64		queryid;
-	bool		minmax_only;
+	bool		time_distribution_only;
 
 	userid = PG_GETARG_OID(0);
 	dbid = PG_GETARG_OID(1);
 	queryid = (uint64) PG_GETARG_INT64(2);
-	minmax_only = PG_GETARG_BOOL(3);
+	time_distribution_only = PG_GETARG_BOOL(3);
 
-	PG_RETURN_TIMESTAMPTZ(entry_reset(userid, dbid, queryid, minmax_only));
+	PG_RETURN_TIMESTAMPTZ(entry_reset(userid, dbid, queryid, time_distribution_only));
 }
 
 /*
@@ -1782,7 +1782,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 		double		stddev;
 		int64		queryid = entry->key.queryid;
 		TimestampTz stats_since;
-		TimestampTz minmax_stats_since;
+		TimestampTz time_dist_stats_since;
 
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
@@ -1852,7 +1852,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			SpinLockAcquire(&e->mutex);
 			tmp = e->counters;
 			stats_since = e->stats_since;
-			minmax_stats_since = e->minmax_stats_since;
+			time_dist_stats_since = e->time_dist_stats_since;
 			SpinLockRelease(&e->mutex);
 		}
 
@@ -1950,7 +1950,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			values[i++] = Int64GetDatumFast(tmp.jit_deform_count);
 			values[i++] = Float8GetDatumFast(tmp.jit_deform_time);
 			values[i++] = TimestampTzGetDatum(stats_since);
-			values[i++] = TimestampTzGetDatum(minmax_stats_since);
+			values[i++] = TimestampTzGetDatum(time_dist_stats_since);
 		}
 
 		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
@@ -2070,7 +2070,7 @@ entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding,
 		entry->query_len = query_len;
 		entry->encoding = encoding;
 		entry->stats_since = GetCurrentTimestamp();
-		entry->minmax_stats_since = entry->stats_since;
+		entry->time_dist_stats_since = entry->stats_since;
 	}
 
 	return entry;
@@ -2636,14 +2636,16 @@ gc_fail:
 
 #define SINGLE_ENTRY_RESET(e) \
 if (e) { \
-	if (minmax_only) { \
+	if (time_dist_only) { \
 		/* When requested reset only min/max statistics of an entry */ \
 		for (int kind = 0; kind < PGSS_NUMKIND; kind++) \
 		{ \
-			e->counters.max_time[kind] = 0; \
 			e->counters.min_time[kind] = 0; \
+			e->counters.max_time[kind] = 0; \
+			e->counters.mean_time[kind] = 0; \
+			e->counters.sum_var_time[kind] = 0; \
 		} \
-		e->minmax_stats_since = stats_reset; \
+		e->time_dist_stats_since = stats_reset; \
 	} \
 	else \
 	{ \
@@ -2657,7 +2659,7 @@ if (e) { \
  * Reset entries corresponding to parameters passed.
  */
 static TimestampTz
-entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only)
+entry_reset(Oid userid, Oid dbid, uint64 queryid, bool time_dist_only)
 {
 	HASH_SEQ_STATUS hash_seq;
 	pgssEntry  *entry;
