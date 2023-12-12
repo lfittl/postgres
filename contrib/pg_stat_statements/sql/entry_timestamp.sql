@@ -18,13 +18,19 @@ SELECT
   count(*) as total,
   count(*) FILTER (
     WHERE min_plan_time + max_plan_time = 0
-  ) as minmax_plan_zero,
+  ) as time_distribution_plan_zero,
   count(*) FILTER (
     WHERE min_exec_time + max_exec_time = 0
-  ) as minmax_exec_zero,
+  ) as time_distribution_exec_zero,
   count(*) FILTER (
-    WHERE minmax_stats_since >= :'ref_ts'
-  ) as minmax_stats_since_after_ref,
+    WHERE mean_exec_time + mean_exec_time = 0
+  ) as time_distribution_mean_zero,
+  count(*) FILTER (
+    WHERE stddev_exec_time + stddev_exec_time = 0
+  ) as time_distribution_stddev_zero,
+  count(*) FILTER (
+    WHERE time_distribution_stats_since >= :'ref_ts'
+  ) as time_distribution_stats_since_after_ref,
   count(*) FILTER (
     WHERE stats_since >= :'ref_ts'
   ) as stats_since_after_ref
@@ -32,7 +38,7 @@ FROM pg_stat_statements
 WHERE query LIKE '%STMTTS%';
 
 -- Perform single min/max reset
-SELECT pg_stat_statements_reset(0, 0, queryid, true) AS minmax_reset_ts
+SELECT pg_stat_statements_reset(0, 0, queryid, true) AS time_distribution_reset_ts
 FROM pg_stat_statements
 WHERE query LIKE '%STMTTS1%' \gset
 
@@ -41,49 +47,61 @@ SELECT
   count(*) as total,
   count(*) FILTER (
     WHERE min_plan_time + max_plan_time = 0
-  ) as minmax_plan_zero,
+  ) as time_distribution_plan_zero,
   count(*) FILTER (
     WHERE min_exec_time + max_exec_time = 0
-  ) as minmax_exec_zero,
+  ) as time_distribution_exec_zero,
   count(*) FILTER (
-    WHERE minmax_stats_since >= :'ref_ts'
-  ) as minmax_stats_since_after_ref,
+    WHERE mean_exec_time + mean_exec_time = 0
+  ) as time_distribution_mean_zero,
+  count(*) FILTER (
+    WHERE stddev_exec_time + stddev_exec_time = 0
+  ) as time_distribution_stddev_zero,
+  count(*) FILTER (
+    WHERE time_distribution_stats_since >= :'ref_ts'
+  ) as time_distribution_stats_since_after_ref,
   count(*) FILTER (
     WHERE stats_since >= :'ref_ts'
   ) as stats_since_after_ref
 FROM pg_stat_statements
 WHERE query LIKE '%STMTTS%';
 
--- check minmax reset timestamps
+-- check time_distribution reset timestamps
 SELECT
-query, minmax_stats_since = :'minmax_reset_ts' AS reset_ts_match
+query, time_distribution_stats_since = :'time_distribution_reset_ts' AS reset_ts_match
 FROM pg_stat_statements
 WHERE query LIKE '%STMTTS%'
 ORDER BY query COLLATE "C";
 
--- check that minmax reset does not set stats_reset
+-- check that time_distribution reset does not set stats_reset
 SELECT
-stats_reset = :'minmax_reset_ts' AS stats_reset_ts_match
+stats_reset = :'time_distribution_reset_ts' AS stats_reset_ts_match
 FROM pg_stat_statements_info;
 
 -- Perform common min/max reset
-SELECT pg_stat_statements_reset(0, 0, 0, true) AS minmax_reset_ts \gset
+SELECT pg_stat_statements_reset(0, 0, 0, true) AS time_distribution_reset_ts \gset
 
 -- check again
 SELECT
   count(*) as total,
   count(*) FILTER (
     WHERE min_plan_time + max_plan_time = 0
-  ) as minmax_plan_zero,
+  ) as time_distribution_plan_zero,
   count(*) FILTER (
     WHERE min_exec_time + max_exec_time = 0
-  ) as minmax_exec_zero,
+  ) as time_distribution_exec_zero,
   count(*) FILTER (
-    WHERE minmax_stats_since >= :'ref_ts'
-  ) as minmax_ts_after_ref,
+    WHERE mean_exec_time + mean_exec_time = 0
+  ) as time_distribution_mean_zero,
   count(*) FILTER (
-    WHERE minmax_stats_since = :'minmax_reset_ts'
-  ) as minmax_ts_match,
+    WHERE stddev_exec_time + stddev_exec_time = 0
+  ) as time_distribution_stddev_zero,
+  count(*) FILTER (
+    WHERE time_distribution_stats_since >= :'ref_ts'
+  ) as time_distribution_ts_after_ref,
+  count(*) FILTER (
+    WHERE time_distribution_stats_since = :'time_distribution_reset_ts'
+  ) as time_distribution_ts_match,
   count(*) FILTER (
     WHERE stats_since >= :'ref_ts'
   ) as stats_since_after_ref
@@ -100,10 +118,16 @@ SELECT
   count(*) as total,
   count(*) FILTER (
     WHERE min_exec_time + max_exec_time = 0
-  ) as minmax_exec_zero,
+  ) as time_distribution_exec_zero,
   count(*) FILTER (
-    WHERE minmax_stats_since >= :'ref_ts'
-  ) as minmax_ts_after_ref,
+    WHERE mean_exec_time + mean_exec_time = 0
+  ) as time_distribution_mean_zero,
+  count(*) FILTER (
+    WHERE stddev_exec_time + stddev_exec_time = 0
+  ) as time_distribution_stddev_zero,
+  count(*) FILTER (
+    WHERE time_distribution_stats_since >= :'ref_ts'
+  ) as time_distribution_ts_after_ref,
   count(*) FILTER (
     WHERE stats_since >= :'ref_ts'
   ) as stats_since_after_ref

@@ -144,7 +144,7 @@
        This field will be zero if <varname>pg_stat_statements.track_planning</varname>
        is disabled, or if the counter has been reset using the
        <function>pg_stat_statements_reset</function> function with the
-       <structfield>minmax_only</structfield> parameter set to <literal>true</literal>
+       <structfield>time_dist_only</structfield> parameter set to <literal>true</literal>
        and never been planned since.
       </para></entry>
      </row>
@@ -158,7 +158,7 @@
        This field will be zero if <varname>pg_stat_statements.track_planning</varname>
        is disabled, or if the counter has been reset using the
        <function>pg_stat_statements_reset</function> function with the
-       <structfield>minmax_only</structfield> parameter set to <literal>true</literal>
+       <structfield>time_dist_only</structfield> parameter set to <literal>true</literal>
        and never been planned since.
       </para></entry>
      </row>
@@ -213,7 +213,7 @@
        this field will be zero until this statement
        is executed first time after reset performed by the
        <function>pg_stat_statements_reset</function> function with the
-       <structfield>minmax_only</structfield> parameter set to <literal>true</literal>
+       <structfield>time_dist_only</structfield> parameter set to <literal>true</literal>
       </para></entry>
      </row>
 
@@ -226,7 +226,7 @@
        this field will be zero until this statement
        is executed first time after reset performed by the
        <function>pg_stat_statements_reset</function> function with the
-       <structfield>minmax_only</structfield> parameter set to <literal>true</literal>
+       <structfield>time_dist_only</structfield> parameter set to <literal>true</literal>
       </para></entry>
      </row>
 
@@ -538,7 +538,7 @@
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-       <structfield>minmax_stats_since</structfield> <type>timestamp with time zone</type>
+       <structfield>time_dist_stats_since</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
        Time at which min/max statistics gathering started for this
@@ -750,7 +750,7 @@
    <varlistentry>
     <term>
      <function>pg_stat_statements_reset(userid Oid, dbid Oid, queryid
-     bigint, minmax_only boolean) returns timestamp with time zone</function>
+     bigint, time_dist_only boolean) returns timestamp with time zone</function>
      <indexterm>
       <primary>pg_stat_statements_reset</primary>
      </indexterm>
@@ -769,18 +769,18 @@
       If all statistics in the <filename>pg_stat_statements</filename>
       view are discarded, it will also reset the statistics in the
       <structname>pg_stat_statements_info</structname> view.
-      When <structfield>minmax_only</structfield> is <literal>true</literal> only the
+      When <structfield>time_dist_only</structfield> is <literal>true</literal> only the
       values of minimun and maximum planning and execution time will be reset (i.e.
       <structfield>min_plan_time</structfield>, <structfield>max_plan_time</structfield>,
       <structfield>min_exec_time</structfield> and <structfield>max_exec_time</structfield>
-      fields). The default value for <structfield>minmax_only</structfield> parameter is
-      <literal>false</literal>. Time of last min/max reset performed is shown in
-      <structfield>minmax_stats_since</structfield> field of the
+      fields). The default value for <structfield>time_dist_only</structfield> parameter is
+      <literal>false</literal>. Time of last min/max/mean/stddev reset performed is shown in
+      <structfield>time_dist_stats_since</structfield> field of the
       <structname>pg_stat_statements</structname> view.
       This function returns the time of a reset. This time is saved to
       <structfield>stats_reset</structfield> field of
       <structname>pg_stat_statements_info</structname> view or to
-      <structfield>minmax_stats_since</structfield> field of the
+      <structfield>time_dist_stats_since</structfield> field of the
       <structname>pg_stat_statements</structname> view if the corresponding reset was
       actually performed.
       By default, this function can only be executed by superusers.
