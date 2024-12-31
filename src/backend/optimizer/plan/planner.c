@@ -37,6 +37,7 @@
 #ifdef OPTIMIZER_DEBUG
 #include "nodes/print.h"
 #endif
+#include "nodes/queryjumble.h"
 #include "nodes/supportnodes.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
@@ -532,6 +533,16 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	Assert(glob->finalrowmarks == NIL);
 	Assert(glob->resultRelations == NIL);
 	Assert(glob->appendRelations == NIL);
+
+	/*
+	 * Initialize plan identifier jumble if needed
+	 *
+	 * Note the actual jumbling is done in the tree walk in
+	 * set_plan_references
+	 */
+	if (IsPlanIdEnabled())
+		glob->plan_jumble_state = InitializeJumbleState(false, glob);
+
 	top_plan = set_plan_references(root, top_plan);
 	/* ... and the subplans (both regular subplans and initplans) */
 	Assert(list_length(glob->subplans) == list_length(glob->subroots));
@@ -569,6 +580,13 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	result->utilityStmt = parse->utilityStmt;
 	result->stmt_location = parse->stmt_location;
 	result->stmt_len = parse->stmt_len;
+
+	if (IsPlanIdEnabled())
+	{
+		result->planId = HashJumbleState(glob->plan_jumble_state);
+		pfree(glob->plan_jumble_state->jumble);
+		pfree(glob->plan_jumble_state);
+	}
 
 	result->jitFlags = PGJIT_NONE;
 	if (jit_enabled && jit_above_cost >= 0 &&

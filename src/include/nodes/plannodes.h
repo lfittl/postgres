@@ -53,6 +53,10 @@ typedef struct PlannedStmt
 
 	uint64		queryId;		/* query identifier (copied from Query) */
 
+	uint64		planId;			/* plan identifier (calculated if
+								 * compute_plan_id is enabled, can also be set
+								 * by plugins) */
+
 	bool		hasReturning;	/* is it insert|update|delete|merge RETURNING? */
 
 	bool		hasModifyingCTE;	/* has insert|update|delete|merge in WITH? */
@@ -118,44 +122,55 @@ typedef struct PlannedStmt
  */
 typedef struct Plan
 {
-	pg_node_attr(abstract, no_equal, no_query_jumble)
+	pg_node_attr(abstract, no_equal)
 
 	NodeTag		type;
 
 	/*
 	 * estimated execution costs for plan (see costsize.c for more info)
 	 */
-	int			disabled_nodes; /* count of disabled nodes */
-	Cost		startup_cost;	/* cost expended before fetching any tuples */
-	Cost		total_cost;		/* total cost (assuming all tuples fetched) */
+	int			disabled_nodes pg_node_attr(query_jumble_ignore);	/* count of disabled
+																	 * nodes */
+	Cost		startup_cost pg_node_attr(query_jumble_ignore); /* cost expended before
+																 * fetching any tuples */
+	Cost		total_cost pg_node_attr(query_jumble_ignore);	/* total cost (assuming
+																 * all tuples fetched) */
 
 	/*
 	 * planner's estimate of result size of this plan step
 	 */
-	Cardinality plan_rows;		/* number of rows plan is expected to emit */
-	int			plan_width;		/* average row width in bytes */
+	Cardinality plan_rows pg_node_attr(query_jumble_ignore);	/* number of rows plan
+																 * is expected to emit */
+	int			plan_width pg_node_attr(query_jumble_ignore);	/* average row width in
+																 * bytes */
 
 	/*
 	 * information needed for parallel query
 	 */
-	bool		parallel_aware; /* engage parallel-aware logic? */
-	bool		parallel_safe;	/* OK to use as part of parallel plan? */
+	bool		parallel_aware pg_node_attr(query_jumble_ignore);	/* engage parallel-aware
+																	 * logic? */
+	bool		parallel_safe pg_node_attr(query_jumble_ignore);	/* OK to use as part of
+																	 * parallel plan? */
 
 	/*
 	 * information needed for asynchronous execution
 	 */
-	bool		async_capable;	/* engage asynchronous-capable logic? */
+	bool		async_capable pg_node_attr(query_jumble_ignore);	/* engage
+																	 * asynchronous-capable
+																	 * logic? */
 
 	/*
 	 * Common structural data for all Plan types.
 	 */
-	int			plan_node_id;	/* unique across entire final plan tree */
+	int			plan_node_id pg_node_attr(query_jumble_ignore); /* unique across entire
+																 * final plan tree */
 	List	   *targetlist;		/* target list to be computed at this node */
 	List	   *qual;			/* implicitly-ANDed qual conditions */
-	struct Plan *lefttree;		/* input plan tree(s) */
-	struct Plan *righttree;
-	List	   *initPlan;		/* Init Plan nodes (un-correlated expr
-								 * subselects) */
+	struct Plan *lefttree pg_node_attr(query_jumble_ignore);	/* input plan tree(s) */
+	struct Plan *righttree pg_node_attr(query_jumble_ignore);
+	List	   *initPlan pg_node_attr(query_jumble_ignore); /* Init Plan nodes
+															 * (un-correlated expr
+															 * subselects) */
 
 	/*
 	 * Information for management of parameter-change-driven rescanning
@@ -168,8 +183,8 @@ typedef struct Plan
 	 * params that affect the node (i.e., the setParams of its initplans).
 	 * These are _all_ the PARAM_EXEC params that affect this node.
 	 */
-	Bitmapset  *extParam;
-	Bitmapset  *allParam;
+	Bitmapset  *extParam pg_node_attr(query_jumble_ignore);
+	Bitmapset  *allParam pg_node_attr(query_jumble_ignore);
 } Plan;
 
 /* ----------------
@@ -231,31 +246,47 @@ typedef struct ModifyTable
 {
 	Plan		plan;
 	CmdType		operation;		/* INSERT, UPDATE, DELETE, or MERGE */
-	bool		canSetTag;		/* do we set the command tag/es_processed? */
-	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
-	Index		rootRelation;	/* Root RT index, if partitioned/inherited */
+	bool		canSetTag pg_node_attr(query_jumble_ignore);	/* do we set the command
+																 * tag/es_processed? */
+	Index		nominalRelation pg_node_attr(query_jumble_ignore);	/* Parent RT index for
+																	 * use of EXPLAIN */
+	Index		rootRelation pg_node_attr(query_jumble_rt_index);	/* Root RT index, if
+																	 * partitioned/inherited */
 	bool		partColsUpdated;	/* some part key in hierarchy updated? */
-	List	   *resultRelations;	/* integer list of RT indexes */
-	List	   *updateColnosLists;	/* per-target-table update_colnos lists */
-	List	   *withCheckOptionLists;	/* per-target-table WCO lists */
-	char	   *returningOldAlias;	/* alias for OLD in RETURNING lists */
-	char	   *returningNewAlias;	/* alias for NEW in RETURNING lists */
-	List	   *returningLists; /* per-target-table RETURNING tlists */
-	List	   *fdwPrivLists;	/* per-target-table FDW private data lists */
-	Bitmapset  *fdwDirectModifyPlans;	/* indices of FDW DM plans */
-	List	   *rowMarks;		/* PlanRowMarks (non-locking only) */
-	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
+	List	   *resultRelations pg_node_attr(query_jumble_rt_index);	/* integer list of RT
+																		 * indexes */
+	List	   *updateColnosLists pg_node_attr(query_jumble_ignore);	/* per-target-table
+																		 * update_colnos lists */
+	List	   *withCheckOptionLists pg_node_attr(query_jumble_ignore); /* per-target-table WCO
+																		 * lists */
+	char	   *returningOldAlias pg_node_attr(query_jumble_ignore);	/* alias for OLD in
+																		 * RETURNING lists */
+	char	   *returningNewAlias pg_node_attr(query_jumble_ignore);	/* alias for NEW in
+																		 * RETURNING lists */
+	List	   *returningLists pg_node_attr(query_jumble_ignore);	/* per-target-table
+																	 * RETURNING tlists */
+	List	   *fdwPrivLists pg_node_attr(query_jumble_ignore); /* per-target-table FDW
+																 * private data lists */
+	Bitmapset  *fdwDirectModifyPlans pg_node_attr(query_jumble_ignore); /* indices of FDW DM
+																		 * plans */
+	List	   *rowMarks pg_node_attr(query_jumble_ignore); /* PlanRowMarks
+															 * (non-locking only) */
+	int			epqParam pg_node_attr(query_jumble_ignore); /* ID of Param for
+															 * EvalPlanQual re-eval */
 	OnConflictAction onConflictAction;	/* ON CONFLICT action */
 	List	   *arbiterIndexes; /* List of ON CONFLICT arbiter index OIDs  */
 	List	   *onConflictSet;	/* INSERT ON CONFLICT DO UPDATE targetlist */
 	List	   *onConflictCols; /* target column numbers for onConflictSet */
 	Node	   *onConflictWhere;	/* WHERE for ON CONFLICT UPDATE */
-	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
-	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
-	List	   *mergeActionLists;	/* per-target-table lists of actions for
-									 * MERGE */
-	List	   *mergeJoinConditions;	/* per-target-table join conditions
-										 * for MERGE */
+	Index		exclRelRTI pg_node_attr(query_jumble_ignore);	/* RTI of the EXCLUDED
+																 * pseudo relation */
+	List	   *exclRelTlist pg_node_attr(query_jumble_ignore); /* tlist of the EXCLUDED
+																 * pseudo relation */
+	List	   *mergeActionLists pg_node_attr(query_jumble_ignore); /* per-target-table
+																	 * lists of actions for
+																	 * MERGE */
+	List	   *mergeJoinConditions pg_node_attr(query_jumble_ignore);	/* per-target-table join
+																		 * conditions for MERGE */
 } ModifyTable;
 
 struct PartitionPruneInfo;		/* forward reference to struct below */
@@ -268,18 +299,20 @@ struct PartitionPruneInfo;		/* forward reference to struct below */
 typedef struct Append
 {
 	Plan		plan;
-	Bitmapset  *apprelids;		/* RTIs of appendrel(s) formed by this node */
-	List	   *appendplans;
-	int			nasyncplans;	/* # of asynchronous plans */
+	Bitmapset  *apprelids pg_node_attr(query_jumble_ignore);	/* RTIs of appendrel(s)
+																 * formed by this node */
+	List	   *appendplans pg_node_attr(query_jumble_ignore);
+	int			nasyncplans pg_node_attr(query_jumble_ignore);	/* # of asynchronous
+																 * plans */
 
 	/*
 	 * All 'appendplans' preceding this index are non-partial plans. All
 	 * 'appendplans' from this index onwards are partial plans.
 	 */
-	int			first_partial_plan;
+	int			first_partial_plan pg_node_attr(query_jumble_ignore);
 
 	/* Info for run-time subplan pruning; NULL if we're not doing that */
-	struct PartitionPruneInfo *part_prune_info;
+	struct PartitionPruneInfo *part_prune_info pg_node_attr(query_jumble_ignore);
 } Append;
 
 /* ----------------
@@ -292,29 +325,29 @@ typedef struct MergeAppend
 	Plan		plan;
 
 	/* RTIs of appendrel(s) formed by this node */
-	Bitmapset  *apprelids;
+	Bitmapset  *apprelids pg_node_attr(query_jumble_ignore);
 
-	List	   *mergeplans;
+	List	   *mergeplans pg_node_attr(query_jumble_ignore);
 
 	/* these fields are just like the sort-key info in struct Sort: */
 
 	/* number of sort-key columns */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *sortColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *sortColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* OIDs of operators to sort them by */
-	Oid		   *sortOperators pg_node_attr(array_size(numCols));
+	Oid		   *sortOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* OIDs of collations */
-	Oid		   *collations pg_node_attr(array_size(numCols));
+	Oid		   *collations pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* NULLS FIRST/LAST directions */
-	bool	   *nullsFirst pg_node_attr(array_size(numCols));
+	bool	   *nullsFirst pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* Info for run-time subplan pruning; NULL if we're not doing that */
-	struct PartitionPruneInfo *part_prune_info;
+	struct PartitionPruneInfo *part_prune_info pg_node_attr(query_jumble_ignore);
 } MergeAppend;
 
 /* ----------------
@@ -330,22 +363,22 @@ typedef struct RecursiveUnion
 	Plan		plan;
 
 	/* ID of Param representing work table */
-	int			wtParam;
+	int			wtParam pg_node_attr(query_jumble_ignore);
 
 	/* Remaining fields are zero/null in UNION ALL case */
 
 	/* number of columns to check for duplicate-ness */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *dupColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *dupColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* equality operators to compare with */
-	Oid		   *dupOperators pg_node_attr(array_size(numCols));
-	Oid		   *dupCollations pg_node_attr(array_size(numCols));
+	Oid		   *dupOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
+	Oid		   *dupCollations pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* estimated number of groups in input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 } RecursiveUnion;
 
 /* ----------------
@@ -359,7 +392,7 @@ typedef struct RecursiveUnion
 typedef struct BitmapAnd
 {
 	Plan		plan;
-	List	   *bitmapplans;
+	List	   *bitmapplans pg_node_attr(query_jumble_ignore);
 } BitmapAnd;
 
 /* ----------------
@@ -373,8 +406,8 @@ typedef struct BitmapAnd
 typedef struct BitmapOr
 {
 	Plan		plan;
-	bool		isshared;
-	List	   *bitmapplans;
+	bool		isshared pg_node_attr(query_jumble_ignore);
+	List	   *bitmapplans pg_node_attr(query_jumble_ignore);
 } BitmapOr;
 
 /*
@@ -389,7 +422,8 @@ typedef struct Scan
 	pg_node_attr(abstract)
 
 	Plan		plan;
-	Index		scanrelid;		/* relid is index into the range table */
+	Index		scanrelid pg_node_attr(query_jumble_rt_index);	/* relid is index into
+																 * the range table */
 } Scan;
 
 /* ----------------
@@ -454,9 +488,11 @@ typedef struct IndexScan
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (usually OpExprs) */
-	List	   *indexqualorig;	/* the same in original form */
+	List	   *indexqualorig pg_node_attr(query_jumble_ignore);	/* the same in original
+																	 * form */
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
-	List	   *indexorderbyorig;	/* the same in original form */
+	List	   *indexorderbyorig pg_node_attr(query_jumble_ignore); /* the same in original
+																	 * form */
 	List	   *indexorderbyops;	/* OIDs of sort ops for ORDER BY exprs */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
 } IndexScan;
@@ -497,9 +533,12 @@ typedef struct IndexOnlyScan
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (usually OpExprs) */
-	List	   *recheckqual;	/* index quals in recheckable form */
+	List	   *recheckqual pg_node_attr(query_jumble_ignore);	/* index quals in
+																 * recheckable form */
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
-	List	   *indextlist;		/* TargetEntry list describing index's cols */
+	List	   *indextlist pg_node_attr(query_jumble_ignore);	/* TargetEntry list
+																 * describing index's
+																 * cols */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
 } IndexOnlyScan;
 
@@ -524,9 +563,11 @@ typedef struct BitmapIndexScan
 {
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
-	bool		isshared;		/* Create shared bitmap if set */
+	bool		isshared pg_node_attr(query_jumble_ignore); /* Create shared bitmap
+															 * if set */
 	List	   *indexqual;		/* list of index quals (OpExprs) */
-	List	   *indexqualorig;	/* the same in original form */
+	List	   *indexqualorig pg_node_attr(query_jumble_ignore);	/* the same in original
+																	 * form */
 } BitmapIndexScan;
 
 /* ----------------
@@ -541,7 +582,8 @@ typedef struct BitmapIndexScan
 typedef struct BitmapHeapScan
 {
 	Scan		scan;
-	List	   *bitmapqualorig; /* index quals, in standard expr form */
+	List	   *bitmapqualorig pg_node_attr(query_jumble_ignore);	/* index quals, in
+																	 * standard expr form */
 } BitmapHeapScan;
 
 /* ----------------
@@ -601,8 +643,8 @@ typedef enum SubqueryScanStatus
 typedef struct SubqueryScan
 {
 	Scan		scan;
-	Plan	   *subplan;
-	SubqueryScanStatus scanstatus;
+	Plan	   *subplan pg_node_attr(query_jumble_ignore);
+	SubqueryScanStatus scanstatus pg_node_attr(query_jumble_ignore);
 } SubqueryScan;
 
 /* ----------------
@@ -643,8 +685,11 @@ typedef struct TableFuncScan
 typedef struct CteScan
 {
 	Scan		scan;
-	int			ctePlanId;		/* ID of init SubPlan for CTE */
-	int			cteParam;		/* ID of Param representing CTE output */
+	int			ctePlanId pg_node_attr(query_jumble_ignore);	/* ID of init SubPlan
+																 * for CTE */
+	int			cteParam pg_node_attr(query_jumble_ignore); /* ID of Param
+															 * representing CTE
+															 * output */
 } CteScan;
 
 /* ----------------
@@ -664,7 +709,9 @@ typedef struct NamedTuplestoreScan
 typedef struct WorkTableScan
 {
 	Scan		scan;
-	int			wtParam;		/* ID of Param representing work table */
+	int			wtParam pg_node_attr(query_jumble_ignore);	/* ID of Param
+															 * representing work
+															 * table */
 } WorkTableScan;
 
 /* ----------------
@@ -711,17 +758,26 @@ typedef struct ForeignScan
 {
 	Scan		scan;
 	CmdType		operation;		/* SELECT/INSERT/UPDATE/DELETE */
-	Index		resultRelation; /* direct modification target's RT index */
-	Oid			checkAsUser;	/* user to perform the scan as; 0 means to
-								 * check as current user */
+	Index		resultRelation pg_node_attr(query_jumble_ignore);	/* direct modification
+																	 * target's RT index */
+	Oid			checkAsUser pg_node_attr(query_jumble_ignore);	/* user to perform the
+																 * scan as; 0 means to
+																 * check as current user */
 	Oid			fs_server;		/* OID of foreign server */
-	List	   *fdw_exprs;		/* expressions that FDW may evaluate */
-	List	   *fdw_private;	/* private data for FDW */
-	List	   *fdw_scan_tlist; /* optional tlist describing scan tuple */
-	List	   *fdw_recheck_quals;	/* original quals not in scan.plan.qual */
-	Bitmapset  *fs_relids;		/* base+OJ RTIs generated by this scan */
-	Bitmapset  *fs_base_relids; /* base RTIs generated by this scan */
-	bool		fsSystemCol;	/* true if any "system column" is needed */
+	List	   *fdw_exprs pg_node_attr(query_jumble_ignore);	/* expressions that FDW
+																 * may evaluate */
+	List	   *fdw_private pg_node_attr(query_jumble_ignore);	/* private data for FDW */
+	List	   *fdw_scan_tlist pg_node_attr(query_jumble_ignore);	/* optional tlist
+																	 * describing scan tuple */
+	List	   *fdw_recheck_quals pg_node_attr(query_jumble_ignore);	/* original quals not in
+																		 * scan.plan.qual */
+	Bitmapset  *fs_relids pg_node_attr(query_jumble_ignore);	/* base+OJ RTIs
+																 * generated by this
+																 * scan */
+	Bitmapset  *fs_base_relids pg_node_attr(query_jumble_ignore);	/* base RTIs generated
+																	 * by this scan */
+	bool		fsSystemCol pg_node_attr(query_jumble_ignore);	/* true if any "system
+																 * column" is needed */
 } ForeignScan;
 
 /* ----------------
@@ -742,20 +798,27 @@ struct CustomScanMethods;
 typedef struct CustomScan
 {
 	Scan		scan;
-	uint32		flags;			/* mask of CUSTOMPATH_* flags, see
-								 * nodes/extensible.h */
-	List	   *custom_plans;	/* list of Plan nodes, if any */
-	List	   *custom_exprs;	/* expressions that custom code may evaluate */
-	List	   *custom_private; /* private data for custom code */
-	List	   *custom_scan_tlist;	/* optional tlist describing scan tuple */
-	Bitmapset  *custom_relids;	/* RTIs generated by this scan */
+	uint32		flags pg_node_attr(query_jumble_ignore);	/* mask of CUSTOMPATH_*
+															 * flags, see
+															 * nodes/extensible.h */
+	List	   *custom_plans pg_node_attr(query_jumble_ignore); /* list of Plan nodes,
+																 * if any */
+	List	   *custom_exprs pg_node_attr(query_jumble_ignore); /* expressions that
+																 * custom code may
+																 * evaluate */
+	List	   *custom_private pg_node_attr(query_jumble_ignore);	/* private data for
+																	 * custom code */
+	List	   *custom_scan_tlist pg_node_attr(query_jumble_ignore);	/* optional tlist
+																		 * describing scan tuple */
+	Bitmapset  *custom_relids pg_node_attr(query_jumble_ignore);	/* RTIs generated by
+																	 * this scan */
 
 	/*
 	 * NOTE: The method field of CustomScan is required to be a pointer to a
 	 * static table of callback functions.  So we don't copy the table itself,
 	 * just reference the original one.
 	 */
-	const struct CustomScanMethods *methods;
+	const struct CustomScanMethods *methods pg_node_attr(query_jumble_ignore);
 } CustomScan;
 
 /*
@@ -792,7 +855,7 @@ typedef struct Join
 
 	Plan		plan;
 	JoinType	jointype;
-	bool		inner_unique;
+	bool		inner_unique pg_node_attr(query_jumble_ignore);
 	List	   *joinqual;		/* JOIN quals (in addition to plan.qual) */
 } Join;
 
@@ -815,7 +878,7 @@ typedef struct NestLoop
 
 typedef struct NestLoopParam
 {
-	pg_node_attr(no_equal, no_query_jumble)
+	pg_node_attr(no_equal)
 
 	NodeTag		type;
 	int			paramno;		/* number of the PARAM_EXEC Param to set */
@@ -838,7 +901,7 @@ typedef struct MergeJoin
 	Join		join;
 
 	/* Can we skip mark/restore calls? */
-	bool		skip_mark_restore;
+	bool		skip_mark_restore pg_node_attr(query_jumble_ignore);
 
 	/* mergeclauses as expression trees */
 	List	   *mergeclauses;
@@ -894,13 +957,13 @@ typedef struct Memoize
 	Plan		plan;
 
 	/* size of the two arrays below */
-	int			numKeys;
+	int			numKeys pg_node_attr(query_jumble_ignore);
 
 	/* hash operators for each key */
-	Oid		   *hashOperators pg_node_attr(array_size(numKeys));
+	Oid		   *hashOperators pg_node_attr(array_size(numKeys), query_jumble_ignore);
 
 	/* collations for each key */
-	Oid		   *collations pg_node_attr(array_size(numKeys));
+	Oid		   *collations pg_node_attr(array_size(numKeys), query_jumble_ignore);
 
 	/* cache keys in the form of exprs containing parameters */
 	List	   *param_exprs;
@@ -909,7 +972,7 @@ typedef struct Memoize
 	 * true if the cache entry should be marked as complete after we store the
 	 * first tuple in it.
 	 */
-	bool		singlerow;
+	bool		singlerow pg_node_attr(query_jumble_ignore);
 
 	/*
 	 * true when cache key should be compared bit by bit, false when using
@@ -921,10 +984,10 @@ typedef struct Memoize
 	 * The maximum number of entries that the planner expects will fit in the
 	 * cache, or 0 if unknown
 	 */
-	uint32		est_entries;
+	uint32		est_entries pg_node_attr(query_jumble_ignore);
 
 	/* paramids from param_exprs */
-	Bitmapset  *keyparamids;
+	Bitmapset  *keyparamids pg_node_attr(query_jumble_ignore);
 } Memoize;
 
 /* ----------------
@@ -1007,31 +1070,31 @@ typedef struct Agg
 	AggSplit	aggsplit;
 
 	/* number of grouping columns */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *grpColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *grpColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* equality operators to compare with */
-	Oid		   *grpOperators pg_node_attr(array_size(numCols));
-	Oid		   *grpCollations pg_node_attr(array_size(numCols));
+	Oid		   *grpOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
+	Oid		   *grpCollations pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* estimated number of groups in input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 
 	/* for pass-by-ref transition data */
-	uint64		transitionSpace;
+	uint64		transitionSpace pg_node_attr(query_jumble_ignore);
 
 	/* IDs of Params used in Aggref inputs */
-	Bitmapset  *aggParams;
+	Bitmapset  *aggParams pg_node_attr(query_jumble_ignore);
 
 	/* Note: planner provides numGroups & aggParams only in HASHED/MIXED case */
 
 	/* grouping sets to use */
-	List	   *groupingSets;
+	List	   *groupingSets pg_node_attr(query_jumble_ignore);
 
 	/* chained Agg/Sort nodes */
-	List	   *chain;
+	List	   *chain pg_node_attr(query_jumble_ignore);
 } Agg;
 
 /* ----------------
@@ -1043,43 +1106,43 @@ typedef struct WindowAgg
 	Plan		plan;
 
 	/* ID referenced by window functions */
-	Index		winref;
+	Index		winref pg_node_attr(query_jumble_ignore);
 
 	/* number of columns in partition clause */
-	int			partNumCols;
+	int			partNumCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *partColIdx pg_node_attr(array_size(partNumCols));
+	AttrNumber *partColIdx pg_node_attr(array_size(partNumCols), query_jumble_ignore);
 
 	/* equality operators for partition columns */
-	Oid		   *partOperators pg_node_attr(array_size(partNumCols));
+	Oid		   *partOperators pg_node_attr(array_size(partNumCols), query_jumble_ignore);
 
 	/* collations for partition columns */
-	Oid		   *partCollations pg_node_attr(array_size(partNumCols));
+	Oid		   *partCollations pg_node_attr(array_size(partNumCols), query_jumble_ignore);
 
 	/* number of columns in ordering clause */
-	int			ordNumCols;
+	int			ordNumCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *ordColIdx pg_node_attr(array_size(ordNumCols));
+	AttrNumber *ordColIdx pg_node_attr(array_size(ordNumCols), query_jumble_ignore);
 
 	/* equality operators for ordering columns */
-	Oid		   *ordOperators pg_node_attr(array_size(ordNumCols));
+	Oid		   *ordOperators pg_node_attr(array_size(ordNumCols), query_jumble_ignore);
 
 	/* collations for ordering columns */
-	Oid		   *ordCollations pg_node_attr(array_size(ordNumCols));
+	Oid		   *ordCollations pg_node_attr(array_size(ordNumCols), query_jumble_ignore);
 
 	/* frame_clause options, see WindowDef */
-	int			frameOptions;
+	int			frameOptions pg_node_attr(query_jumble_ignore);
 
 	/* expression for starting bound, if any */
-	Node	   *startOffset;
+	Node	   *startOffset pg_node_attr(query_jumble_ignore);
 
 	/* expression for ending bound, if any */
-	Node	   *endOffset;
+	Node	   *endOffset pg_node_attr(query_jumble_ignore);
 
 	/* qual to help short-circuit execution */
-	List	   *runCondition;
+	List	   *runCondition pg_node_attr(query_jumble_ignore);
 
 	/* runCondition for display in EXPLAIN */
 	List	   *runConditionOrig;
@@ -1087,25 +1150,25 @@ typedef struct WindowAgg
 	/* these fields are used with RANGE offset PRECEDING/FOLLOWING: */
 
 	/* in_range function for startOffset */
-	Oid			startInRangeFunc;
+	Oid			startInRangeFunc pg_node_attr(query_jumble_ignore);
 
 	/* in_range function for endOffset */
-	Oid			endInRangeFunc;
+	Oid			endInRangeFunc pg_node_attr(query_jumble_ignore);
 
 	/* collation for in_range tests */
-	Oid			inRangeColl;
+	Oid			inRangeColl pg_node_attr(query_jumble_ignore);
 
 	/* use ASC sort order for in_range tests? */
-	bool		inRangeAsc;
+	bool		inRangeAsc pg_node_attr(query_jumble_ignore);
 
 	/* nulls sort first for in_range tests? */
-	bool		inRangeNullsFirst;
+	bool		inRangeNullsFirst pg_node_attr(query_jumble_ignore);
 
 	/*
 	 * false for all apart from the WindowAgg that's closest to the root of
 	 * the plan
 	 */
-	bool		topWindow;
+	bool		topWindow pg_node_attr(query_jumble_ignore);
 } WindowAgg;
 
 /* ----------------
@@ -1117,16 +1180,16 @@ typedef struct Unique
 	Plan		plan;
 
 	/* number of columns to check for uniqueness */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *uniqColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *uniqColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* equality operators to compare with */
-	Oid		   *uniqOperators pg_node_attr(array_size(numCols));
+	Oid		   *uniqOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* collations for equality comparisons */
-	Oid		   *uniqCollations pg_node_attr(array_size(numCols));
+	Oid		   *uniqCollations pg_node_attr(array_size(numCols), query_jumble_ignore);
 } Unique;
 
 /* ------------
@@ -1144,11 +1207,19 @@ typedef struct Gather
 {
 	Plan		plan;
 	int			num_workers;	/* planned number of worker processes */
-	int			rescan_param;	/* ID of Param that signals a rescan, or -1 */
-	bool		single_copy;	/* don't execute plan more than once */
-	bool		invisible;		/* suppress EXPLAIN display (for testing)? */
-	Bitmapset  *initParam;		/* param id's of initplans which are referred
-								 * at gather or one of it's child node */
+	int			rescan_param pg_node_attr(query_jumble_ignore); /* ID of Param that
+																 * signals a rescan, or
+																 * -1 */
+	bool		single_copy pg_node_attr(query_jumble_ignore);	/* don't execute plan
+																 * more than once */
+	bool		invisible pg_node_attr(query_jumble_ignore);	/* suppress EXPLAIN
+																 * display (for
+																 * testing)? */
+	Bitmapset  *initParam pg_node_attr(query_jumble_ignore);	/* param id's of
+																 * initplans which are
+																 * referred at gather or
+																 * one of it's child
+																 * node */
 } Gather;
 
 /* ------------
@@ -1163,30 +1234,30 @@ typedef struct GatherMerge
 	int			num_workers;
 
 	/* ID of Param that signals a rescan, or -1 */
-	int			rescan_param;
+	int			rescan_param pg_node_attr(query_jumble_ignore);
 
 	/* remaining fields are just like the sort-key info in struct Sort */
 
 	/* number of sort-key columns */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *sortColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *sortColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* OIDs of operators to sort them by */
-	Oid		   *sortOperators pg_node_attr(array_size(numCols));
+	Oid		   *sortOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* OIDs of collations */
-	Oid		   *collations pg_node_attr(array_size(numCols));
+	Oid		   *collations pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* NULLS FIRST/LAST directions */
-	bool	   *nullsFirst pg_node_attr(array_size(numCols));
+	bool	   *nullsFirst pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/*
 	 * param id's of initplans which are referred at gather merge or one of
 	 * it's child node
 	 */
-	Bitmapset  *initParam;
+	Bitmapset  *initParam pg_node_attr(query_jumble_ignore);
 } GatherMerge;
 
 /* ----------------
@@ -1206,11 +1277,16 @@ typedef struct Hash
 	 * needed to put them into the hashtable.
 	 */
 	List	   *hashkeys;		/* hash keys for the hashjoin condition */
-	Oid			skewTable;		/* outer join key's table OID, or InvalidOid */
-	AttrNumber	skewColumn;		/* outer join key's column #, or zero */
-	bool		skewInherit;	/* is outer join rel an inheritance tree? */
+	Oid			skewTable pg_node_attr(query_jumble_ignore);	/* outer join key's
+																 * table OID, or
+																 * InvalidOid */
+	AttrNumber	skewColumn pg_node_attr(query_jumble_ignore);	/* outer join key's
+																 * column #, or zero */
+	bool		skewInherit pg_node_attr(query_jumble_ignore);	/* is outer join rel an
+																 * inheritance tree? */
 	/* all other info is in the parent HashJoin node */
-	Cardinality rows_total;		/* estimate total rows if parallel_aware */
+	Cardinality rows_total pg_node_attr(query_jumble_ignore);	/* estimate total rows
+																 * if parallel_aware */
 } Hash;
 
 /* ----------------
@@ -1228,20 +1304,20 @@ typedef struct SetOp
 	SetOpStrategy strategy;
 
 	/* number of columns to compare */
-	int			numCols;
+	int			numCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *cmpColIdx pg_node_attr(array_size(numCols));
+	AttrNumber *cmpColIdx pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* comparison operators (either equality operators or sort operators) */
-	Oid		   *cmpOperators pg_node_attr(array_size(numCols));
-	Oid		   *cmpCollations pg_node_attr(array_size(numCols));
+	Oid		   *cmpOperators pg_node_attr(array_size(numCols), query_jumble_ignore);
+	Oid		   *cmpCollations pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* nulls-first flags if sorting, otherwise not interesting */
-	bool	   *cmpNullsFirst pg_node_attr(array_size(numCols));
+	bool	   *cmpNullsFirst pg_node_attr(array_size(numCols), query_jumble_ignore);
 
 	/* estimated number of groups in left input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 } SetOp;
 
 /* ----------------
@@ -1256,8 +1332,10 @@ typedef struct SetOp
 typedef struct LockRows
 {
 	Plan		plan;
-	List	   *rowMarks;		/* a list of PlanRowMark's */
-	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
+	List	   *rowMarks pg_node_attr(query_jumble_ignore); /* a list of
+															 * PlanRowMark's */
+	int			epqParam pg_node_attr(query_jumble_ignore); /* ID of Param for
+															 * EvalPlanQual re-eval */
 } LockRows;
 
 /* ----------------
@@ -1272,25 +1350,25 @@ typedef struct Limit
 	Plan		plan;
 
 	/* OFFSET parameter, or NULL if none */
-	Node	   *limitOffset;
+	Node	   *limitOffset pg_node_attr(query_jumble_ignore);
 
 	/* COUNT parameter, or NULL if none */
-	Node	   *limitCount;
+	Node	   *limitCount pg_node_attr(query_jumble_ignore);
 
 	/* limit type */
-	LimitOption limitOption;
+	LimitOption limitOption pg_node_attr(query_jumble_ignore);
 
 	/* number of columns to check for similarity  */
-	int			uniqNumCols;
+	int			uniqNumCols pg_node_attr(query_jumble_ignore);
 
 	/* their indexes in the target list */
-	AttrNumber *uniqColIdx pg_node_attr(array_size(uniqNumCols));
+	AttrNumber *uniqColIdx pg_node_attr(array_size(uniqNumCols), query_jumble_ignore);
 
 	/* equality operators to compare with */
-	Oid		   *uniqOperators pg_node_attr(array_size(uniqNumCols));
+	Oid		   *uniqOperators pg_node_attr(array_size(uniqNumCols), query_jumble_ignore);
 
 	/* collations for equality comparisons */
-	Oid		   *uniqCollations pg_node_attr(array_size(uniqNumCols));
+	Oid		   *uniqCollations pg_node_attr(array_size(uniqNumCols), query_jumble_ignore);
 } Limit;
 
 
