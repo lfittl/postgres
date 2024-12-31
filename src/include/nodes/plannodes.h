@@ -53,6 +53,10 @@ typedef struct PlannedStmt
 
 	uint64		queryId;		/* query identifier (copied from Query) */
 
+	uint64		planId;			/* plan identifier (calculated if
+								 * compute_plan_id is enabled, can also be set
+								 * by plugins) */
+
 	bool		hasReturning;	/* is it insert|update|delete|merge RETURNING? */
 
 	bool		hasModifyingCTE;	/* has insert|update|delete|merge in WITH? */
@@ -815,7 +819,7 @@ typedef struct NestLoop
 
 typedef struct NestLoopParam
 {
-	pg_node_attr(no_equal, no_query_jumble)
+	pg_node_attr(no_equal)
 
 	NodeTag		type;
 	int			paramno;		/* number of the PARAM_EXEC Param to set */

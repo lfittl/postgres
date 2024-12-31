@@ -1036,7 +1036,7 @@ pgstat_drop_entries_of_kind(PgStat_Kind kind)
 
 			if (lohashent)
 				pgstat_release_entry_ref(lohashent->key, lohashent->entry_ref,
-										true);
+										 true);
 		}
 
 		if (!pgstat_drop_entry_internal(ps, &hstat))
