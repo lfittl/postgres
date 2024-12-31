@@ -83,4 +83,10 @@ IsQueryIdEnabled(void)
 	return query_id_enabled;
 }
 
+/* Functions intended for other users of jumbling (e.g. plan jumbling) */
+extern JumbleState *InitializeJumbleState(bool record_clocations);
+extern void AppendJumble(JumbleState *jstate, const unsigned char *item, Size size);
+extern void JumbleNode(JumbleState *jstate, Node *node);
+extern uint64 HashJumbleState(JumbleState *jstate);
+
 #endif							/* QUERYJUMBLE_H */
