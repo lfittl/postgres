@@ -86,6 +86,16 @@ AS 'MODULE_PATHNAME', 'injection_points_stats_numcalls'
 LANGUAGE C STRICT;
 
 --
+-- injection_points_stats_reset()
+--
+-- Reports statistics, if any, related to the given injection point.
+--
+CREATE FUNCTION injection_points_stats_reset()
+RETURNS void
+AS 'MODULE_PATHNAME', 'injection_points_stats_reset'
+LANGUAGE C STRICT;
+
+--
 -- injection_points_stats_fixed()
 --
 -- Reports fixed-numbered statistics for injection points.
