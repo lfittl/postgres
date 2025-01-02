@@ -34,6 +34,7 @@ SUBDIRS = \
 		pg_freespacemap \
 		pg_logicalinspect \
 		pg_prewarm	\
+		pg_stat_plans \
 		pg_stat_statements \
 		pg_surgery	\
 		pg_trgm		\
