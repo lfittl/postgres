@@ -146,6 +146,7 @@
 <!ENTITY pglogicalinspect  SYSTEM "pglogicalinspect.sgml">
 <!ENTITY pgprewarm       SYSTEM "pgprewarm.sgml">
 <!ENTITY pgrowlocks      SYSTEM "pgrowlocks.sgml">
+<!ENTITY pgstatplans     SYSTEM "pgstatplans.sgml">
 <!ENTITY pgstatstatements SYSTEM "pgstatstatements.sgml">
 <!ENTITY pgstattuple     SYSTEM "pgstattuple.sgml">
 <!ENTITY pgsurgery       SYSTEM "pgsurgery.sgml">

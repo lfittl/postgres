@@ -8,6 +8,7 @@ backend_sources += files(
   'multibitmapset.c',
   'nodeFuncs.c',
   'params.c',
+  'planjumble.c',
   'print.c',
   'read.c',
   'tidbitmap.c',
