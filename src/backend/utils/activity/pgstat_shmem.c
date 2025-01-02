@@ -1015,6 +1015,39 @@ pgstat_drop_all_entries(void)
 		pgstat_request_entry_refs_gc();
 }
 
+void
+pgstat_drop_entries_of_kind(PgStat_Kind kind)
+{
+	dshash_seq_status hstat;
+	PgStatShared_HashEntry *ps;
+	uint64		not_freed_count = 0;
+
+	dshash_seq_init(&hstat, pgStatLocal.shared_hash, true);
+	while ((ps = dshash_seq_next(&hstat)) != NULL)
+	{
+		if (ps->dropped || ps->key.kind != kind)
+			continue;
+
+		/* delete local reference */
+		if (pgStatEntryRefHash)
+		{
+			PgStat_EntryRefHashEntry *lohashent =
+				pgstat_entry_ref_hash_lookup(pgStatEntryRefHash, ps->key);
+
+			if (lohashent)
+				pgstat_release_entry_ref(lohashent->key, lohashent->entry_ref,
+										 true);
+		}
+
+		if (!pgstat_drop_entry_internal(ps, &hstat))
+			not_freed_count++;
+	}
+	dshash_seq_term(&hstat);
+
+	if (not_freed_count > 0)
+		pgstat_request_entry_refs_gc();
+}
+
 static void
 shared_stat_reset_contents(PgStat_Kind kind, PgStatShared_Common *header,
 						   TimestampTz ts)
