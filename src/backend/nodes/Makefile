@@ -25,6 +25,7 @@ OBJS = \
 	nodeFuncs.o \
 	outfuncs.o \
 	params.o \
+	planjumble.o \
 	print.o \
 	queryjumblefuncs.o \
 	read.o \

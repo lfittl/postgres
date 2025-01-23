@@ -50,6 +50,7 @@
 #include "libpq/auth.h"
 #include "libpq/libpq.h"
 #include "libpq/scram.h"
+#include "nodes/planjumble.h"
 #include "nodes/queryjumble.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
@@ -306,6 +307,23 @@ static const struct config_enum_entry compute_query_id_options[] = {
 	{"no", COMPUTE_QUERY_ID_OFF, true},
 	{"1", COMPUTE_QUERY_ID_ON, true},
 	{"0", COMPUTE_QUERY_ID_OFF, true},
+	{NULL, 0, false}
+};
+
+/*
+ * Although only "on" and "off" are documented, we accept
+ * all the likely variants of "on" and "off".
+ */
+static const struct config_enum_entry compute_plan_id_options[] = {
+	{"regress", COMPUTE_PLAN_ID_REGRESS, false},
+	{"on", COMPUTE_PLAN_ID_ON, false},
+	{"off", COMPUTE_PLAN_ID_OFF, false},
+	{"true", COMPUTE_PLAN_ID_ON, true},
+	{"false", COMPUTE_PLAN_ID_OFF, true},
+	{"yes", COMPUTE_PLAN_ID_ON, true},
+	{"no", COMPUTE_PLAN_ID_OFF, true},
+	{"1", COMPUTE_PLAN_ID_ON, true},
+	{"0", COMPUTE_PLAN_ID_OFF, true},
 	{NULL, 0, false}
 };
 
@@ -4870,6 +4888,16 @@ struct config_enum ConfigureNamesEnum[] =
 		},
 		&compute_query_id,
 		COMPUTE_QUERY_ID_AUTO, compute_query_id_options,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"compute_plan_id", PGC_SUSET, STATS_MONITORING,
+			gettext_noop("Enables in-core computation of plan identifiers."),
+			NULL
+		},
+		&compute_plan_id,
+		COMPUTE_PLAN_ID_OFF, compute_plan_id_options,
 		NULL, NULL, NULL
 	},
 
