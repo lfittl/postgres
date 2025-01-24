@@ -197,3 +197,15 @@ injection_points_stats_numcalls(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64(entry->numcalls);
 }
+
+/*
+ * SQL function that resets injection point statistics.
+ */
+PG_FUNCTION_INFO_V1(injection_points_stats_reset);
+Datum
+injection_points_stats_reset(PG_FUNCTION_ARGS)
+{
+	pgstat_drop_entries_of_kind(PGSTAT_KIND_INJECTION);
+
+	PG_RETURN_VOID();
+}
