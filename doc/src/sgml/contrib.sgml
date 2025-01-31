@@ -158,6 +158,7 @@ CREATE EXTENSION <replaceable>extension_name</replaceable>;
  &pgoverexplain;
  &pgprewarm;
  &pgrowlocks;
+ &pgstatplans;
  &pgstatstatements;
  &pgstattuple;
  &pgsurgery;

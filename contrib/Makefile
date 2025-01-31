@@ -35,6 +35,7 @@ SUBDIRS = \
 		pg_logicalinspect \
 		pg_overexplain \
 		pg_prewarm	\
+		pg_stat_plans \
 		pg_stat_statements \
 		pg_surgery	\
 		pg_trgm		\
