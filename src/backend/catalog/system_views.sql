@@ -902,6 +902,7 @@ CREATE VIEW pg_stat_activity AS
             S.backend_xid,
             s.backend_xmin,
             S.query_id,
+            S.plan_id,
             S.query,
             S.backend_type
     FROM pg_stat_get_activity(NULL) AS S

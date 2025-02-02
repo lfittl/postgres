@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/queryjumble.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -1314,6 +1315,14 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 */
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
+
+	/*
+	 * If enabled, append significant information to the plan identifier
+	 * jumble (we do this here since we're already walking the tree in a
+	 * near-final state)
+	 */
+	if (IsPlanIdEnabled())
+		JumbleNode(root->glob->plan_jumble_state, (Node *) plan);
 
 	return plan;
 }
