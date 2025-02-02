@@ -35,12 +35,14 @@
 #include "common/hashfn.h"
 #include "miscadmin.h"
 #include "nodes/queryjumble.h"
+#include "parser/parsetree.h"
 #include "parser/scansup.h"
 
 #define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 /* GUC parameters */
 int			compute_query_id = COMPUTE_QUERY_ID_AUTO;
+int			compute_plan_id = COMPUTE_PLAN_ID_AUTO;
 
 /*
  * True when compute_query_id is ON or AUTO, and a module requests them.
@@ -50,6 +52,15 @@ int			compute_query_id = COMPUTE_QUERY_ID_AUTO;
  * whether query identifiers are computed in the core or not.
  */
 bool		query_id_enabled = false;
+
+/*
+ * True when compute_plan_id is ON or AUTO, and a module requests them.
+ *
+ * Note that IsPlanIdEnabled() should be used instead of checking
+ * plan_id_enabled or plan_query_id directly when we want to know
+ * whether plan identifiers are computed in the core or not.
+ */
+bool		plan_id_enabled = false;
 
 static void RecordConstLocation(JumbleState *jstate, int location);
 static void _jumbleA_Const(JumbleState *jstate, Node *node);
@@ -172,6 +183,19 @@ EnableQueryId(void)
 }
 
 /*
+ * Enables plan identifier computation.
+ *
+ * Third-party plugins can use this function to inform core that they require
+ * a query identifier to be computed.
+ */
+void
+EnablePlanId(void)
+{
+	if (compute_plan_id != COMPUTE_PLAN_ID_OFF)
+		plan_id_enabled = true;
+}
+
+/*
  * AppendJumble: Append a value that is substantive in a given query to
  * the current jumble.
  */
@@ -240,6 +264,13 @@ RecordConstLocation(JumbleState *jstate, int location)
 	RecordConstLocation(jstate, expr->location)
 #define JUMBLE_FIELD(item) \
 	AppendJumble(jstate, (const unsigned char *) &(expr->item), sizeof(expr->item))
+#define JUMBLE_BITMAPSET(item) \
+do { \
+	if (expr->item) \
+		AppendJumble(jstate, (const unsigned char *) expr->item->words, sizeof(bitmapword) * expr->item->nwords); \
+} while(0)
+#define JUMBLE_ARRAY(item, len) \
+	AppendJumble(jstate, (const unsigned char *) expr->item, sizeof(*(expr->item)) * len)
 #define JUMBLE_FIELD_SINGLE(item) \
 	AppendJumble(jstate, (const unsigned char *) &(item), sizeof(item))
 #define JUMBLE_STRING(str) \
@@ -387,4 +418,38 @@ _jumbleVariableSetStmt(JumbleState *jstate, Node *node)
 		JUMBLE_NODE(args);
 	JUMBLE_FIELD(is_local);
 	JUMBLE_LOCATION(location);
+}
+
+/*
+ * Jumble the entries in the rangle table to map RT indexes to relations
+ *
+ * This ensures jumbled RT indexes (e.g. in a Scan or Modify node), are
+ * distinguished by the target of the RT entry, even if the index is the same.
+ */
+void
+JumbleRangeTable(JumbleState *jstate, List *rtable)
+{
+	ListCell *lc;
+
+	foreach(lc, rtable)
+	{
+		RangeTblEntry *expr = lfirst_node(RangeTblEntry, lc);
+
+		switch (expr->rtekind)
+		{
+			case RTE_RELATION:
+				JUMBLE_FIELD(relid);
+				break;
+			case RTE_CTE:
+				JUMBLE_STRING(ctename);
+				break;
+			default:
+
+				/*
+				* Ignore other targets, the jumble includes something identifying
+				* about them already
+				*/
+				break;
+		}
+	}
 }

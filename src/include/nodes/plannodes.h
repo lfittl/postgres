@@ -53,6 +53,10 @@ typedef struct PlannedStmt
 
 	uint64		queryId;		/* query identifier (copied from Query) */
 
+	uint64		planId;			/* plan identifier (calculated if
+								 * compute_plan_id is enabled, can also be set
+								 * by plugins) */
+
 	bool		hasReturning;	/* is it insert|update|delete|merge RETURNING? */
 
 	bool		hasModifyingCTE;	/* has insert|update|delete|merge in WITH? */
@@ -121,44 +125,55 @@ typedef struct PlannedStmt
  */
 typedef struct Plan
 {
-	pg_node_attr(abstract, no_equal, no_query_jumble)
+	pg_node_attr(abstract, no_equal)
 
 	NodeTag		type;
 
 	/*
 	 * estimated execution costs for plan (see costsize.c for more info)
 	 */
-	int			disabled_nodes; /* count of disabled nodes */
-	Cost		startup_cost;	/* cost expended before fetching any tuples */
-	Cost		total_cost;		/* total cost (assuming all tuples fetched) */
+	int			disabled_nodes pg_node_attr(query_jumble_ignore);	/* count of disabled
+																	 * nodes */
+	Cost		startup_cost pg_node_attr(query_jumble_ignore); /* cost expended before
+																 * fetching any tuples */
+	Cost		total_cost pg_node_attr(query_jumble_ignore);	/* total cost (assuming
+																 * all tuples fetched) */
 
 	/*
 	 * planner's estimate of result size of this plan step
 	 */
-	Cardinality plan_rows;		/* number of rows plan is expected to emit */
-	int			plan_width;		/* average row width in bytes */
+	Cardinality plan_rows pg_node_attr(query_jumble_ignore);	/* number of rows plan
+																 * is expected to emit */
+	int			plan_width pg_node_attr(query_jumble_ignore);	/* average row width in
+																 * bytes */
 
 	/*
 	 * information needed for parallel query
 	 */
-	bool		parallel_aware; /* engage parallel-aware logic? */
-	bool		parallel_safe;	/* OK to use as part of parallel plan? */
+	bool		parallel_aware;	/* engage parallel-aware
+																	 * logic? */
+	bool		parallel_safe;	/* OK to use as part of
+																	 * parallel plan? */
 
 	/*
 	 * information needed for asynchronous execution
 	 */
-	bool		async_capable;	/* engage asynchronous-capable logic? */
+	bool		async_capable;	/* engage
+																	 * asynchronous-capable
+																	 * logic? */
 
 	/*
 	 * Common structural data for all Plan types.
 	 */
-	int			plan_node_id;	/* unique across entire final plan tree */
+	int			plan_node_id; /* unique across entire
+																 * final plan tree */
 	List	   *targetlist;		/* target list to be computed at this node */
 	List	   *qual;			/* implicitly-ANDed qual conditions */
-	struct Plan *lefttree;		/* input plan tree(s) */
-	struct Plan *righttree;
-	List	   *initPlan;		/* Init Plan nodes (un-correlated expr
-								 * subselects) */
+	struct Plan *lefttree pg_node_attr(query_jumble_ignore);	/* input plan tree(s) */
+	struct Plan *righttree pg_node_attr(query_jumble_ignore);
+	List	   *initPlan pg_node_attr(query_jumble_ignore); /* Init Plan nodes
+															 * (un-correlated expr
+															 * subselects) */
 
 	/*
 	 * Information for management of parameter-change-driven rescanning
@@ -234,31 +249,47 @@ typedef struct ModifyTable
 {
 	Plan		plan;
 	CmdType		operation;		/* INSERT, UPDATE, DELETE, or MERGE */
-	bool		canSetTag;		/* do we set the command tag/es_processed? */
-	Index		nominalRelation;	/* Parent RT index for use of EXPLAIN */
-	Index		rootRelation;	/* Root RT index, if partitioned/inherited */
+	bool		canSetTag;	/* do we set the command
+																 * tag/es_processed? */
+	Index		nominalRelation;	/* Parent RT index for
+																	 * use of EXPLAIN */
+	Index		rootRelation;	/* Root RT index, if
+																	 * partitioned/inherited */
 	bool		partColsUpdated;	/* some part key in hierarchy updated? */
-	List	   *resultRelations;	/* integer list of RT indexes */
-	List	   *updateColnosLists;	/* per-target-table update_colnos lists */
-	List	   *withCheckOptionLists;	/* per-target-table WCO lists */
-	char	   *returningOldAlias;	/* alias for OLD in RETURNING lists */
-	char	   *returningNewAlias;	/* alias for NEW in RETURNING lists */
-	List	   *returningLists; /* per-target-table RETURNING tlists */
-	List	   *fdwPrivLists;	/* per-target-table FDW private data lists */
-	Bitmapset  *fdwDirectModifyPlans;	/* indices of FDW DM plans */
-	List	   *rowMarks;		/* PlanRowMarks (non-locking only) */
-	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
+	List	   *resultRelations;	/* integer list of RT
+																		 * indexes */
+	List	   *updateColnosLists;	/* per-target-table
+																		 * update_colnos lists */
+	List	   *withCheckOptionLists; /* per-target-table WCO
+																		 * lists */
+	char	   *returningOldAlias;	/* alias for OLD in
+																		 * RETURNING lists */
+	char	   *returningNewAlias;	/* alias for NEW in
+																		 * RETURNING lists */
+	List	   *returningLists;	/* per-target-table
+																	 * RETURNING tlists */
+	List	   *fdwPrivLists pg_node_attr(query_jumble_ignore); /* per-target-table FDW
+																 * private data lists */
+	Bitmapset  *fdwDirectModifyPlans; /* indices of FDW DM
+																		 * plans */
+	List	   *rowMarks; /* PlanRowMarks
+															 * (non-locking only) */
+	int			epqParam; /* ID of Param for
+															 * EvalPlanQual re-eval */
 	OnConflictAction onConflictAction;	/* ON CONFLICT action */
 	List	   *arbiterIndexes; /* List of ON CONFLICT arbiter index OIDs  */
 	List	   *onConflictSet;	/* INSERT ON CONFLICT DO UPDATE targetlist */
 	List	   *onConflictCols; /* target column numbers for onConflictSet */
 	Node	   *onConflictWhere;	/* WHERE for ON CONFLICT UPDATE */
-	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
-	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
-	List	   *mergeActionLists;	/* per-target-table lists of actions for
-									 * MERGE */
-	List	   *mergeJoinConditions;	/* per-target-table join conditions
-										 * for MERGE */
+	Index		exclRelRTI;	/* RTI of the EXCLUDED
+																 * pseudo relation */
+	List	   *exclRelTlist; /* tlist of the EXCLUDED
+																 * pseudo relation */
+	List	   *mergeActionLists; /* per-target-table
+																	 * lists of actions for
+																	 * MERGE */
+	List	   *mergeJoinConditions;	/* per-target-table join
+																		 * conditions for MERGE */
 } ModifyTable;
 
 struct PartitionPruneInfo;		/* forward reference to struct below */
@@ -272,7 +303,7 @@ typedef struct Append
 {
 	Plan		plan;
 	Bitmapset  *apprelids;		/* RTIs of appendrel(s) formed by this node */
-	List	   *appendplans;
+	List	   *appendplans pg_node_attr(query_jumble_ignore);
 	int			nasyncplans;	/* # of asynchronous plans */
 
 	/*
@@ -301,7 +332,7 @@ typedef struct MergeAppend
 	/* RTIs of appendrel(s) formed by this node */
 	Bitmapset  *apprelids;
 
-	List	   *mergeplans;
+	List	   *mergeplans pg_node_attr(query_jumble_ignore);
 
 	/* these fields are just like the sort-key info in struct Sort: */
 
@@ -356,7 +387,7 @@ typedef struct RecursiveUnion
 	Oid		   *dupCollations pg_node_attr(array_size(numCols));
 
 	/* estimated number of groups in input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 } RecursiveUnion;
 
 /* ----------------
@@ -370,7 +401,7 @@ typedef struct RecursiveUnion
 typedef struct BitmapAnd
 {
 	Plan		plan;
-	List	   *bitmapplans;
+	List	   *bitmapplans pg_node_attr(query_jumble_ignore);
 } BitmapAnd;
 
 /* ----------------
@@ -385,7 +416,7 @@ typedef struct BitmapOr
 {
 	Plan		plan;
 	bool		isshared;
-	List	   *bitmapplans;
+	List	   *bitmapplans pg_node_attr(query_jumble_ignore);
 } BitmapOr;
 
 /*
@@ -400,7 +431,8 @@ typedef struct Scan
 	pg_node_attr(abstract)
 
 	Plan		plan;
-	Index		scanrelid;		/* relid is index into the range table */
+	Index		scanrelid;	/* relid is index into
+																 * the range table */
 } Scan;
 
 /* ----------------
@@ -465,9 +497,11 @@ typedef struct IndexScan
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (usually OpExprs) */
-	List	   *indexqualorig;	/* the same in original form */
+	List	   *indexqualorig;	/* the same in original
+																	 * form */
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
-	List	   *indexorderbyorig;	/* the same in original form */
+	List	   *indexorderbyorig; /* the same in original
+																	 * form */
 	List	   *indexorderbyops;	/* OIDs of sort ops for ORDER BY exprs */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
 } IndexScan;
@@ -508,9 +542,12 @@ typedef struct IndexOnlyScan
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
 	List	   *indexqual;		/* list of index quals (usually OpExprs) */
-	List	   *recheckqual;	/* index quals in recheckable form */
+	List	   *recheckqual;	/* index quals in
+																 * recheckable form */
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
-	List	   *indextlist;		/* TargetEntry list describing index's cols */
+	List	   *indextlist;	/* TargetEntry list
+																 * describing index's
+																 * cols */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
 } IndexOnlyScan;
 
@@ -535,9 +572,11 @@ typedef struct BitmapIndexScan
 {
 	Scan		scan;
 	Oid			indexid;		/* OID of index to scan */
-	bool		isshared;		/* Create shared bitmap if set */
+	bool		isshared; /* Create shared bitmap
+															 * if set */
 	List	   *indexqual;		/* list of index quals (OpExprs) */
-	List	   *indexqualorig;	/* the same in original form */
+	List	   *indexqualorig;	/* the same in original
+																	 * form */
 } BitmapIndexScan;
 
 /* ----------------
@@ -552,7 +591,8 @@ typedef struct BitmapIndexScan
 typedef struct BitmapHeapScan
 {
 	Scan		scan;
-	List	   *bitmapqualorig; /* index quals, in standard expr form */
+	List	   *bitmapqualorig;	/* index quals, in
+																	 * standard expr form */
 } BitmapHeapScan;
 
 /* ----------------
@@ -612,7 +652,7 @@ typedef enum SubqueryScanStatus
 typedef struct SubqueryScan
 {
 	Scan		scan;
-	Plan	   *subplan;
+	Plan	   *subplan pg_node_attr(query_jumble_ignore);
 	SubqueryScanStatus scanstatus;
 } SubqueryScan;
 
@@ -654,8 +694,11 @@ typedef struct TableFuncScan
 typedef struct CteScan
 {
 	Scan		scan;
-	int			ctePlanId;		/* ID of init SubPlan for CTE */
-	int			cteParam;		/* ID of Param representing CTE output */
+	int			ctePlanId;	/* ID of init SubPlan
+																 * for CTE */
+	int			cteParam; /* ID of Param
+															 * representing CTE
+															 * output */
 } CteScan;
 
 /* ----------------
@@ -675,7 +718,9 @@ typedef struct NamedTuplestoreScan
 typedef struct WorkTableScan
 {
 	Scan		scan;
-	int			wtParam;		/* ID of Param representing work table */
+	int			wtParam;	/* ID of Param
+															 * representing work
+															 * table */
 } WorkTableScan;
 
 /* ----------------
@@ -722,17 +767,26 @@ typedef struct ForeignScan
 {
 	Scan		scan;
 	CmdType		operation;		/* SELECT/INSERT/UPDATE/DELETE */
-	Index		resultRelation; /* direct modification target's RT index */
-	Oid			checkAsUser;	/* user to perform the scan as; 0 means to
-								 * check as current user */
+	Index		resultRelation;	/* direct modification
+																	 * target's RT index */
+	Oid			checkAsUser;	/* user to perform the
+																 * scan as; 0 means to
+																 * check as current user */
 	Oid			fs_server;		/* OID of foreign server */
-	List	   *fdw_exprs;		/* expressions that FDW may evaluate */
-	List	   *fdw_private;	/* private data for FDW */
-	List	   *fdw_scan_tlist; /* optional tlist describing scan tuple */
-	List	   *fdw_recheck_quals;	/* original quals not in scan.plan.qual */
-	Bitmapset  *fs_relids;		/* base+OJ RTIs generated by this scan */
-	Bitmapset  *fs_base_relids; /* base RTIs generated by this scan */
-	bool		fsSystemCol;	/* true if any "system column" is needed */
+	List	   *fdw_exprs;	/* expressions that FDW
+																 * may evaluate */
+	List	   *fdw_private pg_node_attr(query_jumble_ignore);	/* private data for FDW */
+	List	   *fdw_scan_tlist;	/* optional tlist
+																	 * describing scan tuple */
+	List	   *fdw_recheck_quals;	/* original quals not in
+																		 * scan.plan.qual */
+	Bitmapset  *fs_relids;	/* base+OJ RTIs
+																 * generated by this
+																 * scan */
+	Bitmapset  *fs_base_relids;	/* base RTIs generated
+																	 * by this scan */
+	bool		fsSystemCol;	/* true if any "system
+																 * column" is needed */
 } ForeignScan;
 
 /* ----------------
@@ -753,20 +807,27 @@ struct CustomScanMethods;
 typedef struct CustomScan
 {
 	Scan		scan;
-	uint32		flags;			/* mask of CUSTOMPATH_* flags, see
-								 * nodes/extensible.h */
-	List	   *custom_plans;	/* list of Plan nodes, if any */
-	List	   *custom_exprs;	/* expressions that custom code may evaluate */
-	List	   *custom_private; /* private data for custom code */
-	List	   *custom_scan_tlist;	/* optional tlist describing scan tuple */
-	Bitmapset  *custom_relids;	/* RTIs generated by this scan */
+	uint32		flags;	/* mask of CUSTOMPATH_*
+															 * flags, see
+															 * nodes/extensible.h */
+	List	   *custom_plans; /* list of Plan nodes,
+																 * if any */
+	List	   *custom_exprs; /* expressions that
+																 * custom code may
+																 * evaluate */
+	List	   *custom_private pg_node_attr(query_jumble_ignore);	/* private data for
+																	 * custom code */
+	List	   *custom_scan_tlist;	/* optional tlist
+																		 * describing scan tuple */
+	Bitmapset  *custom_relids;	/* RTIs generated by
+																	 * this scan */
 
 	/*
 	 * NOTE: The method field of CustomScan is required to be a pointer to a
 	 * static table of callback functions.  So we don't copy the table itself,
 	 * just reference the original one.
 	 */
-	const struct CustomScanMethods *methods;
+	const struct CustomScanMethods *methods pg_node_attr(query_jumble_ignore);
 } CustomScan;
 
 /*
@@ -826,7 +887,7 @@ typedef struct NestLoop
 
 typedef struct NestLoopParam
 {
-	pg_node_attr(no_equal, no_query_jumble)
+	pg_node_attr(no_equal)
 
 	NodeTag		type;
 	int			paramno;		/* number of the PARAM_EXEC Param to set */
@@ -932,7 +993,7 @@ typedef struct Memoize
 	 * The maximum number of entries that the planner expects will fit in the
 	 * cache, or 0 if unknown
 	 */
-	uint32		est_entries;
+	uint32		est_entries pg_node_attr(query_jumble_ignore);
 
 	/* paramids from param_exprs */
 	Bitmapset  *keyparamids;
@@ -1028,7 +1089,7 @@ typedef struct Agg
 	Oid		   *grpCollations pg_node_attr(array_size(numCols));
 
 	/* estimated number of groups in input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 
 	/* for pass-by-ref transition data */
 	uint64		transitionSpace;
@@ -1154,12 +1215,19 @@ typedef struct Unique
 typedef struct Gather
 {
 	Plan		plan;
-	int			num_workers;	/* planned number of worker processes */
-	int			rescan_param;	/* ID of Param that signals a rescan, or -1 */
-	bool		single_copy;	/* don't execute plan more than once */
-	bool		invisible;		/* suppress EXPLAIN display (for testing)? */
-	Bitmapset  *initParam;		/* param id's of initplans which are referred
-								 * at gather or one of its child nodes */
+	/* planned number of worker processes */
+	int			num_workers;
+	/* ID of Param that signals a rescan, or -1 */
+	int			rescan_param;
+	/* don't execute plan more than once */
+	bool		single_copy;
+	/* suppress EXPLAIN display (for testing)? */
+	bool		invisible;
+	/*
+	 * param id's of initplans which are referred at gather or one of its
+	 * child nodes
+	 */
+	Bitmapset  *initParam;
 } Gather;
 
 /* ------------
@@ -1217,11 +1285,16 @@ typedef struct Hash
 	 * needed to put them into the hashtable.
 	 */
 	List	   *hashkeys;		/* hash keys for the hashjoin condition */
-	Oid			skewTable;		/* outer join key's table OID, or InvalidOid */
-	AttrNumber	skewColumn;		/* outer join key's column #, or zero */
-	bool		skewInherit;	/* is outer join rel an inheritance tree? */
+	Oid			skewTable;	/* outer join key's
+																 * table OID, or
+																 * InvalidOid */
+	AttrNumber	skewColumn;	/* outer join key's
+																 * column #, or zero */
+	bool		skewInherit;	/* is outer join rel an
+																 * inheritance tree? */
 	/* all other info is in the parent HashJoin node */
-	Cardinality rows_total;		/* estimate total rows if parallel_aware */
+	Cardinality rows_total pg_node_attr(query_jumble_ignore);	/* estimate total rows
+																 * if parallel_aware */
 } Hash;
 
 /* ----------------
@@ -1252,7 +1325,7 @@ typedef struct SetOp
 	bool	   *cmpNullsFirst pg_node_attr(array_size(numCols));
 
 	/* estimated number of groups in left input */
-	long		numGroups;
+	long		numGroups pg_node_attr(query_jumble_ignore);
 } SetOp;
 
 /* ----------------
@@ -1267,8 +1340,10 @@ typedef struct SetOp
 typedef struct LockRows
 {
 	Plan		plan;
-	List	   *rowMarks;		/* a list of PlanRowMark's */
-	int			epqParam;		/* ID of Param for EvalPlanQual re-eval */
+	List	   *rowMarks; /* a list of
+															 * PlanRowMark's */
+	int			epqParam; /* ID of Param for
+															 * EvalPlanQual re-eval */
 } LockRows;
 
 /* ----------------
