@@ -1106,6 +1106,7 @@ exec_simple_query(const char *query_string)
 		size_t		cmdtaglen;
 
 		pgstat_report_query_id(0, true);
+		pgstat_report_plan_id(0, 0, true);
 
 		/*
 		 * Get the command name for use in status display (it also becomes the
