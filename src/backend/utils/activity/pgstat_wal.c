@@ -24,15 +24,6 @@
 PgStat_PendingWalStats PendingWalStats = {0};
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_report_wal(). This is used to calculate how much WAL usage
- * happens between pgstat_report_wal() calls, by subtracting
- * the previous counters from the current ones.
- */
-static WalUsage prevWalUsage;
-
-
-/*
  * Calculate how much WAL usage counters have increased and update
  * shared WAL and IO statistics.
  *
@@ -91,7 +82,6 @@ bool
 pgstat_wal_flush_cb(bool nowait)
 {
 	PgStatShared_Wal *stats_shmem = &pgStatLocal.shmem->wal;
-	WalUsage	wal_usage_diff = {0};
 
 	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 	Assert(pgStatLocal.shmem != NULL &&
@@ -104,13 +94,6 @@ pgstat_wal_flush_cb(bool nowait)
 	if (!pgstat_wal_have_pending_cb())
 		return false;
 
-	/*
-	 * We don't update the WAL usage portion of the local WalStats elsewhere.
-	 * Calculate how much WAL usage counters were increased by subtracting the
-	 * previous counters from the current ones.
-	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevWalUsage);
-
 	if (!nowait)
 		LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
 	else if (!LWLockConditionalAcquire(&stats_shmem->lock, LW_EXCLUSIVE))
@@ -120,9 +103,9 @@ pgstat_wal_flush_cb(bool nowait)
 	(stats_shmem->stats.fld += var_to_add.fld)
 #define WALSTAT_ACC_INSTR_TIME(fld) \
 	(stats_shmem->stats.fld += INSTR_TIME_GET_MICROSEC(PendingWalStats.fld))
-	WALSTAT_ACC(wal_records, wal_usage_diff);
-	WALSTAT_ACC(wal_fpi, wal_usage_diff);
-	WALSTAT_ACC(wal_bytes, wal_usage_diff);
+	WALSTAT_ACC(wal_records, PendingWalStats);
+	WALSTAT_ACC(wal_fpi, PendingWalStats);
+	WALSTAT_ACC(wal_bytes, PendingWalStats);
 	WALSTAT_ACC(wal_buffers_full, PendingWalStats);
 	WALSTAT_ACC(wal_write, PendingWalStats);
 	WALSTAT_ACC(wal_sync, PendingWalStats);
@@ -134,27 +117,11 @@ pgstat_wal_flush_cb(bool nowait)
 	LWLockRelease(&stats_shmem->lock);
 
 	/*
-	 * Save the current counters for the subsequent calculation of WAL usage.
-	 */
-	prevWalUsage = pgWalUsage;
-
-	/*
 	 * Clear out the statistics buffer, so it can be re-used.
 	 */
 	MemSet(&PendingWalStats, 0, sizeof(PendingWalStats));
 
 	return false;
-}
-
-void
-pgstat_wal_init_backend_cb(void)
-{
-	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_wal_flush_cb()
-	 * can calculate how much pgWalUsage counters are increased by subtracting
-	 * prevWalUsage from pgWalUsage.
-	 */
-	prevWalUsage = pgWalUsage;
 }
 
 /*
@@ -167,7 +134,7 @@ pgstat_wal_init_backend_cb(void)
 bool
 pgstat_wal_have_pending_cb(void)
 {
-	return pgWalUsage.wal_records != prevWalUsage.wal_records ||
+	return PendingWalStats.wal_records != 0 ||
 		PendingWalStats.wal_write != 0 ||
 		PendingWalStats.wal_sync != 0;
 }

@@ -693,7 +693,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 		{
 			PinLocalBuffer(bufHdr, true);
 
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 
 			return true;
 		}
@@ -725,7 +725,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 			else
 				PinBuffer_Locked(bufHdr);	/* pin for first time */
 
-			pgBufferUsage.shared_blks_hit++;
+			INSTR_BUFUSAGE_INCR(shared_blks_hit);
 
 			return true;
 		}
@@ -1143,14 +1143,14 @@ PinBufferForBlock(Relation rel,
 	{
 		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr);
 		if (*foundPtr)
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 	}
 	else
 	{
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
 							 strategy, foundPtr, io_context);
 		if (*foundPtr)
-			pgBufferUsage.shared_blks_hit++;
+			INSTR_BUFUSAGE_INCR(shared_blks_hit);
 	}
 	if (rel)
 	{
@@ -1455,9 +1455,9 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 	 * but another backend completed the read".
 	 */
 	if (persistence == RELPERSISTENCE_TEMP)
-		pgBufferUsage.local_blks_read += nblocks;
+		INSTR_BUFUSAGE_ADD(local_blks_read, nblocks);
 	else
-		pgBufferUsage.shared_blks_read += nblocks;
+		INSTR_BUFUSAGE_ADD(shared_blks_read, nblocks);
 
 	for (int i = 0; i < nblocks; ++i)
 	{
@@ -2453,7 +2453,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 		TerminateBufferIO(buf_hdr, false, BM_VALID, true);
 	}
 
-	pgBufferUsage.shared_blks_written += extend_by;
+	INSTR_BUFUSAGE_ADD(shared_blks_written, extend_by);
 
 	*extended_by = extend_by;
 
@@ -2571,7 +2571,7 @@ MarkBufferDirty(Buffer buffer)
 	 */
 	if (!(old_buf_state & BM_DIRTY))
 	{
-		pgBufferUsage.shared_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
@@ -3893,7 +3893,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	pgstat_count_io_op_time(IOOBJECT_RELATION, io_context,
 							IOOP_WRITE, io_start, 1, BLCKSZ);
 
-	pgBufferUsage.shared_blks_written++;
+	INSTR_BUFUSAGE_INCR(shared_blks_written);
 
 	/*
 	 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
@@ -4477,7 +4477,7 @@ FlushRelationBuffers(Relation rel)
 				buf_state &= ~(BM_DIRTY | BM_JUST_DIRTIED);
 				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
 
-				pgBufferUsage.local_blks_written++;
+				INSTR_BUFUSAGE_INCR(local_blks_written);
 
 				/* Pop the error context stack */
 				error_context_stack = errcallback.previous;
@@ -5052,7 +5052,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 
 		if (dirtied)
 		{
-			pgBufferUsage.shared_blks_dirtied++;
+			INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 			if (VacuumCostActive)
 				VacuumCostBalance += VacuumCostPageDirty;
 		}

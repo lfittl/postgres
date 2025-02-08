@@ -366,8 +366,12 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	bool		do_freeze;
 	bool		do_prune;
 	bool		do_hint;
-	bool		hint_bit_fpi;
-	int64		fpi_before = pgWalUsage.wal_fpi;
+
+	/*
+	 * If checksums are enabled, heap_prune_satisfies_vacuum() may cause an
+	 * FPI to be emitted, reset emitted_fpi flag so we can check it later.
+	 */
+	emitted_fpi = false;
 
 	/* Copy parameters to prstate */
 	prstate.vistest = vistest;
@@ -552,12 +556,6 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 	}
 
 	/*
-	 * If checksums are enabled, heap_prune_satisfies_vacuum() may have caused
-	 * an FPI to be emitted.
-	 */
-	hint_bit_fpi = fpi_before != pgWalUsage.wal_fpi;
-
-	/*
 	 * Process HOT chains.
 	 *
 	 * We added the items to the array starting from 'maxoff', so by
@@ -704,7 +702,7 @@ heap_page_prune_and_freeze(Relation relation, Buffer buffer,
 				 */
 				if (RelationNeedsWAL(relation))
 				{
-					if (hint_bit_fpi)
+					if (emitted_fpi)
 						do_freeze = true;
 					else if (do_prune)
 					{
