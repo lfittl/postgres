@@ -149,8 +149,7 @@ pg_get_ticks_fast(void)
 	if (has_rdtsc)
 	{
 		instr_time now;
-		uint32 a;
-		now.ticks = __rdtsc(&a);
+		now.ticks = __rdtsc();
 		return now;
 	}
 #endif

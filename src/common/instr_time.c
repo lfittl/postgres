@@ -52,10 +52,24 @@ bool has_rdtscp = false;
  */
 static bool get_tsc_frequency_khz(uint32 *tsc_freq)
 {
-	uint32 r0, r1, r2;
-	int result = __get_cpuid(0x16, tsc_freq, &r0, &r1, &r2);
-	*tsc_freq *= 1000; // Convert from MHz to KHz
-	return result > 0 && *tsc_freq > 0;
+	uint32 eax_denominator, ebx_numerator, ecx_hz, edx;
+
+	if (!__get_cpuid(0x15, &eax_denominator, &ebx_numerator, &ecx_hz, &edx))
+		return false;
+
+	if (eax_denominator == 0 || ebx_numerator == 0)
+		return false;
+
+	if (ecx_hz == 0) { /* Some CPUs only report frequency in 16H */
+		uint32 eax_base_mhz, ebx, ecx, edx;
+		if (!__get_cpuid(0x16, &eax_base_mhz, &ebx, &ecx, &edx))
+			return false;
+		*tsc_freq = eax_base_mhz * 1000;
+	} else {
+		*tsc_freq = ecx_hz / 1000 * ebx_numerator / eax_denominator;
+	}
+
+	return true;
 }
 
 static bool is_rdtscp_available()
