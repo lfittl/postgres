@@ -521,7 +521,7 @@ typedef struct ResultRelInfo
 	ExprState **ri_TrigWhenExprs;
 
 	/* optional runtime measurements for triggers */
-	Instrumentation *ri_TrigInstrument;
+	TriggerInstrumentation *ri_TrigInstrument;
 
 	/* On-demand created slots for triggers / returning processing */
 	TupleTableSlot *ri_ReturningSlot;	/* for trigger output tuples */
@@ -1172,7 +1172,8 @@ typedef struct PlanState
 	ExecProcNodeMtd ExecProcNodeReal;	/* actual function, if above is a
 										 * wrapper */
 
-	Instrumentation *instrument;	/* Optional runtime stats for this node */
+	NodeInstrumentation *instrument;	/* Optional runtime stats for this
+										 * node */
 	WorkerInstrumentation *worker_instrument;	/* per-worker instrumentation */
 
 	/* Per-worker JIT instrumentation */

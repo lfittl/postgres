@@ -1099,18 +1099,15 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 	for (nt = 0; nt < rInfo->ri_TrigDesc->numtriggers; nt++)
 	{
 		Trigger    *trig = rInfo->ri_TrigDesc->triggers + nt;
-		Instrumentation *instr = rInfo->ri_TrigInstrument + nt;
+		TriggerInstrumentation *tginstr = rInfo->ri_TrigInstrument + nt;
 		char	   *relname;
 		char	   *conname = NULL;
-
-		/* Must clean up instrumentation state */
-		InstrEndLoop(instr);
 
 		/*
 		 * We ignore triggers that were never invoked; they likely aren't
 		 * relevant to the current query type.
 		 */
-		if (instr->ntuples == 0)
+		if (tginstr->firings == 0)
 			continue;
 
 		ExplainOpenGroup("Trigger", NULL, true, es);
@@ -1135,10 +1132,10 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 			if (show_relname)
 				appendStringInfo(es->str, " on %s", relname);
 			if (es->timing)
-				appendStringInfo(es->str, ": time=%.3f calls=%.0f\n",
-								 INSTR_TIME_GET_MILLISEC(instr->total), instr->ntuples);
+				appendStringInfo(es->str, ": time=%.3f calls=%d\n",
+								 INSTR_TIME_GET_MILLISEC(tginstr->instr.total), tginstr->firings);
 			else
-				appendStringInfo(es->str, ": calls=%.0f\n", instr->ntuples);
+				appendStringInfo(es->str, ": calls=%d\n", tginstr->firings);
 		}
 		else
 		{
@@ -1147,9 +1144,9 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 				ExplainPropertyText("Constraint Name", conname, es);
 			ExplainPropertyText("Relation", relname, es);
 			if (es->timing)
-				ExplainPropertyFloat("Time", "ms", INSTR_TIME_GET_MILLISEC(instr->total), 3,
+				ExplainPropertyFloat("Time", "ms", INSTR_TIME_GET_MILLISEC(tginstr->instr.total), 3,
 									 es);
-			ExplainPropertyFloat("Calls", NULL, instr->ntuples, 0, es);
+			ExplainPropertyInteger("Calls", NULL, tginstr->firings, es);
 		}
 
 		if (conname)
@@ -1893,7 +1890,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 		for (int n = 0; n < w->num_workers; n++)
 		{
-			Instrumentation *instrument = &w->instrument[n];
+			NodeInstrumentation *instrument = &w->instrument[n];
 			double		nloops = instrument->nloops;
 			double		startup_ms;
 			double		total_ms;
@@ -2300,7 +2297,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 		for (int n = 0; n < w->num_workers; n++)
 		{
-			Instrumentation *instrument = &w->instrument[n];
+			NodeInstrumentation *instrument = &w->instrument[n];
 			double		nloops = instrument->nloops;
 
 			if (nloops <= 0)
