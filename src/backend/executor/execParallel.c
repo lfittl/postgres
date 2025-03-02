@@ -58,13 +58,12 @@
 #define PARALLEL_KEY_EXECUTOR_FIXED		UINT64CONST(0xE000000000000001)
 #define PARALLEL_KEY_PLANNEDSTMT		UINT64CONST(0xE000000000000002)
 #define PARALLEL_KEY_PARAMLISTINFO		UINT64CONST(0xE000000000000003)
-#define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xE000000000000004)
+#define PARALLEL_KEY_INSTR_USAGE		UINT64CONST(0xE000000000000004)
 #define PARALLEL_KEY_TUPLE_QUEUE		UINT64CONST(0xE000000000000005)
 #define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000006)
 #define PARALLEL_KEY_DSA				UINT64CONST(0xE000000000000007)
 #define PARALLEL_KEY_QUERY_TEXT		UINT64CONST(0xE000000000000008)
 #define PARALLEL_KEY_JIT_INSTRUMENTATION UINT64CONST(0xE000000000000009)
-#define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xE00000000000000A)
 
 #define PARALLEL_TUPLE_QUEUE_SIZE		65536
 
@@ -609,8 +608,6 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	char	   *pstmt_data;
 	char	   *pstmt_space;
 	char	   *paramlistinfo_space;
-	BufferUsage *bufusage_space;
-	WalUsage   *walusage_space;
 	SharedExecutorInstrumentation *instrumentation = NULL;
 	SharedJitInstrumentation *jit_instrumentation = NULL;
 	int			pstmt_len;
@@ -674,22 +671,14 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/*
-	 * Estimate space for BufferUsage.
-	 *
-	 * If EXPLAIN is not in use and there are no extensions loaded that care,
-	 * we could skip this.  But we have no way of knowing whether anyone's
-	 * looking at pgBufferUsage, so do it unconditionally.
+	 * Estimate space for InstrumentUsage, if needed.
 	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-
-	/*
-	 * Same thing for WalUsage.
-	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	if (InstrumentUsageActive())
+	{
+		shm_toc_estimate_chunk(&pcxt->estimator,
+							   mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
 
 	/* Estimate space for tuple queues. */
 	shm_toc_estimate_chunk(&pcxt->estimator,
@@ -774,17 +763,18 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_space);
 	SerializeParamList(estate->es_param_list_info, &paramlistinfo_space);
 
-	/* Allocate space for each worker's BufferUsage; no need to initialize. */
-	bufusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufusage_space);
-	pei->buffer_usage = bufusage_space;
+	/*
+	 * Allocate space for each worker's InstrumentUsage; no need to
+	 * initialize.
+	 */
+	if (InstrumentUsageActive())
+	{
+		InstrumentUsage *instrusage = shm_toc_allocate(pcxt->toc,
+													   mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
 
-	/* Same for WalUsage. */
-	walusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage_space);
-	pei->wal_usage = walusage_space;
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTR_USAGE, instrusage);
+		pei->instrusage = instrusage;
+	}
 
 	/* Set up the tuple queues that the workers will write into. */
 	pei->tqueue = ExecParallelSetupTupleQueues(pcxt, false);
@@ -1194,8 +1184,11 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	 * Next, accumulate buffer/WAL usage.  (This must wait for the workers to
 	 * finish, or we might get incomplete data.)
 	 */
-	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	if (InstrumentUsageActive())
+	{
+		for (i = 0; i < nworkers; i++)
+			InstrUsageAddToCurrent(&pei->instrusage[i]);
+	}
 
 	pei->finished = true;
 }
@@ -1430,8 +1423,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
-	BufferUsage *buffer_usage;
-	WalUsage   *wal_usage;
+	InstrumentUsage *shm_usage;
 	DestReceiver *receiver;
 	QueryDesc  *queryDesc;
 	SharedExecutorInstrumentation *instrumentation;
@@ -1490,7 +1482,9 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	shm_usage = shm_toc_lookup(toc, PARALLEL_KEY_INSTR_USAGE, true);
+	if (shm_usage)
+		InstrUsageStart();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1504,10 +1498,12 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	ExecutorFinish(queryDesc);
 
 	/* Report buffer/WAL usage during parallel execution. */
-	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
-	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
-						  &wal_usage[ParallelWorkerNumber]);
+	if (shm_usage)
+	{
+		InstrumentUsage *usage = InstrUsageStop();
+
+		memcpy(&shm_usage[ParallelWorkerNumber], usage, sizeof(InstrumentUsage));
+	}
 
 	/* Report instrumentation data if any instrumentation options are set. */
 	if (instrumentation != NULL)
