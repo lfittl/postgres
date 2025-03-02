@@ -196,6 +196,32 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 		WalUsageAdd(&dst->walusage, &add->walusage);
 }
 
+/* Trigger instrumentation handling */
+TriggerInstrumentation *
+InstrAllocTrigger(int n, int instrument_options)
+{
+	TriggerInstrumentation *tginstr = palloc0(n * sizeof(TriggerInstrumentation));
+	int			i;
+
+	for (i = 0; i < n; i++)
+		InstrInit(&tginstr[i].instr, instrument_options);
+
+	return tginstr;
+}
+
+void
+InstrStartTrigger(TriggerInstrumentation *tginstr)
+{
+	InstrStartNode(&tginstr->instr);
+}
+
+void
+InstrStopTrigger(TriggerInstrumentation *tginstr, int firings)
+{
+	InstrStopNode(&tginstr->instr, 0);
+	tginstr->firings += firings;
+}
+
 /* note current values during parallel executor startup */
 void
 InstrStartParallelQuery(void)
