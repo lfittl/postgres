@@ -46,9 +46,8 @@
  */
 #define PARALLEL_VACUUM_KEY_SHARED			1
 #define PARALLEL_VACUUM_KEY_QUERY_TEXT		2
-#define PARALLEL_VACUUM_KEY_BUFFER_USAGE	3
-#define PARALLEL_VACUUM_KEY_WAL_USAGE		4
-#define PARALLEL_VACUUM_KEY_INDEX_STATS		5
+#define PARALLEL_VACUUM_KEY_INSTR_USAGE		3
+#define PARALLEL_VACUUM_KEY_INDEX_STATS		4
 
 /*
  * Shared information among parallel workers.  So this is allocated in the DSM
@@ -187,11 +186,8 @@ struct ParallelVacuumState
 	/* Shared dead items space among parallel vacuum workers */
 	TidStore   *dead_items;
 
-	/* Points to buffer usage area in DSM */
-	BufferUsage *buffer_usage;
-
-	/* Points to WAL usage area in DSM */
-	WalUsage   *wal_usage;
+	/* Points to instrument usage area in DSM */
+	InstrumentUsage *instrusage;
 
 	/*
 	 * False if the index is totally unsuitable target for all parallel
@@ -249,8 +245,7 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	PVShared   *shared;
 	TidStore   *dead_items;
 	PVIndStats *indstats;
-	BufferUsage *buffer_usage;
-	WalUsage   *wal_usage;
+	InstrumentUsage *instrusage;
 	bool	   *will_parallel_vacuum;
 	Size		est_indstats_len;
 	Size		est_shared_len;
@@ -303,19 +298,15 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/*
-	 * Estimate space for BufferUsage and WalUsage --
-	 * PARALLEL_VACUUM_KEY_BUFFER_USAGE and PARALLEL_VACUUM_KEY_WAL_USAGE.
-	 *
-	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgBufferUsage or
-	 * pgWalUsage, so do it unconditionally.
+	 * Estimate space for InstrumentUsage -- PARALLEL_VACUUM_KEY_INSTR_USAGE,
+	 * if needed.
 	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	if (InstrumentUsageActive())
+	{
+		shm_toc_estimate_chunk(&pcxt->estimator,
+							   mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
 
 	/* Finally, estimate PARALLEL_VACUUM_KEY_QUERY_TEXT space */
 	if (debug_query_string)
@@ -395,17 +386,15 @@ parallel_vacuum_init(Relation rel, Relation *indrels, int nindexes,
 	pvs->shared = shared;
 
 	/*
-	 * Allocate space for each worker's BufferUsage and WalUsage; no need to
-	 * initialize
+	 * Allocate space for each worker's InstrumentUsage; no need to initialize
 	 */
-	buffer_usage = shm_toc_allocate(pcxt->toc,
-									mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_VACUUM_KEY_BUFFER_USAGE, buffer_usage);
-	pvs->buffer_usage = buffer_usage;
-	wal_usage = shm_toc_allocate(pcxt->toc,
-								 mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_VACUUM_KEY_WAL_USAGE, wal_usage);
-	pvs->wal_usage = wal_usage;
+	if (InstrumentUsageActive())
+	{
+		instrusage = shm_toc_allocate(pcxt->toc,
+									  mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_VACUUM_KEY_INSTR_USAGE, instrusage);
+		pvs->instrusage = instrusage;
+	}
 
 	/* Store query string for workers */
 	if (debug_query_string)
@@ -737,7 +726,7 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 		WaitForParallelWorkersToFinish(pvs->pcxt);
 
 		for (int i = 0; i < pvs->pcxt->nworkers_launched; i++)
-			InstrAccumParallelQuery(&pvs->buffer_usage[i], &pvs->wal_usage[i]);
+			InstrUsageAddToCurrent(&pvs->instrusage[i]);
 	}
 
 	/*
@@ -994,8 +983,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	PVIndStats *indstats;
 	PVShared   *shared;
 	TidStore   *dead_items;
-	BufferUsage *buffer_usage;
-	WalUsage   *wal_usage;
+	InstrumentUsage *shm_usage;
 	int			nindexes;
 	char	   *sharedquery;
 	ErrorContextCallback errcallback;
@@ -1083,16 +1071,20 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	error_context_stack = &errcallback;
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	shm_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_INSTR_USAGE, true);
+	if (shm_usage)
+		InstrUsageStart();
 
 	/* Process indexes to perform vacuum/cleanup */
 	parallel_vacuum_process_safe_indexes(&pvs);
 
 	/* Report buffer/WAL usage during parallel execution */
-	buffer_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_BUFFER_USAGE, false);
-	wal_usage = shm_toc_lookup(toc, PARALLEL_VACUUM_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
-						  &wal_usage[ParallelWorkerNumber]);
+	if (shm_usage)
+	{
+		InstrumentUsage *usage = InstrUsageStop();
+
+		memcpy(&shm_usage[ParallelWorkerNumber], usage, sizeof(InstrumentUsage));
+	}
 
 	/* Report any remaining cost-based vacuum delay time */
 	if (track_cost_delay_timing)

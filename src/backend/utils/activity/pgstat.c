@@ -473,7 +473,6 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.shared_data_off = offsetof(PgStatShared_Wal, stats),
 		.shared_data_len = sizeof(((PgStatShared_Wal *) 0)->stats),
 
-		.init_backend_cb = pgstat_wal_init_backend_cb,
 		.flush_static_cb = pgstat_wal_flush_cb,
 		.have_static_pending_cb = pgstat_wal_have_pending_cb,
 		.init_shmem_cb = pgstat_wal_init_shmem_cb,

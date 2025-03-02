@@ -150,6 +150,12 @@ int			wal_segment_size = DEFAULT_XLOG_SEG_SIZE;
 #define NUM_XLOGINSERT_LOCKS  8
 
 /*
+ * Some producers of WAL care whether at least one FPI was emitted, allow them
+ * to track this by setting this flag to false and checking later if it changed.
+ */
+bool		emitted_fpi = false;
+
+/*
  * Max distance from last checkpoint, before triggering a new xlog-based
  * checkpoint.
  */
@@ -1078,10 +1084,16 @@ XLogInsertRecord(XLogRecData *rdata,
 	/* Report WAL traffic to the instrumentation. */
 	if (inserted)
 	{
+		INSTR_WALUSAGE_ADD(wal_bytes, rechdr->xl_tot_len);
+		INSTR_WALUSAGE_INCR(wal_records);
+		INSTR_WALUSAGE_ADD(wal_fpi, num_fpi);
 		pgWalUsage.wal_bytes += rechdr->xl_tot_len;
 		pgWalUsage.wal_records++;
 		pgWalUsage.wal_fpi += num_fpi;
 	}
+
+	if (num_fpi > 0)
+		emitted_fpi = true;
 
 	return EndPos;
 }
