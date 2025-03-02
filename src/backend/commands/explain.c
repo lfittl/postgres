@@ -447,8 +447,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	PlannedStmt *plan;
 	instr_time	planstart,
 				planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	InstrumentUsage *usage = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
@@ -470,7 +469,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	}
 
 	if (es->buffers)
-		bufusage_start = pgBufferUsage;
+		InstrUsageStart();
 	INSTR_TIME_SET_CURRENT(planstart);
 
 	/* plan the query */
@@ -485,17 +484,17 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
 	if (es->buffers)
 	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
+		/* support summary tracking of utility statements by extensions */
+		InstrUsageAccumToPrevious();
+		usage = InstrUsageStop();
 	}
 
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, NULL, NULL, -1, into, es, queryString, params,
 				   queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
+				   &planduration, (es->buffers ? &usage->bufusage : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 
@@ -2410,9 +2409,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->bufusage);
+		show_buffer_usage(es, &planstate->instrument->instrusage.bufusage);
 	if (es->wal && planstate->instrument)
-		show_wal_usage(es, &planstate->instrument->walusage);
+		show_wal_usage(es, &planstate->instrument->instrusage.walusage);
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
@@ -2429,9 +2428,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->bufusage);
+				show_buffer_usage(es, &instrument->instrusage.bufusage);
 			if (es->wal)
-				show_wal_usage(es, &instrument->walusage);
+				show_wal_usage(es, &instrument->instrusage.walusage);
 			ExplainCloseWorker(n, es);
 		}
 	}

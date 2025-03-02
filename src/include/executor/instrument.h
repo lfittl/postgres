@@ -16,11 +16,6 @@
 #include "portability/instr_time.h"
 
 
-/*
- * BufferUsage and WalUsage counters keep being incremented infinitely,
- * i.e., must never be reset to zero, so that we can calculate how much
- * the counters are incremented in an arbitrary period.
- */
 typedef struct BufferUsage
 {
 	int64		shared_blks_hit;	/* # of shared buffer hits */
@@ -66,6 +61,13 @@ typedef enum InstrumentOption
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
 
+typedef struct InstrumentUsage
+{
+	struct InstrumentUsage *previous;
+	BufferUsage bufusage;
+	WalUsage	walusage;
+}			InstrumentUsage;
+
 typedef struct Instrumentation
 {
 	/* Parameters set at node creation: */
@@ -79,8 +81,6 @@ typedef struct Instrumentation
 	instr_time	counter;		/* accumulated runtime for this node */
 	double		firsttuple;		/* time for first tuple of this cycle */
 	double		tuplecount;		/* # of tuples emitted so far this cycle */
-	BufferUsage bufusage_start; /* buffer usage at start */
-	WalUsage	walusage_start; /* WAL usage at start */
 	/* Accumulated statistics across all completed cycles: */
 	double		startup;		/* total startup time (in seconds) */
 	double		total;			/* total time (in seconds) */
@@ -89,8 +89,7 @@ typedef struct Instrumentation
 	double		nloops;			/* # of run cycles for this node */
 	double		nfiltered1;		/* # of tuples removed by scanqual or joinqual */
 	double		nfiltered2;		/* # of tuples removed by "other" quals */
-	BufferUsage bufusage;		/* total buffer usage */
-	WalUsage	walusage;		/* total WAL usage */
+	InstrumentUsage instrusage; /* total buffer/WAL usage */
 } Instrumentation;
 
 typedef struct WorkerInstrumentation
@@ -99,8 +98,8 @@ typedef struct WorkerInstrumentation
 	Instrumentation instrument[FLEXIBLE_ARRAY_MEMBER];
 } WorkerInstrumentation;
 
-extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
+extern PGDLLIMPORT InstrumentUsage * pgInstrumentUsageStack;
 
 extern Instrumentation *InstrAlloc(int n, int instrument_options,
 								   bool async_mode);
@@ -110,12 +109,47 @@ extern void InstrStopNode(Instrumentation *instr, double nTuples);
 extern void InstrUpdateTupleCount(Instrumentation *instr, double nTuples);
 extern void InstrEndLoop(Instrumentation *instr);
 extern void InstrAggNode(Instrumentation *dst, Instrumentation *add);
-extern void InstrStartParallelQuery(void);
-extern void InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void BufferUsageAccumDiff(BufferUsage *dst,
-								 const BufferUsage *add, const BufferUsage *sub);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
+
+static inline bool
+InstrumentUsageActive(void)
+{
+	return pgInstrumentUsageStack != NULL;
+}
+
+#define INSTR_BUFUSAGE_INCR(fld) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->bufusage.fld++; \
+	} while(0)
+#define INSTR_BUFUSAGE_ADD(fld,val) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->bufusage.fld += val; \
+	} while(0)
+#define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
+	if (pgInstrumentUsageStack) \
+		INSTR_TIME_ADD(pgInstrumentUsageStack->bufusage.fld, val); \
+	} while (0)
+#define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
+	if (pgInstrumentUsageStack) \
+		INSTR_TIME_ACCUM_DIFF(pgInstrumentUsageStack->bufusage.fld, endval, startval); \
+	} while (0)
+
+#define INSTR_WALUSAGE_INCR(fld) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->walusage.fld++; \
+	} while(0)
+#define INSTR_WALUSAGE_ADD(fld,val) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->walusage.fld += val; \
+	} while(0)
+
+extern void InstrUsageStart(void);
+extern InstrumentUsage * InstrUsageStop(void);
+extern void InstrUsageReset_AfterError(void);
+extern void InstrUsageAccumToPrevious(void);
+extern void InstrUsageAdd(InstrumentUsage * dst, const InstrumentUsage * add);
+extern void InstrUsageAddToCurrent(InstrumentUsage * instrusage);
+extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 
 #endif							/* INSTRUMENT_H */
