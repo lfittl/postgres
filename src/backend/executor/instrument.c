@@ -17,13 +17,10 @@
 
 #include "executor/instrument.h"
 
-BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
-static WalUsage save_pgWalUsage;
+InstrumentUsage *pgInstrumentUsageStack = NULL;
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
-static void WalUsageAdd(WalUsage *dst, WalUsage *add);
+static void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 
 
 /* Allocate new instrumentation structure(s) */
@@ -71,12 +68,11 @@ InstrStartNode(Instrumentation *instr)
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStartNode called twice in a row");
 
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
-
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		instr->instrusage.previous = pgInstrumentUsageStack;
+		pgInstrumentUsageStack = &instr->instrusage;
+	}
 }
 
 /* Exit from a plan node */
@@ -101,14 +97,8 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	if (instr->need_bufusage || instr->need_walusage)
+		pgInstrumentUsageStack = pgInstrumentUsageStack->previous;
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -156,6 +146,14 @@ InstrEndLoop(Instrumentation *instr)
 	instr->ntuples += instr->tuplecount;
 	instr->nloops += 1;
 
+	/*
+	 * Accumulate usage stats into active one (if any)
+	 *
+	 * This ensures that if we tracked buffer/WAL usage for EXPLAIN ANALYZE, a
+	 * potential extension interested in summary data can also get it.
+	 */
+	InstrUsageAddToCurrent(&instr->instrusage);
+
 	/* Reset for next cycle (if any) */
 	instr->running = false;
 	INSTR_TIME_SET_ZERO(instr->starttime);
@@ -187,42 +185,70 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 	dst->nfiltered1 += add->nfiltered1;
 	dst->nfiltered2 += add->nfiltered2;
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
-
-	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
+	/* Add delta of buffer/WAL usage since entry to node's totals */
+	if (dst->need_bufusage || dst->need_walusage)
+		InstrUsageAdd(&dst->instrusage, &add->instrusage);
 }
 
-/* note current values during parallel executor startup */
+/* Start buffer/WAL usage measurement */
 void
-InstrStartParallelQuery(void)
+InstrUsageStart()
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
+	InstrumentUsage *usage = palloc0(sizeof(InstrumentUsage));
+
+	usage->previous = pgInstrumentUsageStack;
+	pgInstrumentUsageStack = usage;
 }
 
-/* report usage after parallel executor shutdown */
+/*
+ * Call this before calling stop to add the usage metrics to the previous item
+ * on the stack (if it exists)
+ */
 void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrUsageAccumToPrevious()
 {
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
+	if (!pgInstrumentUsageStack || !pgInstrumentUsageStack->previous)
+		return;
+
+	InstrUsageAdd(pgInstrumentUsageStack->previous, pgInstrumentUsageStack);
 }
 
-/* accumulate work done by workers in leader's stats */
-void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+/* Stop usage measurement and return results */
+InstrumentUsage *
+InstrUsageStop()
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
-	WalUsageAdd(&pgWalUsage, walusage);
+	InstrumentUsage *result = pgInstrumentUsageStack;
+
+	Assert(result != NULL);
+
+	pgInstrumentUsageStack = result->previous;
+	result->previous = NULL;
+
+	return result;
+}
+
+void
+AtAbort_InstrUsageReset()
+{
+	pgInstrumentUsageStack = NULL;
+}
+
+void
+InstrUsageAdd(InstrumentUsage * dst, const InstrumentUsage * add)
+{
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
+}
+
+void
+InstrUsageAddToCurrent(InstrumentUsage * instrusage)
+{
+	if (pgInstrumentUsageStack != NULL)
+		InstrUsageAdd(pgInstrumentUsageStack, instrusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -243,39 +269,9 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
 }
 
-/* dst += add - sub */
-void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
-}
-
 /* helper functions for WAL usage accumulation */
 static void
-WalUsageAdd(WalUsage *dst, WalUsage *add)
+WalUsageAdd(WalUsage *dst, const WalUsage *add)
 {
 	dst->wal_bytes += add->wal_bytes;
 	dst->wal_records += add->wal_records;

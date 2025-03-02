@@ -2986,6 +2986,7 @@ AbortTransaction(void)
 		AtEOXact_ApplyLauncher(false);
 		AtEOXact_LogicalRepWorkers(false);
 		pgstat_report_xact_timestamp(0);
+		AtAbort_InstrUsageReset();
 	}
 
 	/*
