@@ -476,7 +476,7 @@ ExtendBufferedRelLocal(BufferManagerRelation bmr,
 
 	*extended_by = extend_by;
 
-	pgBufferUsage.local_blks_written += extend_by;
+	INSTR_BUFUSAGE_ADD(local_blks_written, extend_by);
 
 	return first_block;
 }
@@ -507,7 +507,7 @@ MarkLocalBufferDirty(Buffer buffer)
 	buf_state = pg_atomic_read_u32(&bufHdr->state);
 
 	if (!(buf_state & BM_DIRTY))
-		pgBufferUsage.local_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(local_blks_dirtied);
 
 	buf_state |= BM_DIRTY;
 

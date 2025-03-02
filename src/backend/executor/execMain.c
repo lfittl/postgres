@@ -452,7 +452,11 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		dest->rShutdown(dest);
 
 	if (queryDesc->totaltime)
+	{
+		/* allow a potential calling EXPLAIN statement to capture the usage */
+		InstrUsageAccumToPrevious();
 		InstrStopNode(queryDesc->totaltime, estate->es_processed);
+	}
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -515,7 +519,11 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 		AfterTriggerEndQuery(estate);
 
 	if (queryDesc->totaltime)
+	{
+		/* allow a potential calling EXPLAIN statement to capture the usage */
+		InstrUsageAccumToPrevious();
 		InstrStopNode(queryDesc->totaltime, 0);
+	}
 
 	MemoryContextSwitchTo(oldcontext);
 

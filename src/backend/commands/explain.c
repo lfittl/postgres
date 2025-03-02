@@ -143,7 +143,7 @@ static void show_instrumentation_count(const char *qlabel, int which,
 static void show_foreignscan_info(ForeignScanState *fsstate, ExplainState *es);
 static const char *explain_get_index_name(Oid indexId);
 static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
-static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
+static void show_buffer_usage(ExplainState *es, const BufferUsage *usage, hyperLogLogState *shared_blks_hit_distinct);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -323,8 +323,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	PlannedStmt *plan;
 	instr_time	planstart,
 				planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	InstrumentUsage *usage = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
@@ -346,7 +345,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	}
 
 	if (es->buffers)
-		bufusage_start = pgBufferUsage;
+		InstrUsageStart();
 	INSTR_TIME_SET_CURRENT(planstart);
 
 	/* plan the query */
@@ -361,17 +360,17 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
 	if (es->buffers)
 	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
+		/* support summary tracking of utility statements by extensions */
+		InstrUsageAccumToPrevious();
+		usage = InstrUsageStop();
 	}
 
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, NULL, NULL, -1, into, es, queryString, params,
 				   queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
+				   &planduration, (es->buffers ? &usage->bufusage : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 
@@ -517,6 +516,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
 
 	if (es->buffers)
 		instrument_option |= INSTRUMENT_BUFFERS;
+	if (es->buffers_distinct)
+		instrument_option |= INSTRUMENT_SHARED_HIT_DISTINCT;
 	if (es->wal)
 		instrument_option |= INSTRUMENT_WAL;
 
@@ -622,7 +623,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
 		}
 
 		if (bufusage)
-			show_buffer_usage(es, bufusage);
+			show_buffer_usage(es, bufusage, NULL);
 
 		if (mem_counters)
 			show_memory_counters(es, mem_counters);
@@ -1043,7 +1044,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		if (es->buffers && peek_buffer_usage(es, &metrics->bufferUsage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 			es->indent--;
 		}
 	}
@@ -1057,7 +1058,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
@@ -2295,9 +2296,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->bufusage);
+		show_buffer_usage(es, &planstate->instrument->instrusage.bufusage, planstate->instrument->instrusage.shared_blks_hit_distinct);
 	if (es->wal && planstate->instrument)
-		show_wal_usage(es, &planstate->instrument->walusage);
+		show_wal_usage(es, &planstate->instrument->instrusage.walusage);
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
@@ -2314,9 +2315,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->bufusage);
+				show_buffer_usage(es, &instrument->instrusage.bufusage, NULL);
 			if (es->wal)
-				show_wal_usage(es, &instrument->walusage);
+				show_wal_usage(es, &instrument->instrusage.walusage);
 			ExplainCloseWorker(n, es);
 		}
 	}
@@ -4095,7 +4096,7 @@ peek_buffer_usage(ExplainState *es, const BufferUsage *usage)
  * Show buffer usage details.  This better be sync with peek_buffer_usage.
  */
 static void
-show_buffer_usage(ExplainState *es, const BufferUsage *usage)
+show_buffer_usage(ExplainState *es, const BufferUsage *usage, hyperLogLogState *shared_blks_hit_distinct)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
@@ -4126,8 +4127,16 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 			{
 				appendStringInfoString(es->str, " shared");
 				if (usage->shared_blks_hit > 0)
+<<<<<<< HEAD
 					appendStringInfo(es->str, " hit=%" PRId64,
 									 usage->shared_blks_hit);
+=======
+					appendStringInfo(es->str, " hit=%lld",
+									 (long long) usage->shared_blks_hit);
+				if (shared_blks_hit_distinct)
+					appendStringInfo(es->str, " hit distinct=%lld",
+									 (long long) estimateHyperLogLog(shared_blks_hit_distinct));
+>>>>>>> c226a30695a (WIP - add distinct)
 				if (usage->shared_blks_read > 0)
 					appendStringInfo(es->str, " read=%" PRId64,
 									 usage->shared_blks_read);
@@ -4218,6 +4227,9 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 	{
 		ExplainPropertyInteger("Shared Hit Blocks", NULL,
 							   usage->shared_blks_hit, es);
+		if (shared_blks_hit_distinct)
+			ExplainPropertyInteger("Shared Hit Distinct Blocks", NULL,
+								   estimateHyperLogLog(shared_blks_hit_distinct), es);
 		ExplainPropertyInteger("Shared Read Blocks", NULL,
 							   usage->shared_blks_read, es);
 		ExplainPropertyInteger("Shared Dirtied Blocks", NULL,
