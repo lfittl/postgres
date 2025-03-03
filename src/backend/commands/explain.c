@@ -132,7 +132,7 @@ static void show_instrumentation_count(const char *qlabel, int which,
 static void show_foreignscan_info(ForeignScanState *fsstate, ExplainState *es);
 static const char *explain_get_index_name(Oid indexId);
 static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
-static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
+static void show_buffer_usage(ExplainState *es, const BufferUsage *usage, hyperLogLogState *shared_blks_hit_distinct);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -189,7 +189,13 @@ ExplainQuery(ParseState *pstate, ExplainStmt *stmt,
 		else if (strcmp(opt->defname, "buffers") == 0)
 		{
 			buffers_set = true;
-			es->buffers = defGetBoolean(opt);
+			if (opt->arg != NULL && strcmp(defGetString(opt), "distinct") == 0)
+			{
+				es->buffers = true;
+				es->buffers_distinct = true;
+			}
+			else
+				es->buffers = defGetBoolean(opt);
 		}
 		else if (strcmp(opt->defname, "wal") == 0)
 			es->wal = defGetBoolean(opt);
@@ -640,6 +646,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
 
 	if (es->buffers)
 		instrument_option |= INSTRUMENT_BUFFERS;
+	if (es->buffers_distinct)
+		instrument_option |= INSTRUMENT_SHARED_HIT_DISTINCT;
 	if (es->wal)
 		instrument_option |= INSTRUMENT_WAL;
 
@@ -745,7 +753,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
 		}
 
 		if (bufusage)
-			show_buffer_usage(es, bufusage);
+			show_buffer_usage(es, bufusage, NULL);
 
 		if (mem_counters)
 			show_memory_counters(es, mem_counters);
@@ -1161,7 +1169,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		if (es->buffers && peek_buffer_usage(es, &metrics->bufferUsage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 			es->indent--;
 		}
 	}
@@ -1175,7 +1183,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
@@ -2409,7 +2417,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->instrusage.bufusage);
+		show_buffer_usage(es, &planstate->instrument->instrusage.bufusage, planstate->instrument->instrusage.shared_blks_hit_distinct);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instrusage.walusage);
 
@@ -2428,7 +2436,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->instrusage.bufusage);
+				show_buffer_usage(es, &instrument->instrusage.bufusage, NULL);
 			if (es->wal)
 				show_wal_usage(es, &instrument->instrusage.walusage);
 			ExplainCloseWorker(n, es);
@@ -4048,7 +4056,7 @@ peek_buffer_usage(ExplainState *es, const BufferUsage *usage)
  * Show buffer usage details.  This better be sync with peek_buffer_usage.
  */
 static void
-show_buffer_usage(ExplainState *es, const BufferUsage *usage)
+show_buffer_usage(ExplainState *es, const BufferUsage *usage, hyperLogLogState *shared_blks_hit_distinct)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
@@ -4081,6 +4089,9 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 				if (usage->shared_blks_hit > 0)
 					appendStringInfo(es->str, " hit=%lld",
 									 (long long) usage->shared_blks_hit);
+				if (shared_blks_hit_distinct)
+					appendStringInfo(es->str, " hit distinct=%lld",
+									 (long long) estimateHyperLogLog(shared_blks_hit_distinct));
 				if (usage->shared_blks_read > 0)
 					appendStringInfo(es->str, " read=%lld",
 									 (long long) usage->shared_blks_read);
@@ -4171,6 +4182,9 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 	{
 		ExplainPropertyInteger("Shared Hit Blocks", NULL,
 							   usage->shared_blks_hit, es);
+		if (shared_blks_hit_distinct)
+			ExplainPropertyInteger("Shared Hit Distinct Blocks", NULL,
+								   estimateHyperLogLog(shared_blks_hit_distinct), es);
 		ExplainPropertyInteger("Shared Read Blocks", NULL,
 							   usage->shared_blks_read, es);
 		ExplainPropertyInteger("Shared Dirtied Blocks", NULL,

@@ -13,6 +13,8 @@
 #ifndef INSTRUMENT_H
 #define INSTRUMENT_H
 
+#include "common/hashfn.h"
+#include "lib/hyperloglog.h"
 #include "portability/instr_time.h"
 
 
@@ -58,6 +60,8 @@ typedef enum InstrumentOption
 	INSTRUMENT_BUFFERS = 1 << 1,	/* needs buffer usage */
 	INSTRUMENT_ROWS = 1 << 2,	/* needs row count */
 	INSTRUMENT_WAL = 1 << 3,	/* needs WAL usage */
+	INSTRUMENT_SHARED_HIT_DISTINCT = 1 << 4,	/* needs estimated distinct
+												 * shared hit buffer count */
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
 
@@ -66,6 +70,7 @@ typedef struct InstrumentUsage
 	struct InstrumentUsage *previous;
 	BufferUsage bufusage;
 	WalUsage	walusage;
+	hyperLogLogState *shared_blks_hit_distinct;
 }			InstrumentUsage;
 
 typedef struct Instrumentation
@@ -74,6 +79,9 @@ typedef struct Instrumentation
 	bool		need_timer;		/* true if we need timer data */
 	bool		need_bufusage;	/* true if we need buffer usage data */
 	bool		need_walusage;	/* true if we need WAL usage data */
+	bool		need_shared_hit_distinct;	/* true if we need estimated
+											 * distinct shared hit buffer
+											 * count */
 	bool		async_mode;		/* true if node is in async mode */
 	/* Info about current plan cycle: */
 	bool		running;		/* true if we've completed first tuple */
@@ -134,6 +142,14 @@ InstrumentUsageActive(void)
 	if (pgInstrumentUsageStack) \
 		INSTR_TIME_ACCUM_DIFF(pgInstrumentUsageStack->bufusage.fld, endval, startval); \
 	} while (0)
+
+#define INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr) do { \
+		if (pgInstrumentUsageStack) { \
+			pgInstrumentUsageStack->bufusage.shared_blks_hit++; \
+			if (pgInstrumentUsageStack->shared_blks_hit_distinct) \
+				addHyperLogLog(pgInstrumentUsageStack->shared_blks_hit_distinct, DatumGetUInt32(hash_any((unsigned char *) &bufHdr->buf_id, sizeof(int)))); \
+		} \
+	} while(0)
 
 #define INSTR_WALUSAGE_INCR(fld) do { \
 		if (pgInstrumentUsageStack) \

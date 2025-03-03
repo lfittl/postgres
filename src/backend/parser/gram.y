@@ -1830,6 +1830,7 @@ opt_boolean_or_string:
 			TRUE_P									{ $$ = "true"; }
 			| FALSE_P								{ $$ = "false"; }
 			| ON									{ $$ = "on"; }
+			| DISTINCT								{ $$ = "distinct"; }
 			/*
 			 * OFF is also accepted as a boolean value, but is handled by
 			 * the NonReservedWord rule.  The action for booleans and strings

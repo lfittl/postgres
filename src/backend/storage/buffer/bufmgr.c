@@ -726,6 +726,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 				PinBuffer_Locked(bufHdr);	/* pin for first time */
 
 			INSTR_BUFUSAGE_INCR(shared_blks_hit);
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr);
 
 			return true;
 		}
@@ -1150,7 +1151,7 @@ PinBufferForBlock(Relation rel,
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
 							 strategy, foundPtr, io_context);
 		if (*foundPtr)
-			INSTR_BUFUSAGE_INCR(shared_blks_hit);
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr);
 	}
 	if (rel)
 	{

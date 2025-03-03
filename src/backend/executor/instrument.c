@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "utils/memutils.h"
 
 WalUsage	pgWalUsage;
 InstrumentUsage *pgInstrumentUsageStack = NULL;
@@ -31,11 +32,12 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 
 	/* initialize all fields to zeroes, then modify as needed */
 	instr = palloc0(n * sizeof(Instrumentation));
-	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
+	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL | INSTRUMENT_SHARED_HIT_DISTINCT))
 	{
 		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 		bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
 		bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+		bool		need_shared_hit_distinct = (instrument_options & INSTRUMENT_SHARED_HIT_DISTINCT) != 0;
 		int			i;
 
 		for (i = 0; i < n; i++)
@@ -43,6 +45,7 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 			instr[i].need_bufusage = need_buffers;
 			instr[i].need_walusage = need_wal;
 			instr[i].need_timer = need_timer;
+			instr[i].need_shared_hit_distinct = need_shared_hit_distinct;
 			instr[i].async_mode = async_mode;
 		}
 	}
@@ -58,6 +61,7 @@ InstrInit(Instrumentation *instr, int instrument_options)
 	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+	instr->need_shared_hit_distinct = (instrument_options & INSTRUMENT_SHARED_HIT_DISTINCT) != 0;
 }
 
 /* Entry to a plan node */
@@ -68,10 +72,16 @@ InstrStartNode(Instrumentation *instr)
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStartNode called twice in a row");
 
-	if (instr->need_bufusage || instr->need_walusage)
+	if (instr->need_bufusage || instr->need_walusage || instr->need_shared_hit_distinct)
 	{
 		instr->instrusage.previous = pgInstrumentUsageStack;
 		pgInstrumentUsageStack = &instr->instrusage;
+	}
+
+	if (instr->need_shared_hit_distinct && !instr->instrusage.shared_blks_hit_distinct)
+	{
+		instr->instrusage.shared_blks_hit_distinct = palloc0(sizeof(hyperLogLogState));
+		initHyperLogLog(instr->instrusage.shared_blks_hit_distinct, 16);
 	}
 }
 
@@ -218,6 +228,7 @@ InstrumentUsage *
 InstrUsageStop()
 {
 	InstrumentUsage *result = pgInstrumentUsageStack;
+
 	Assert(result != NULL);
 
 	pgInstrumentUsageStack = result->previous;
