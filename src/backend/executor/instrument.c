@@ -204,14 +204,6 @@ InstrEndLoop(Instrumentation *instr)
 	instr->ntuples += instr->tuplecount;
 	instr->nloops += 1;
 
-	/*
-	 * Accumulate usage stats into active one (if any)
-	 *
-	 * This ensures that if we tracked buffer/WAL usage for EXPLAIN ANALYZE, a
-	 * potential extension interested in summary data can also get it.
-	 */
-	InstrUsageAddToCurrent(&instr->instrusage);
-
 	/* Reset for next cycle (if any) */
 	instr->running = false;
 	INSTR_TIME_SET_ZERO(instr->starttime);
