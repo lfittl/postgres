@@ -500,6 +500,7 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 	const char *stmttype;
 	volatile bool in_outer_xact,
 				use_own_xacts;
+	InstrumentUsage *initial_usage = NULL;
 
 	Assert(params != NULL);
 
@@ -607,6 +608,9 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 		if (ActiveSnapshotSet())
 			PopActiveSnapshot();
 
+		if (InstrumentUsageActive())
+			initial_usage = InstrUsageStop();
+
 		/* matches the StartTransaction in PostgresMain() */
 		CommitTransactionCommand();
 	}
@@ -697,6 +701,12 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 		 * PostgresMain().
 		 */
 		StartTransactionCommand();
+
+		if (initial_usage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(initial_usage);
+		}
 	}
 
 	if ((params->options & VACOPT_VACUUM) &&

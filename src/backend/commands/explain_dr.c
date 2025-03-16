@@ -110,13 +110,12 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	int			natts = typeinfo->natts;
 	instr_time	start,
 				end;
-	BufferUsage instr_start;
 
 	/* only measure time, buffers if requested */
 	if (myState->es->timing)
 		INSTR_TIME_SET_CURRENT(start);
 	if (myState->es->buffers)
-		instr_start = pgBufferUsage;
+		InstrUsageStart();
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -193,9 +192,14 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 
 	/* Update buffer metrics */
 	if (myState->es->buffers)
-		BufferUsageAccumDiff(&myState->metrics.bufferUsage,
-							 &pgBufferUsage,
-							 &instr_start);
+	{
+		InstrumentUsage *usage;
+
+		/* support summary tracking of utility statements by extensions */
+		InstrUsageAccumToPrevious();
+		usage = InstrUsageStop();
+		BufferUsageAdd(&myState->metrics.bufferUsage, &usage->bufusage);
+	}
 
 	return true;
 }
