@@ -4916,6 +4916,25 @@ AbortOutOfAnyTransaction(void)
 				 * we need to shut down before doing CleanupTransaction.
 				 */
 				AtAbort_Portals();
+
+				/*
+				 * Release any resources that were initialized after an
+				 * earlier AbortTransaction and as such would otherwise leak.
+				 *
+				 * AtAbort_Portals initially unsets the portal's resowner
+				 * since it assumes it called inside AbortTransaction, which
+				 * is not the case here.
+				 */
+				ResourceOwnerRelease(TopTransactionResourceOwner,
+									 RESOURCE_RELEASE_BEFORE_LOCKS,
+									 false, true);
+				ResourceOwnerRelease(TopTransactionResourceOwner,
+									 RESOURCE_RELEASE_LOCKS,
+									 false, true);
+				ResourceOwnerRelease(TopTransactionResourceOwner,
+									 RESOURCE_RELEASE_AFTER_LOCKS,
+									 false, true);
+
 				CleanupTransaction();
 				s->blockState = TBLOCK_DEFAULT;
 				break;
