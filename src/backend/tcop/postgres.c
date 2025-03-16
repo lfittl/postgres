@@ -4449,15 +4449,6 @@ PostgresMain(const char *dbname, const char *username)
 		debug_query_string = NULL;
 
 		/*
-		 * Reset the instrumentation usage stack, since we might have skipped
-		 * a InstrUsageStop call by jumping up. Note this should occur before
-		 * transaction abort since we might have a usage struct that was
-		 * allocated in a memory context that gets freed before abort logs WAL
-		 * usage.
-		 */
-		InstrUsageReset_AfterError();
-
-		/*
 		 * Abort the current transaction in order to recover.
 		 */
 		AbortCurrentTransaction();

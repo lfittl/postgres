@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "tcop/pquery.h"
 #include "utils/memutils.h"
 
 WalUsage	pgWalUsage;
@@ -23,6 +24,34 @@ InstrumentUsage *pgInstrumentUsageStack = NULL;
 
 static void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 
+/*
+ * To make sure we don't leak, use ResourceOwner mechanism to reset stack on abort.
+ */
+static void PushInstrumentUsage(InstrumentUsage * usage);
+static void PushInstrumentUsageWithOwner(InstrumentUsage * usage);
+static void PopInstrumentUsage(InstrumentUsage * usage);
+static void PopInstrumentUsageWithOwner(InstrumentUsageResource * usage);
+static void ResOwnerReleaseInstrumentUsage(Datum res);
+
+static const ResourceOwnerDesc instrument_usage_resowner_desc =
+{
+	.name = "instrument usage scope",
+	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
+	.release_priority = RELEASE_PRIO_FIRST,
+	.ReleaseResource = ResOwnerReleaseInstrumentUsage,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrumentUsage(ResourceOwner owner, InstrumentUsageResource * scope)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(scope), &instrument_usage_resowner_desc);
+}
+static inline void
+ResourceOwnerForgetInstrumentUsage(ResourceOwner owner, InstrumentUsageResource * scope)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(scope), &instrument_usage_resowner_desc);
+}
 
 /* Allocate new instrumentation structure(s) */
 Instrumentation *
@@ -64,9 +93,8 @@ InstrInit(Instrumentation *instr, int instrument_options)
 	instr->need_shared_hit_distinct = (instrument_options & INSTRUMENT_SHARED_HIT_DISTINCT) != 0;
 }
 
-/* Entry to a plan node */
 void
-InstrStartNode(Instrumentation *instr)
+InstrStart(Instrumentation *instr, bool use_resowner)
 {
 	if (instr->need_timer &&
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
@@ -74,8 +102,10 @@ InstrStartNode(Instrumentation *instr)
 
 	if (instr->need_bufusage || instr->need_walusage || instr->need_shared_hit_distinct)
 	{
-		instr->instrusage.previous = pgInstrumentUsageStack;
-		pgInstrumentUsageStack = &instr->instrusage;
+		if (use_resowner)
+			PushInstrumentUsageWithOwner(&instr->instrusage);
+		else
+			PushInstrumentUsage(&instr->instrusage);
 	}
 
 	if (instr->need_shared_hit_distinct && !instr->instrusage.shared_blks_hit_distinct)
@@ -85,9 +115,15 @@ InstrStartNode(Instrumentation *instr)
 	}
 }
 
-/* Exit from a plan node */
+/* Entry to a plan node */
 void
-InstrStopNode(Instrumentation *instr, double nTuples)
+InstrStartNode(Instrumentation *instr)
+{
+	InstrStart(instr, false);
+}
+
+void
+InstrStop(Instrumentation *instr, double nTuples, bool use_resowner)
 {
 	double		save_tuplecount = instr->tuplecount;
 	instr_time	endtime;
@@ -107,8 +143,13 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	if (instr->need_bufusage || instr->need_walusage)
-		pgInstrumentUsageStack = pgInstrumentUsageStack->previous;
+	if (instr->need_bufusage || instr->need_walusage || instr->need_shared_hit_distinct)
+	{
+		if (use_resowner)
+			PopInstrumentUsageWithOwner(instr->instrusage.res);
+		else
+			PopInstrumentUsage(&instr->instrusage);
+	}
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -125,6 +166,13 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		if (instr->async_mode && save_tuplecount < 1.0)
 			instr->firsttuple = INSTR_TIME_GET_DOUBLE(instr->counter);
 	}
+}
+
+/* Exit from a plan node */
+void
+InstrStopNode(Instrumentation *instr, double nTuples)
+{
+	InstrStop(instr, nTuples, false);
 }
 
 /* Update tuple count */
@@ -200,14 +248,63 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 		InstrUsageAdd(&dst->instrusage, &add->instrusage);
 }
 
+static void
+PushInstrumentUsage(InstrumentUsage * usage)
+{
+	usage->previous = pgInstrumentUsageStack;
+	pgInstrumentUsageStack = usage;
+}
+
+static void
+PushInstrumentUsageWithOwner(InstrumentUsage * usage)
+{
+	InstrumentUsageResource *usageRes = MemoryContextAllocZero(TopMemoryContext, sizeof(InstrumentUsageResource));
+	ResourceOwner owner = CurrentResourceOwner;
+
+	Assert(owner != NULL);
+
+	usageRes->previous = pgInstrumentUsageStack;
+	usageRes->owner = owner;
+
+	ResourceOwnerEnlarge(owner);
+	ResourceOwnerRememberInstrumentUsage(owner, usageRes);
+
+	usage->res = usageRes;
+	PushInstrumentUsage(usage);
+}
+
+static void
+PopInstrumentUsage(InstrumentUsage * usage)
+{
+	pgInstrumentUsageStack = usage->previous;
+}
+
+static void
+PopInstrumentUsageWithOwner(InstrumentUsageResource * usageRes)
+{
+	pgInstrumentUsageStack = usageRes->previous;
+	Assert(usageRes != NULL);
+	if (usageRes->owner != NULL)
+		ResourceOwnerForgetInstrumentUsage(usageRes->owner, usageRes);
+	pfree(usageRes);
+}
+
+static void
+ResOwnerReleaseInstrumentUsage(Datum res)
+{
+	InstrumentUsageResource *usageRes = (InstrumentUsageResource *) DatumGetPointer(res);
+
+	usageRes->owner = NULL;
+	PopInstrumentUsageWithOwner(usageRes);
+}
+
 /* Start buffer/WAL usage measurement */
 void
 InstrUsageStart()
 {
 	InstrumentUsage *usage = palloc0(sizeof(InstrumentUsage));
 
-	usage->previous = pgInstrumentUsageStack;
-	pgInstrumentUsageStack = usage;
+	PushInstrumentUsageWithOwner(usage);
 }
 
 /*
@@ -230,17 +327,13 @@ InstrUsageStop()
 	InstrumentUsage *result = pgInstrumentUsageStack;
 
 	Assert(result != NULL);
+	PopInstrumentUsageWithOwner(result->res);
 
-	pgInstrumentUsageStack = result->previous;
+	/* Avoid returning references that were freed */
+	result->res = NULL;
 	result->previous = NULL;
 
 	return result;
-}
-
-void
-InstrUsageReset_AfterError()
-{
-	pgInstrumentUsageStack = NULL;
 }
 
 void
