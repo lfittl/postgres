@@ -302,7 +302,7 @@ ResOwnerReleaseInstrumentUsage(Datum res)
 void
 InstrUsageStart()
 {
-	InstrumentUsage *usage = palloc0(sizeof(InstrumentUsage));
+	InstrumentUsage *usage = MemoryContextAllocZero(TopMemoryContext, sizeof(InstrumentUsage));
 
 	PushInstrumentUsageWithOwner(usage);
 }
