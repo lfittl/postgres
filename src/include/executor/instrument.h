@@ -16,6 +16,7 @@
 #include "common/hashfn.h"
 #include "lib/hyperloglog.h"
 #include "portability/instr_time.h"
+#include "utils/resowner.h"
 
 
 typedef struct BufferUsage
@@ -65,12 +66,21 @@ typedef enum InstrumentOption
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
 
+typedef struct InstrumentUsageResource
+{
+	struct InstrumentUsage *previous;
+
+	ResourceOwner owner;
+}			InstrumentUsageResource;
+
 typedef struct InstrumentUsage
 {
 	struct InstrumentUsage *previous;
 	BufferUsage bufusage;
 	WalUsage	walusage;
 	hyperLogLogState *shared_blks_hit_distinct;
+
+	InstrumentUsageResource *res;
 }			InstrumentUsage;
 
 typedef struct Instrumentation
@@ -112,7 +122,9 @@ extern PGDLLIMPORT InstrumentUsage * pgInstrumentUsageStack;
 extern Instrumentation *InstrAlloc(int n, int instrument_options,
 								   bool async_mode);
 extern void InstrInit(Instrumentation *instr, int instrument_options);
+extern void InstrStart(Instrumentation *instr, bool use_resowner);
 extern void InstrStartNode(Instrumentation *instr);
+extern void InstrStop(Instrumentation *instr, double nTuples, bool use_resowner);
 extern void InstrStopNode(Instrumentation *instr, double nTuples);
 extern void InstrUpdateTupleCount(Instrumentation *instr, double nTuples);
 extern void InstrEndLoop(Instrumentation *instr);
@@ -162,7 +174,6 @@ InstrumentUsageActive(void)
 
 extern void InstrUsageStart(void);
 extern InstrumentUsage * InstrUsageStop(void);
-extern void InstrUsageReset_AfterError(void);
 extern void InstrUsageAccumToPrevious(void);
 extern void InstrUsageAdd(InstrumentUsage * dst, const InstrumentUsage * add);
 extern void InstrUsageAddToCurrent(InstrumentUsage * instrusage);
