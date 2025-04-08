@@ -566,7 +566,7 @@ static int	ssl_renegotiation_limit;
  */
 int			huge_pages = HUGE_PAGES_TRY;
 int			huge_page_size;
-static int	huge_pages_status = HUGE_PAGES_UNKNOWN;
+int			huge_pages_status = HUGE_PAGES_UNKNOWN;
 
 /*
  * These variables are all dummies that don't do anything, except in some
@@ -998,7 +998,7 @@ struct config_bool ConfigureNamesBool[] =
 		{"enable_self_join_elimination", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables removal of unique self-joins."),
 			NULL,
-			GUC_EXPLAIN | GUC_NOT_IN_SAMPLE
+			GUC_EXPLAIN
 		},
 		&enable_self_join_elimination,
 		true,

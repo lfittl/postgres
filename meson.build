@@ -943,6 +943,27 @@ else
 endif
 
 
+###############################################################
+# Library: libnuma
+###############################################################
+
+libnumaopt = get_option('libnuma')
+if not libnumaopt.disabled()
+  # via pkg-config
+  libnuma = dependency('numa', required: false)
+  if not libnuma.found()
+    libnuma = cc.find_library('numa', required: libnumaopt)
+  endif
+  if not cc.has_header('numa.h', dependencies: libnuma, required: libnumaopt)
+    libnuma = not_found_dep
+  endif
+  if libnuma.found()
+    cdata.set('USE_LIBNUMA', 1)
+  endif
+else
+  libnuma = not_found_dep
+endif
+
 
 ###############################################################
 # Library: liburing
@@ -1479,6 +1500,7 @@ if sslopt in ['auto', 'openssl']
       # Function introduced in OpenSSL 1.1.1, not in LibreSSL.
       ['X509_get_signature_info'],
       ['SSL_CTX_set_num_tickets'],
+      ['SSL_CTX_set_keylog_callback'],
     ]
 
     are_openssl_funcs_complete = true
@@ -2348,17 +2370,21 @@ endif
 ###############################################################
 # Select CRC-32C implementation.
 #
-# If we are targeting a processor that has Intel SSE 4.2 instructions, we can
-# use the special CRC instructions for calculating CRC-32C. If we're not
-# targeting such a processor, but we can nevertheless produce code that uses
-# the SSE intrinsics, compile both implementations and select which one to use
-# at runtime, depending on whether SSE 4.2 is supported by the processor we're
-# running on.
+# There are three methods of calculating CRC, in order of increasing
+# performance:
 #
-# Similarly, if we are targeting an ARM processor that has the CRC
-# instructions that are part of the ARMv8 CRC Extension, use them. And if
-# we're not targeting such a processor, but can nevertheless produce code that
-# uses the CRC instructions, compile both, and select at runtime.
+# 1. The fallback using a lookup table, called slicing-by-8
+# 2. CRC-32C instructions (found in e.g. Intel SSE 4.2 and ARMv8 CRC Extension)
+# 3. Algorithms using carryless multiplication instructions
+#    (e.g. Intel PCLMUL and Arm PMULL)
+#
+# If we can produce code (via function attributes or additional compiler
+# flags) that uses #2 (and possibly #3), we compile all implementations
+# and select which one to use at runtime, depending on what is supported
+# by the processor we're running on.
+#
+# If we are targeting a processor that has #2, we can use that without
+# runtime selection.
 #
 # Note that we do not use __attribute__((target("..."))) for the ARM CRC
 # instructions because until clang 16, using the ARM intrinsics still requires
@@ -2392,7 +2418,7 @@ int main(void)
 }
 '''
 
-    if not cc.links(prog, name: '_mm_crc32_u8 and _mm_crc32_u32',
+    if not cc.links(prog, name: 'SSE 4.2 CRC32C',
           args: test_c_args)
       # Do not use Intel SSE 4.2
     elif (cc.get_define('__SSE4_2__') != '')
@@ -2405,6 +2431,38 @@ int main(void)
       cdata.set('USE_SSE42_CRC32C', false)
       cdata.set('USE_SSE42_CRC32C_WITH_RUNTIME_CHECK', 1)
       have_optimized_crc = true
+    endif
+
+    # Check if the compiler supports AVX-512 carryless multiplication
+    # and three-way exclusive-or instructions used for computing CRC.
+    # AVX-512F is assumed to be supported if the above are.
+    prog = '''
+#include <immintrin.h>
+__m512i x;
+__m512i y;
+
+#if defined(__has_attribute) && __has_attribute (target)
+__attribute__((target("vpclmulqdq,avx512vl")))
+#endif
+int main(void)
+{
+     __m128i z;
+
+    y = _mm512_clmulepi64_epi128(x, y, 0);
+    z = _mm_ternarylogic_epi64(
+            _mm512_castsi512_si128(y),
+            _mm512_extracti32x4_epi32(y, 1),
+            _mm512_extracti32x4_epi32(y, 2),
+            0x96);
+    /* return computed value, to prevent the above being optimized away */
+    return _mm_crc32_u64(0, _mm_extract_epi64(z, 0));
+}
+'''
+
+    if cc.links(prog,
+        name: 'AVX-512 CRC32C',
+        args: test_c_args)
+      cdata.set('USE_AVX512_CRC32C_WITH_RUNTIME_CHECK', 1)
     endif
 
   endif
@@ -2569,6 +2627,7 @@ decl_checks = [
   ['strlcpy', 'string.h'],
   ['strnlen', 'string.h'],
   ['strsep',  'string.h'],
+  ['timingsafe_bcmp',  'string.h'],
 ]
 
 # Need to check for function declarations for these functions, because
@@ -2577,6 +2636,7 @@ decl_checks = [
 decl_checks += [
   ['preadv', 'sys/uio.h'],
   ['pwritev', 'sys/uio.h'],
+  ['strchrnul', 'string.h'],
 ]
 
 # Check presence of some optional LLVM functions.
@@ -2593,8 +2653,23 @@ foreach c : decl_checks
   args = c.get(2, {})
   varname = 'HAVE_DECL_' + func.underscorify().to_upper()
 
-  found = cc.has_header_symbol(header, func,
-    args: test_c_args, include_directories: postgres_inc,
+  found = cc.compiles('''
+#include <@0@>
+
+int main()
+{
+#ifndef @1@
+    (void) @1@;
+#endif
+
+return 0;
+}
+'''.format(header, func),
+    name: 'test whether @0@ is declared'.format(func),
+    # need to add cflags_warn to get at least
+    # -Werror=unguarded-availability-new if applicable
+    args: test_c_args + cflags_warn,
+    include_directories: postgres_inc,
     kwargs: args)
   cdata.set10(varname, found, description:
 '''Define to 1 if you have the declaration of `@0@', and to 0 if you
@@ -2802,7 +2877,6 @@ func_checks = [
   ['shm_unlink', {'dependencies': [rt_dep], 'define': false}],
   ['shmget', {'dependencies': [cygipc_dep], 'define': false}],
   ['socket', {'dependencies': [socket_dep], 'define': false}],
-  ['strchrnul'],
   ['strerror_r', {'dependencies': [thread_dep]}],
   ['strlcat'],
   ['strlcpy'],
@@ -2811,6 +2885,7 @@ func_checks = [
   ['strsignal'],
   ['sync_file_range'],
   ['syncfs'],
+  ['timingsafe_bcmp'],
   ['uselocale'],
   ['wcstombs_l'],
 ]
@@ -3225,6 +3300,7 @@ backend_both_deps += [
   icu_i18n,
   ldap,
   libintl,
+  libnuma,
   liburing,
   libxml,
   lz4,
@@ -3881,6 +3957,7 @@ if meson.version().version_compare('>=0.57')
       'icu': icu,
       'ldap': ldap,
       'libcurl': libcurl,
+      'libnuma': libnuma,
       'liburing': liburing,
       'libxml': libxml,
       'libxslt': libxslt,

@@ -1918,6 +1918,30 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       </listitem>
      </varlistentry>
 
+     <varlistentry id="libpq-connect-sslkeylogfile" xreflabel="sslkeylogfile">
+      <term><literal>sslkeylogfile</literal></term>
+      <listitem>
+       <para>
+        This parameter specifies the location where <literal>libpq</literal>
+        will log keys used in this SSL context.  This is useful for debugging
+        <productname>PostgreSQL</productname> protocol interactions or client
+        connections using network inspection tools like
+        <productname>Wireshark</productname>.  This parameter is ignored if an
+        SSL connection is not made, or if <productname>LibreSSL</productname>
+        is used (<productname>LibreSSL</productname> does not support key
+        logging).  Keys are logged using the <productname>NSS</productname>
+        format.
+        <warning>
+         <para>
+          Key logging will expose potentially sensitive information in the
+          keylog file.  Keylog files should be handled with the same care as
+          <xref linkend="libpq-connect-sslkey" /> files.
+         </para>
+        </warning>
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="libpq-connect-sslpassword" xreflabel="sslpassword">
       <term><literal>sslpassword</literal></term>
       <listitem>
@@ -2018,7 +2042,7 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
        </para>
        <para>
         The special value <literal>system</literal> may be specified instead, in
-        which case the system's trusted CA roots will be loaded. The exact
+        which case the trusted CA roots from the SSL implementation will be loaded. The exact
         locations of these root certificates differ by SSL implementation and
         platform. For <productname>OpenSSL</productname> in particular, the
         locations may be further modified by the <envar>SSL_CERT_DIR</envar>
@@ -2140,6 +2164,54 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
         not supporting the most modern protocol versions. If not specified,
         the default is <literal>TLSv1.2</literal>, which satisfies industry
         best practices as of this writing.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-min-protocol-version" xreflabel="min_protocol_version">
+      <term><literal>min_protocol_version</literal></term>
+      <listitem>
+       <para>
+        Specifies the minimum protocol version to allow for the connection.
+        The default is to allow any version of the
+        <productname>PostgreSQL</productname> protocol supported by libpq,
+        which currently means <literal>3.0</literal>. If the server
+        does not support at least this protocol version the connection will be
+        closed.
+       </para>
+
+       <para>
+        The current supported values are
+        <literal>3.0</literal>, <literal>3.2</literal>,
+        and <literal>latest</literal>. The <literal>latest</literal> value is
+        equivalent to the latest protocol version supported by the libpq
+        version being used, which is currently <literal>3.2</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="libpq-connect-max-protocol-version" xreflabel="max_protocol_version">
+      <term><literal>max_protocol_version</literal></term>
+      <listitem>
+       <para>
+        Specifies the protocol version to request from the server.
+        The default is to use version <literal>3.0</literal> of the
+        <productname>PostgreSQL</productname> protocol, unless the connection
+        string specifies a feature that relies on a higher protocol version,
+        in which case the latest version supported by libpq is used. If the
+        server does not support the protocol version requested by the client,
+        the connection is automatically downgraded to a lower minor protocol
+        version that the server supports. After the connection attempt has
+        completed you can use <xref linkend="libpq-PQprotocolVersion"/> to
+        find out which exact protocol version was negotiated.
+       </para>
+
+       <para>
+        The current supported values are
+        <literal>3.0</literal>, <literal>3.2</literal>,
+        and <literal>latest</literal>. The <literal>latest</literal> value is
+        equivalent to the latest protocol version supported by the libpq
+        version being used, which is currently <literal>3.2</literal>.
        </para>
       </listitem>
      </varlistentry>
@@ -9327,6 +9399,26 @@ myEventProc(PGEventId evtId, void *evtInfo, void *passThrough)
       </indexterm>
       <envar>PGLOADBALANCEHOSTS</envar> behaves the same as the <xref
       linkend="libpq-connect-load-balance-hosts"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGMINPROTOCOLVERSION</envar></primary>
+      </indexterm>
+      <envar>PGMINPROTOCOLVERSION</envar> behaves the same as the <xref
+      linkend="libpq-connect-min-protocol-version"/> connection parameter.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      <indexterm>
+       <primary><envar>PGMAXPROTOCOLVERSION</envar></primary>
+      </indexterm>
+      <envar>PGMAXPROTOCOLVERSION</envar> behaves the same as the <xref
+      linkend="libpq-connect-max-protocol-version"/> connection parameter.
      </para>
     </listitem>
    </itemizedlist>
