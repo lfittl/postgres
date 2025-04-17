@@ -784,6 +784,26 @@ calls | 2
      </row>
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>gc_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Total number of times the <structname>pg_stat_statements</structname> query text
+       file was rewritten for garbage collection (GC) purposes. This may occur after an
+       explicit call to <function>pg_stat_statements_reset</function>, or when sufficient
+       stale query texts have accumulated due to deallocations.
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>query_file_size</structfield> <type>bigint</type>
+      </para>
+      <para>
+       The cumulative size (in bytes) of all query texts stored in the
+       <structname>pg_stat_statements</structname> query text file.
+      </para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
       </para>
       <para>

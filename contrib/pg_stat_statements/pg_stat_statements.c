@@ -2018,7 +2018,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 }
 
 /* Number of output arguments (columns) for pg_stat_statements_info */
-#define PG_STAT_STATEMENTS_INFO_COLS	2
+#define PG_STAT_STATEMENTS_INFO_COLS	4
 
 /*
  * Return statistics of pg_stat_statements.
@@ -2030,6 +2030,7 @@ pg_stat_statements_info(PG_FUNCTION_ARGS)
 	TupleDesc	tupdesc;
 	Datum		values[PG_STAT_STATEMENTS_INFO_COLS] = {0};
 	bool		nulls[PG_STAT_STATEMENTS_INFO_COLS] = {0};
+	int64		gc_count, query_file_size;
 
 	if (!pgss || !pgss_hash)
 		ereport(ERROR,
@@ -2043,10 +2044,14 @@ pg_stat_statements_info(PG_FUNCTION_ARGS)
 	/* Read global statistics for pg_stat_statements */
 	SpinLockAcquire(&pgss->mutex);
 	stats = pgss->stats;
+	gc_count = pgss->gc_count;
+	query_file_size = pgss->extent;
 	SpinLockRelease(&pgss->mutex);
 
 	values[0] = Int64GetDatum(stats.dealloc);
-	values[1] = TimestampTzGetDatum(stats.stats_reset);
+	values[1] = Int64GetDatum(gc_count);
+	values[2] = Int64GetDatum(query_file_size);
+	values[3] = TimestampTzGetDatum(stats.stats_reset);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
