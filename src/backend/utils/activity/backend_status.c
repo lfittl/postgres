@@ -656,9 +656,9 @@ pgstat_report_activity(BackendState state, const char *cmd_str)
 	beentry->st_state_start_timestamp = current_timestamp;
 
 	/*
-	 * If a new query is started, we reset the query identifier as it'll only
-	 * be known after parse analysis, to avoid reporting last query's
-	 * identifier.
+	 * If a new query is started, we reset the query and plan identifier as
+	 * it'll only be known after parse analysis / planning, to avoid reporting
+	 * last query's identifiers.
 	 */
 	if (state == STATE_RUNNING)
 	{

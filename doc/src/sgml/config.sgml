@@ -8776,6 +8776,40 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-compute-plan-id" xreflabel="compute_plan_id">
+      <term><varname>compute_plan_id</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>compute_plan_id</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables in-core computation of a plan identifier.
+        Plan identifiers can be displayed in the <link
+        linkend="monitoring-pg-stat-activity-view"><structname>pg_stat_activity</structname></link>
+        view or using <command>EXPLAIN</command>.
+        Note that an external module can alternatively be used if the
+        in-core plan identifier computation method is not acceptable.
+        In this case, in-core computation must be always disabled.
+        Valid values are <literal>off</literal> (always disabled),
+        <literal>on</literal> (always enabled), <literal>auto</literal>,
+        which lets modules that utilize plan identifiers enable
+        it automatically, and <literal>regress</literal> which
+        has the same effect as <literal>on</literal>, except that the
+        query identifier is not shown in the <literal>EXPLAIN</literal> output
+        in order to facilitate automated regression testing.
+        The default is <literal>auto</literal>.
+       </para>
+       <note>
+        <para>
+         To ensure that only one plan identifier is calculated and
+         displayed, extensions that calculate plan identifiers should
+         throw an error if a plan identifier has already been computed.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-log-statement-stats">
       <term><varname>log_statement_stats</varname> (<type>boolean</type>)
       <indexterm>

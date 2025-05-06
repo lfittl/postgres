@@ -45,6 +45,7 @@
 
 /* GUC parameters */
 int			compute_query_id = COMPUTE_QUERY_ID_AUTO;
+int			compute_plan_id = COMPUTE_PLAN_ID_AUTO;
 
 /*
  * True when compute_query_id is ON or AUTO, and a module requests them.
@@ -55,14 +56,22 @@ int			compute_query_id = COMPUTE_QUERY_ID_AUTO;
  */
 bool		query_id_enabled = false;
 
-static JumbleState *InitJumble(void);
+/*
+ * True when compute_plan_id is ON or AUTO, and a module requests them.
+ *
+ * Note that IsPlanIdEnabled() should be used instead of checking
+ * plan_id_enabled or plan_query_id directly when we want to know
+ * whether plan identifiers are computed in the core or not.
+ */
+bool		plan_id_enabled = false;
+
+static JumbleState *InitJumbleInternal(bool record_clocations);
 static uint64 DoJumble(JumbleState *jstate, Node *node);
-static void AppendJumble(JumbleState *jstate,
-						 const unsigned char *value, Size size);
+static void AppendJumbleInternal(JumbleState *jstate,
+								 const unsigned char *value, Size size);
 static void FlushPendingNulls(JumbleState *jstate);
 static void RecordConstLocation(JumbleState *jstate,
 								int location, bool squashed);
-static void _jumbleNode(JumbleState *jstate, Node *node);
 static void _jumbleElements(JumbleState *jstate, List *elements);
 static void _jumbleA_Const(JumbleState *jstate, Node *node);
 static void _jumbleList(JumbleState *jstate, Node *node);
@@ -133,7 +142,7 @@ JumbleQuery(Query *query)
 
 	Assert(IsQueryIdEnabled());
 
-	jstate = InitJumble();
+	jstate = InitJumbleInternal(true);
 
 	query->queryId = DoJumble(jstate, (Node *) query);
 
@@ -166,11 +175,24 @@ EnableQueryId(void)
 }
 
 /*
- * InitJumble
+ * Enables plan identifier computation.
+ *
+ * Third-party plugins can use this function to inform core that they require
+ * a query identifier to be computed.
+ */
+void
+EnablePlanId(void)
+{
+	if (compute_plan_id != COMPUTE_PLAN_ID_OFF)
+		plan_id_enabled = true;
+}
+
+/*
+ * InitJumbleInternal
  *		Allocate a JumbleState object and make it ready to jumble.
  */
 static JumbleState *
-InitJumble(void)
+InitJumbleInternal(bool record_clocations)
 {
 	JumbleState *jstate;
 
@@ -179,9 +201,19 @@ InitJumble(void)
 	/* Set up workspace for query jumbling */
 	jstate->jumble = (unsigned char *) palloc(JUMBLE_SIZE);
 	jstate->jumble_len = 0;
-	jstate->clocations_buf_size = 32;
-	jstate->clocations = (LocationLen *) palloc(jstate->clocations_buf_size *
-												sizeof(LocationLen));
+
+	if (record_clocations)
+	{
+		jstate->clocations_buf_size = 32;
+		jstate->clocations = (LocationLen *)
+			palloc(jstate->clocations_buf_size * sizeof(LocationLen));
+	}
+	else
+	{
+		jstate->clocations_buf_size = 0;
+		jstate->clocations = NULL;
+	}
+
 	jstate->clocations_count = 0;
 	jstate->highest_extern_param_id = 0;
 	jstate->pending_nulls = 0;
@@ -193,16 +225,21 @@ InitJumble(void)
 }
 
 /*
- * DoJumble
- *		Jumble the given Node using the given JumbleState and return the resulting
- *		jumble hash.
+ * Exported initializer for jumble state that allows plugins to hash values and
+ * nodes, but does not record constant locations, for now.
  */
-static uint64
-DoJumble(JumbleState *jstate, Node *node)
+JumbleState *
+InitJumble()
 {
-	/* Jumble the given node */
-	_jumbleNode(jstate, node);
+	return InitJumbleInternal(false);
+}
 
+/*
+ * Produce a 64-bit hash from a jumble state.
+ */
+uint64
+HashJumbleState(JumbleState *jstate)
+{
 	/* Flush any pending NULLs before doing the final hash */
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
@@ -211,6 +248,20 @@ DoJumble(JumbleState *jstate, Node *node)
 	return DatumGetUInt64(hash_any_extended(jstate->jumble,
 											jstate->jumble_len,
 											0));
+}
+
+/*
+ * DoJumble
+ *		Jumble the given Node using the given JumbleState and return the resulting
+ *		jumble hash.
+ */
+static uint64
+DoJumble(JumbleState *jstate, Node *node)
+{
+	/* Jumble the given node */
+	JumbleNode(jstate, node);
+
+	return HashJumbleState(jstate);
 }
 
 /*
@@ -281,7 +332,7 @@ AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
  * AppendJumble
  *		Add 'size' bytes of the given jumble 'value' to the jumble state
  */
-static pg_noinline void
+pg_noinline void
 AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
 {
 	if (jstate->pending_nulls > 0)
@@ -291,20 +342,10 @@ AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
 }
 
 /*
- * AppendJumbleNull
- *		For jumbling NULL pointers
- */
-static pg_attribute_always_inline void
-AppendJumbleNull(JumbleState *jstate)
-{
-	jstate->pending_nulls++;
-}
-
-/*
  * AppendJumble8
  *		Add the first byte from the given 'value' pointer to the jumble state
  */
-static pg_noinline void
+pg_noinline void
 AppendJumble8(JumbleState *jstate, const unsigned char *value)
 {
 	if (jstate->pending_nulls > 0)
@@ -318,7 +359,7 @@ AppendJumble8(JumbleState *jstate, const unsigned char *value)
  *		Add the first 2 bytes from the given 'value' pointer to the jumble
  *		state.
  */
-static pg_noinline void
+pg_noinline void
 AppendJumble16(JumbleState *jstate, const unsigned char *value)
 {
 	if (jstate->pending_nulls > 0)
@@ -332,7 +373,7 @@ AppendJumble16(JumbleState *jstate, const unsigned char *value)
  *		Add the first 4 bytes from the given 'value' pointer to the jumble
  *		state.
  */
-static pg_noinline void
+pg_noinline void
 AppendJumble32(JumbleState *jstate, const unsigned char *value)
 {
 	if (jstate->pending_nulls > 0)
@@ -346,7 +387,7 @@ AppendJumble32(JumbleState *jstate, const unsigned char *value)
  *		Add the first 8 bytes from the given 'value' pointer to the jumble
  *		state.
  */
-static pg_noinline void
+pg_noinline void
 AppendJumble64(JumbleState *jstate, const unsigned char *value)
 {
 	if (jstate->pending_nulls > 0)
@@ -383,6 +424,10 @@ FlushPendingNulls(JumbleState *jstate)
 static void
 RecordConstLocation(JumbleState *jstate, int location, bool squashed)
 {
+	/* Skip if the caller is a plugin not interested in constant locations */
+	if (jstate->clocations == NULL)
+		return;
+
 	/* -1 indicates unknown or undefined location */
 	if (location >= 0)
 	{
@@ -485,31 +530,25 @@ IsSquashableConstList(List *elements, Node **firstExpr, Node **lastExpr)
 }
 
 #define JUMBLE_NODE(item) \
-	_jumbleNode(jstate, (Node *) expr->item)
+	JumbleNode(jstate, (Node *) expr->item)
+#define JUMBLE_FIELD(item) \
+	JUMBLE_VALUE(expr->item)
+#define JUMBLE_BITMAPSET(item) \
+do { \
+	if (expr->item && expr->item->nwords > 0) \
+		AppendJumble(jstate, (const unsigned char *) expr->item->words, sizeof(bitmapword) * expr->item->nwords); \
+} while(0)
+#define JUMBLE_ARRAY(item, len) \
+do { \
+	if (len > 0) \
+		AppendJumble(jstate, (const unsigned char *) expr->item, sizeof(*(expr->item)) * len); \
+} while(0)
+#define JUMBLE_STRING(str) \
+	JUMBLE_VALUE_STRING(expr->str)
 #define JUMBLE_ELEMENTS(list) \
 	_jumbleElements(jstate, (List *) expr->list)
 #define JUMBLE_LOCATION(location) \
 	RecordConstLocation(jstate, expr->location, false)
-#define JUMBLE_FIELD(item) \
-do { \
-	if (sizeof(expr->item) == 8) \
-		AppendJumble64(jstate, (const unsigned char *) &(expr->item)); \
-	else if (sizeof(expr->item) == 4) \
-		AppendJumble32(jstate, (const unsigned char *) &(expr->item)); \
-	else if (sizeof(expr->item) == 2) \
-		AppendJumble16(jstate, (const unsigned char *) &(expr->item)); \
-	else if (sizeof(expr->item) == 1) \
-		AppendJumble8(jstate, (const unsigned char *) &(expr->item)); \
-	else \
-		AppendJumble(jstate, (const unsigned char *) &(expr->item), sizeof(expr->item)); \
-} while (0)
-#define JUMBLE_STRING(str) \
-do { \
-	if (expr->str) \
-		AppendJumble(jstate, (const unsigned char *) (expr->str), strlen(expr->str) + 1); \
-	else \
-		AppendJumbleNull(jstate); \
-} while(0)
 /* Function name used for the node field attribute custom_query_jumble. */
 #define JUMBLE_CUSTOM(nodetype, item) \
 	_jumble##nodetype##_##item(jstate, expr, expr->item)
@@ -548,12 +587,12 @@ _jumbleElements(JumbleState *jstate, List *elements)
 	}
 	else
 	{
-		_jumbleNode(jstate, (Node *) elements);
+		JumbleNode(jstate, (Node *) elements);
 	}
 }
 
-static void
-_jumbleNode(JumbleState *jstate, Node *node)
+void
+JumbleNode(JumbleState *jstate, Node *node)
 {
 	Node	   *expr = node;
 #ifdef USE_ASSERT_CHECKING
@@ -627,7 +666,7 @@ _jumbleList(JumbleState *jstate, Node *node)
 	{
 		case T_List:
 			foreach(l, expr)
-				_jumbleNode(jstate, lfirst(l));
+				JumbleNode(jstate, lfirst(l));
 			break;
 		case T_IntList:
 			foreach(l, expr)
@@ -714,4 +753,38 @@ _jumbleRangeTblEntry_eref(JumbleState *jstate,
 	 * This includes only the table name, the list of column names is ignored.
 	 */
 	JUMBLE_STRING(aliasname);
+}
+
+/*
+ * Jumble the entries in the rangle table to map RT indexes to relations
+ *
+ * This ensures jumbled RT indexes (e.g. in a Scan or Modify node), are
+ * distinguished by the target of the RT entry, even if the index is the same.
+ */
+void
+JumbleRangeTable(JumbleState *jstate, List *rtable)
+{
+	ListCell   *lc;
+
+	foreach(lc, rtable)
+	{
+		RangeTblEntry *expr = lfirst_node(RangeTblEntry, lc);
+
+		switch (expr->rtekind)
+		{
+			case RTE_RELATION:
+				JUMBLE_FIELD(relid);
+				break;
+			case RTE_CTE:
+				JUMBLE_STRING(ctename);
+				break;
+			default:
+
+				/*
+				 * Ignore other targets, the jumble includes something
+				 * identifying about them already
+				 */
+				break;
+		}
+	}
 }

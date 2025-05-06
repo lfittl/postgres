@@ -735,6 +735,17 @@ select explain_filter('explain (verbose) create table test_ctas as select 1');
  Query Identifier: N
 (3 rows)
 
+-- Test compute_plan_id
+set compute_plan_id = on;
+select explain_filter('explain (verbose) select * from int8_tbl i8');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on public.int8_tbl i8  (cost=N.N..N.N rows=N width=N)
+   Output: q1, q2
+ Query Identifier: N
+ Plan Identifier: N
+(4 rows)
+
 -- Test SERIALIZE option
 select explain_filter('explain (analyze,buffers off,serialize) select * from int8_tbl i8');
                                          explain_filter                                          

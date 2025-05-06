@@ -172,6 +172,10 @@ select explain_filter('explain (verbose) select * from int8_tbl i8');
 select explain_filter('explain (verbose) declare test_cur cursor for select * from int8_tbl');
 select explain_filter('explain (verbose) create table test_ctas as select 1');
 
+-- Test compute_plan_id
+set compute_plan_id = on;
+select explain_filter('explain (verbose) select * from int8_tbl i8');
+
 -- Test SERIALIZE option
 select explain_filter('explain (analyze,buffers off,serialize) select * from int8_tbl i8');
 select explain_filter('explain (analyze,serialize text,buffers,timing off) select * from int8_tbl i8');
