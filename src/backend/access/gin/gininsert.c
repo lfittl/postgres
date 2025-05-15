@@ -39,8 +39,7 @@
 #define PARALLEL_KEY_GIN_SHARED			UINT64CONST(0xB000000000000001)
 #define PARALLEL_KEY_TUPLESORT			UINT64CONST(0xB000000000000002)
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xB000000000000003)
-#define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xB000000000000004)
-#define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xB000000000000005)
+#define PARALLEL_KEY_INSTR_USAGE		UINT64CONST(0xB000000000000004)
 
 /*
  * Status for index builds performed in parallel.  This is allocated in a
@@ -132,8 +131,7 @@ typedef struct GinLeader
 	GinBuildShared *ginshared;
 	Sharedsort *sharedsort;
 	Snapshot	snapshot;
-	WalUsage   *walusage;
-	BufferUsage *bufferusage;
+	InstrumentUsage *instrusage;
 } GinLeader;
 
 typedef struct
@@ -904,8 +902,7 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	GinBuildShared *ginshared;
 	Sharedsort *sharedsort;
 	GinLeader  *ginleader = (GinLeader *) palloc0(sizeof(GinLeader));
-	WalUsage   *walusage;
-	BufferUsage *bufferusage;
+	InstrumentUsage *instrusage = NULL;
 	bool		leaderparticipates = true;
 	int			querylen;
 
@@ -946,19 +943,14 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	shm_toc_estimate_keys(&pcxt->estimator, 2);
 
 	/*
-	 * Estimate space for WalUsage and BufferUsage -- PARALLEL_KEY_WAL_USAGE
-	 * and PARALLEL_KEY_BUFFER_USAGE.
-	 *
-	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgWalUsage or
-	 * pgBufferUsage, so do it unconditionally.
+	 * Estimate space for InstrUsage -- PARALLEL_KEY_INSTR_USAGE, if needed.
 	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	if (InstrumentUsageActive())
+	{
+		shm_toc_estimate_chunk(&pcxt->estimator,
+							   mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
 
 	/* Finally, estimate PARALLEL_KEY_QUERY_TEXT space */
 	if (debug_query_string)
@@ -1028,12 +1020,12 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	 * Allocate space for each worker's WalUsage and BufferUsage; no need to
 	 * initialize.
 	 */
-	walusage = shm_toc_allocate(pcxt->toc,
-								mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage);
-	bufferusage = shm_toc_allocate(pcxt->toc,
-								   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufferusage);
+	if (InstrumentUsageActive())
+	{
+		instrusage = shm_toc_allocate(pcxt->toc,
+									  mul_size(sizeof(InstrumentUsage), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTR_USAGE, instrusage);
+	}
 
 	/* Launch workers, saving status for leader/caller */
 	LaunchParallelWorkers(pcxt);
@@ -1044,8 +1036,7 @@ _gin_begin_parallel(GinBuildState *buildstate, Relation heap, Relation index,
 	ginleader->ginshared = ginshared;
 	ginleader->sharedsort = sharedsort;
 	ginleader->snapshot = snapshot;
-	ginleader->walusage = walusage;
-	ginleader->bufferusage = bufferusage;
+	ginleader->instrusage = instrusage;
 
 	/* If no workers were successfully launched, back out (do serial build) */
 	if (pcxt->nworkers_launched == 0)
@@ -1083,8 +1074,11 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 	 * Next, accumulate WAL usage.  (This must wait for the workers to finish,
 	 * or we might get incomplete data.)
 	 */
-	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
+	if (InstrumentUsageActive())
+	{
+		for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
+			InstrUsageAddToCurrent(&ginleader->instrusage[i]);
+	}
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(ginleader->snapshot))
@@ -2079,8 +2073,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
-	WalUsage   *walusage;
-	BufferUsage *bufferusage;
+	InstrumentUsage *shm_usage;
 	int			sortmem;
 
 	/*
@@ -2147,7 +2140,9 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	tuplesort_attach_shared(sharedsort, seg);
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	shm_usage = shm_toc_lookup(toc, PARALLEL_KEY_INSTR_USAGE, true);
+	if (shm_usage)
+		InstrUsageStart();
 
 	/*
 	 * Might as well use reliable figure when doling out maintenance_work_mem
@@ -2160,10 +2155,12 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 								 heapRel, indexRel, sortmem, false);
 
 	/* Report WAL/buffer usage during parallel execution */
-	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
-	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
-						  &walusage[ParallelWorkerNumber]);
+	if (shm_usage)
+	{
+		InstrumentUsage *usage = InstrUsageStop();
+
+		memcpy(&shm_usage[ParallelWorkerNumber], usage, sizeof(InstrumentUsage));
+	}
 
 	index_close(indexRel, indexLockmode);
 	table_close(heapRel, heapLockmode);

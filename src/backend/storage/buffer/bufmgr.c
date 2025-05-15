@@ -738,7 +738,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 				PinBuffer_Locked(bufHdr);	/* pin for first time */
 
 			INSTR_BUFUSAGE_INCR(shared_blks_hit);
-			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr);
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr->buf_id);
 
 			return true;
 		}
@@ -1155,7 +1155,7 @@ PinBufferForBlock(Relation rel,
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
 							 strategy, foundPtr, io_context);
 		if (*foundPtr)
-			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr);
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr->buf_id);
 	}
 	if (rel)
 	{
@@ -1894,9 +1894,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 										  true);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_hit += 1;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 		else
-			pgBufferUsage.shared_blks_hit += 1;
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(blocknum);
 
 		if (operation->rel)
 			pgstat_count_buffer_hit(operation->rel);
@@ -1964,9 +1964,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 								io_start, 1, io_buffers_len * BLCKSZ);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(local_blks_read, io_buffers_len);
 		else
-			pgBufferUsage.shared_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(shared_blks_read, io_buffers_len);
 
 		/*
 		 * Track vacuum cost when issuing IO, not after waiting for it.
@@ -4977,14 +4977,7 @@ FlushRelationBuffers(Relation rel)
 
 				FlushLocalBuffer(bufHdr, srel);
 
-<<<<<<< HEAD
 				UnpinLocalBuffer(BufferDescriptorGetBuffer(bufHdr));
-=======
-				buf_state &= ~(BM_DIRTY | BM_JUST_DIRTIED);
-				pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
-
-				INSTR_BUFUSAGE_INCR(local_blks_written);
->>>>>>> f35c14e0de4 (WIP)
 
 				/* Pop the error context stack */
 				error_context_stack = errcallback.previous;

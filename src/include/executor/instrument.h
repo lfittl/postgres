@@ -155,11 +155,11 @@ InstrumentUsageActive(void)
 		INSTR_TIME_ACCUM_DIFF(pgInstrumentUsageStack->bufusage.fld, endval, startval); \
 	} while (0)
 
-#define INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr) do { \
+#define INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufId) do { \
 		if (pgInstrumentUsageStack) { \
 			pgInstrumentUsageStack->bufusage.shared_blks_hit++; \
 			if (pgInstrumentUsageStack->shared_blks_hit_distinct) \
-				addHyperLogLog(pgInstrumentUsageStack->shared_blks_hit_distinct, DatumGetUInt32(hash_any((unsigned char *) &bufHdr->buf_id, sizeof(int)))); \
+				addHyperLogLog(pgInstrumentUsageStack->shared_blks_hit_distinct, DatumGetUInt32(hash_any((unsigned char *) &bufId, sizeof(int)))); \
 		} \
 	} while(0)
 

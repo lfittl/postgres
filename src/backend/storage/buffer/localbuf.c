@@ -216,7 +216,7 @@ FlushLocalBuffer(BufferDesc *bufHdr, SMgrRelation reln)
 	/* Mark not-dirty */
 	TerminateLocalBufferIO(bufHdr, true, 0, false);
 
-	pgBufferUsage.local_blks_written++;
+	INSTR_BUFUSAGE_INCR(local_blks_written);
 }
 
 static Buffer

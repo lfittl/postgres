@@ -4127,16 +4127,11 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage, hyperLogLogState *
 			{
 				appendStringInfoString(es->str, " shared");
 				if (usage->shared_blks_hit > 0)
-<<<<<<< HEAD
 					appendStringInfo(es->str, " hit=%" PRId64,
 									 usage->shared_blks_hit);
-=======
-					appendStringInfo(es->str, " hit=%lld",
-									 (long long) usage->shared_blks_hit);
 				if (shared_blks_hit_distinct)
 					appendStringInfo(es->str, " hit distinct=%lld",
 									 (long long) estimateHyperLogLog(shared_blks_hit_distinct));
->>>>>>> c226a30695a (WIP - add distinct)
 				if (usage->shared_blks_read > 0)
 					appendStringInfo(es->str, " read=%" PRId64,
 									 usage->shared_blks_read);
