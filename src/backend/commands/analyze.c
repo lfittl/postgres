@@ -303,9 +303,6 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-	WalUsage	startwalusage = pgWalUsage;
-	BufferUsage startbufferusage = pgBufferUsage;
-	BufferUsage bufferusage;
 	PgStat_Counter startreadtime = 0;
 	PgStat_Counter startwritetime = 0;
 
@@ -355,6 +352,7 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 			startwritetime = pgStatBlockWriteTime;
 		}
 
+		InstrUsageStart();
 		pg_rusage_init(&ru0);
 	}
 
@@ -735,13 +733,17 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	if (instrument)
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
+		InstrumentUsage *usage;
+
+		/* support summary tracking of utility statements by extensions */
+		InstrUsageAccumToPrevious();
+		usage = InstrUsageStop();
 
 		if (verbose || params->log_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params->log_min_duration))
 		{
 			long		delay_in_ms;
-			WalUsage	walusage;
 			double		read_rate = 0;
 			double		write_rate = 0;
 			char	   *msgfmt;
@@ -750,17 +752,12 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
 
-			memset(&bufferusage, 0, sizeof(BufferUsage));
-			BufferUsageAccumDiff(&bufferusage, &pgBufferUsage, &startbufferusage);
-			memset(&walusage, 0, sizeof(WalUsage));
-			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
-
-			total_blks_hit = bufferusage.shared_blks_hit +
-				bufferusage.local_blks_hit;
-			total_blks_read = bufferusage.shared_blks_read +
-				bufferusage.local_blks_read;
-			total_blks_dirtied = bufferusage.shared_blks_dirtied +
-				bufferusage.local_blks_dirtied;
+			total_blks_hit = usage->bufusage.shared_blks_hit +
+				usage->bufusage.local_blks_hit;
+			total_blks_read = usage->bufusage.shared_blks_read +
+				usage->bufusage.local_blks_read;
+			total_blks_dirtied = usage->bufusage.shared_blks_dirtied +
+				usage->bufusage.local_blks_dirtied;
 
 			/*
 			 * We do not expect an analyze to take > 25 days and it simplifies
@@ -833,10 +830,10 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 							 total_blks_dirtied);
 			appendStringInfo(&buf,
 							 _("WAL usage: %" PRId64 " records, %" PRId64 " full page images, %" PRIu64 " bytes, %" PRId64 " buffers full\n"),
-							 walusage.wal_records,
-							 walusage.wal_fpi,
-							 walusage.wal_bytes,
-							 walusage.wal_buffers_full);
+							 usage->walusage.wal_records,
+							 usage->walusage.wal_fpi,
+							 usage->walusage.wal_bytes,
+							 usage->walusage.wal_buffers_full);
 			appendStringInfo(&buf, _("system usage: %s"), pg_rusage_show(&ru0));
 
 			ereport(verbose ? INFO : LOG,

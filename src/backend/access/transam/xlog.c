@@ -1089,6 +1089,9 @@ XLogInsertRecord(XLogRecData *rdata,
 	/* Report WAL traffic to the instrumentation. */
 	if (inserted)
 	{
+		INSTR_WALUSAGE_ADD(wal_bytes, rechdr->xl_tot_len);
+		INSTR_WALUSAGE_INCR(wal_records);
+		INSTR_WALUSAGE_ADD(wal_fpi, num_fpi);
 		pgWalUsage.wal_bytes += rechdr->xl_tot_len;
 		pgWalUsage.wal_records++;
 		pgWalUsage.wal_fpi += num_fpi;

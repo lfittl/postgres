@@ -95,7 +95,13 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 		else if (strcmp(opt->defname, "buffers") == 0)
 		{
 			buffers_set = true;
-			es->buffers = defGetBoolean(opt);
+			if (opt->arg != NULL && strcmp(defGetString(opt), "distinct") == 0)
+			{
+				es->buffers = true;
+				es->buffers_distinct = true;
+			}
+			else
+				es->buffers = defGetBoolean(opt);
 		}
 		else if (strcmp(opt->defname, "wal") == 0)
 			es->wal = defGetBoolean(opt);

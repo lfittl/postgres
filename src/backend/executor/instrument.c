@@ -16,15 +16,42 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "tcop/pquery.h"
+#include "utils/memutils.h"
 
-BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
-static WalUsage save_pgWalUsage;
+InstrumentUsage *pgInstrumentUsageStack = NULL;
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
-static void WalUsageAdd(WalUsage *dst, WalUsage *add);
+static void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 
+/*
+ * To make sure we don't leak, use ResourceOwner mechanism to reset stack on abort.
+ */
+static void PushInstrumentUsage(InstrumentUsage * usage);
+static void PushInstrumentUsageWithOwner(InstrumentUsage * usage);
+static void PopInstrumentUsage(InstrumentUsage * usage);
+static void PopInstrumentUsageWithOwner(InstrumentUsageResource * usage);
+static void ResOwnerReleaseInstrumentUsage(Datum res);
+
+static const ResourceOwnerDesc instrument_usage_resowner_desc =
+{
+	.name = "instrument usage scope",
+	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
+	.release_priority = RELEASE_PRIO_FIRST,
+	.ReleaseResource = ResOwnerReleaseInstrumentUsage,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrumentUsage(ResourceOwner owner, InstrumentUsageResource * scope)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(scope), &instrument_usage_resowner_desc);
+}
+static inline void
+ResourceOwnerForgetInstrumentUsage(ResourceOwner owner, InstrumentUsageResource * scope)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(scope), &instrument_usage_resowner_desc);
+}
 
 /* Allocate new instrumentation structure(s) */
 Instrumentation *
@@ -34,11 +61,12 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 
 	/* initialize all fields to zeroes, then modify as needed */
 	instr = palloc0(n * sizeof(Instrumentation));
-	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
+	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL | INSTRUMENT_SHARED_HIT_DISTINCT))
 	{
 		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 		bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
 		bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+		bool		need_shared_hit_distinct = (instrument_options & INSTRUMENT_SHARED_HIT_DISTINCT) != 0;
 		int			i;
 
 		for (i = 0; i < n; i++)
@@ -46,6 +74,7 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 			instr[i].need_bufusage = need_buffers;
 			instr[i].need_walusage = need_wal;
 			instr[i].need_timer = need_timer;
+			instr[i].need_shared_hit_distinct = need_shared_hit_distinct;
 			instr[i].async_mode = async_mode;
 		}
 	}
@@ -61,27 +90,40 @@ InstrInit(Instrumentation *instr, int instrument_options)
 	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+	instr->need_shared_hit_distinct = (instrument_options & INSTRUMENT_SHARED_HIT_DISTINCT) != 0;
+}
+
+void
+InstrStart(Instrumentation *instr, bool use_resowner)
+{
+	if (instr->need_timer &&
+		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
+		elog(ERROR, "InstrStartNode called twice in a row");
+
+	if (instr->need_bufusage || instr->need_walusage || instr->need_shared_hit_distinct)
+	{
+		if (use_resowner)
+			PushInstrumentUsageWithOwner(&instr->instrusage);
+		else
+			PushInstrumentUsage(&instr->instrusage);
+	}
+
+	if (instr->need_shared_hit_distinct && !instr->instrusage.shared_blks_hit_distinct)
+	{
+		instr->instrusage.shared_blks_hit_distinct = palloc0(sizeof(hyperLogLogState));
+		initHyperLogLog(instr->instrusage.shared_blks_hit_distinct, 16);
+	}
 }
 
 /* Entry to a plan node */
 void
 InstrStartNode(Instrumentation *instr)
 {
-	if (instr->need_timer &&
-		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
-		elog(ERROR, "InstrStartNode called twice in a row");
-
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
-
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+	InstrStart(instr, false);
 }
 
-/* Exit from a plan node */
 void
-InstrStopNode(Instrumentation *instr, double nTuples)
+InstrStop(Instrumentation *instr, double nTuples, bool use_resowner)
 {
 	double		save_tuplecount = instr->tuplecount;
 	instr_time	endtime;
@@ -101,14 +143,13 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	if (instr->need_bufusage || instr->need_walusage || instr->need_shared_hit_distinct)
+	{
+		if (use_resowner)
+			PopInstrumentUsageWithOwner(instr->instrusage.res);
+		else
+			PopInstrumentUsage(&instr->instrusage);
+	}
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -125,6 +166,13 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		if (instr->async_mode && save_tuplecount < 1.0)
 			instr->firsttuple = INSTR_TIME_GET_DOUBLE(instr->counter);
 	}
+}
+
+/* Exit from a plan node */
+void
+InstrStopNode(Instrumentation *instr, double nTuples)
+{
+	InstrStop(instr, nTuples, false);
 }
 
 /* Update tuple count */
@@ -187,42 +235,115 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 	dst->nfiltered1 += add->nfiltered1;
 	dst->nfiltered2 += add->nfiltered2;
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
-
-	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
+	/* Add delta of buffer/WAL usage since entry to node's totals */
+	if (dst->need_bufusage || dst->need_walusage)
+		InstrUsageAdd(&dst->instrusage, &add->instrusage);
 }
 
-/* note current values during parallel executor startup */
-void
-InstrStartParallelQuery(void)
+static void
+PushInstrumentUsage(InstrumentUsage * usage)
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
+	usage->previous = pgInstrumentUsageStack;
+	pgInstrumentUsageStack = usage;
 }
 
-/* report usage after parallel executor shutdown */
-void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+static void
+PushInstrumentUsageWithOwner(InstrumentUsage * usage)
 {
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
+	InstrumentUsageResource *usageRes = MemoryContextAllocZero(TopMemoryContext, sizeof(InstrumentUsageResource));
+	ResourceOwner owner = CurrentResourceOwner;
+
+	Assert(owner != NULL);
+
+	usageRes->previous = pgInstrumentUsageStack;
+	usageRes->owner = owner;
+
+	ResourceOwnerEnlarge(owner);
+	ResourceOwnerRememberInstrumentUsage(owner, usageRes);
+
+	usage->res = usageRes;
+	PushInstrumentUsage(usage);
 }
 
-/* accumulate work done by workers in leader's stats */
-void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+static void
+PopInstrumentUsage(InstrumentUsage * usage)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
-	WalUsageAdd(&pgWalUsage, walusage);
+	pgInstrumentUsageStack = usage->previous;
+}
+
+static void
+PopInstrumentUsageWithOwner(InstrumentUsageResource * usageRes)
+{
+	pgInstrumentUsageStack = usageRes->previous;
+	Assert(usageRes != NULL);
+	if (usageRes->owner != NULL)
+		ResourceOwnerForgetInstrumentUsage(usageRes->owner, usageRes);
+	pfree(usageRes);
+}
+
+static void
+ResOwnerReleaseInstrumentUsage(Datum res)
+{
+	InstrumentUsageResource *usageRes = (InstrumentUsageResource *) DatumGetPointer(res);
+
+	usageRes->owner = NULL;
+	PopInstrumentUsageWithOwner(usageRes);
+}
+
+/* Start buffer/WAL usage measurement */
+void
+InstrUsageStart()
+{
+	InstrumentUsage *usage = MemoryContextAllocZero(TopMemoryContext, sizeof(InstrumentUsage));
+
+	PushInstrumentUsageWithOwner(usage);
+}
+
+/*
+ * Call this before calling stop to add the usage metrics to the previous item
+ * on the stack (if it exists)
+ */
+void
+InstrUsageAccumToPrevious()
+{
+	if (!pgInstrumentUsageStack || !pgInstrumentUsageStack->previous)
+		return;
+
+	InstrUsageAdd(pgInstrumentUsageStack->previous, pgInstrumentUsageStack);
+}
+
+/* Stop usage measurement and return results */
+InstrumentUsage *
+InstrUsageStop()
+{
+	InstrumentUsage *result = pgInstrumentUsageStack;
+
+	Assert(result != NULL);
+	PopInstrumentUsageWithOwner(result->res);
+
+	/* Avoid returning references that were freed */
+	result->res = NULL;
+	result->previous = NULL;
+
+	return result;
+}
+
+void
+InstrUsageAdd(InstrumentUsage * dst, const InstrumentUsage * add)
+{
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
+}
+
+void
+InstrUsageAddToCurrent(InstrumentUsage * instrusage)
+{
+	if (pgInstrumentUsageStack != NULL)
+		InstrUsageAdd(pgInstrumentUsageStack, instrusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -243,39 +364,9 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
 }
 
-/* dst += add - sub */
-void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
-}
-
 /* helper functions for WAL usage accumulation */
 static void
-WalUsageAdd(WalUsage *dst, WalUsage *add)
+WalUsageAdd(WalUsage *dst, const WalUsage *add)
 {
 	dst->wal_bytes += add->wal_bytes;
 	dst->wal_records += add->wal_records;

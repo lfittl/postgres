@@ -590,6 +590,7 @@ DefineIndex(Oid tableId,
 	Oid			root_save_userid;
 	int			root_save_sec_context;
 	int			root_save_nestlevel;
+	InstrumentUsage *instrusage = NULL;
 
 	root_save_nestlevel = NewGUCNestLevel();
 
@@ -1641,9 +1642,18 @@ DefineIndex(Oid tableId,
 	 */
 	LockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock);
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/* Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
@@ -1708,6 +1718,9 @@ DefineIndex(Oid tableId,
 	/* Perform concurrent build of index */
 	index_concurrently_build(tableId, indexRelationId);
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	/* we can do away with our snapshot */
 	PopActiveSnapshot();
 
@@ -1716,6 +1729,12 @@ DefineIndex(Oid tableId,
 	 */
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/* Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
@@ -1763,6 +1782,9 @@ DefineIndex(Oid tableId,
 	 */
 	limitXmin = snapshot->xmin;
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	PopActiveSnapshot();
 	UnregisterSnapshot(snapshot);
 
@@ -1776,6 +1798,12 @@ DefineIndex(Oid tableId,
 	 */
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/* Tell concurrent index builds to ignore us, if index qualifies */
 	if (safe_index)
@@ -3408,6 +3436,10 @@ static void
 ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const ReindexParams *params)
 {
 	ListCell   *l;
+	InstrumentUsage *instrusage = NULL;
+
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
 
 	PopActiveSnapshot();
 	CommitTransactionCommand();
@@ -3420,12 +3452,20 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 
 		StartTransactionCommand();
 
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
+
 		/* functions in indexes may want a snapshot set */
 		PushActiveSnapshot(GetTransactionSnapshot());
 
 		/* check if the relation still exists */
 		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relid)))
 		{
+			if (InstrumentUsageActive())
+				instrusage = InstrUsageStop();
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 			continue;
@@ -3500,10 +3540,19 @@ ReindexMultipleInternal(const ReindexStmt *stmt, const List *relids, const Reind
 			PopActiveSnapshot();
 		}
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		CommitTransactionCommand();
 	}
 
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 }
 
 
@@ -3560,6 +3609,7 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		PROGRESS_CREATEIDX_ACCESS_METHOD_OID
 	};
 	int64		progress_vals[4];
+	InstrumentUsage *instrusage = NULL;
 
 	/*
 	 * Create a memory context that will survive forced transaction commits we
@@ -4030,9 +4080,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		LockRelationIdForSession(lockrelid, ShareUpdateExclusiveLock);
 	}
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/*
 	 * Because we don't take a snapshot in this transaction, there's no need
@@ -4052,6 +4111,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_1);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
+
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4060,6 +4123,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 		/* Start new transaction for this index's concurrent build */
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * Check for user-requested abort.  This is inside a transaction so as
@@ -4089,11 +4158,20 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		/* Perform concurrent build of new index */
 		index_concurrently_build(newidx->tableId, newidx->indexId);
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
 
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/*
 	 * Because we don't take a snapshot or Xid in this transaction, there's no
@@ -4111,6 +4189,10 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 								 PROGRESS_CREATEIDX_PHASE_WAIT_2);
 	WaitForLockersMultiple(lockTags, ShareLock, true);
+
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	CommitTransactionCommand();
 
 	foreach(lc, newIndexIds)
@@ -4120,6 +4202,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		Snapshot	snapshot;
 
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * Check for user-requested abort.  This is inside a transaction so as
@@ -4166,8 +4254,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		 * transaction, and do our wait before any snapshot has been taken in
 		 * it.
 		 */
+
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		CommitTransactionCommand();
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * The index is now valid in the sense that it contains all currently
@@ -4181,6 +4279,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE,
 									 PROGRESS_CREATEIDX_PHASE_WAIT_3);
 		WaitForOlderSnapshots(limitXmin, true);
+
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
 
 		CommitTransactionCommand();
 	}
@@ -4197,6 +4298,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 	 */
 
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/*
 	 * Because this transaction only does catalog manipulations and doesn't do
@@ -4256,9 +4363,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		CommandCounterIncrement();
 	}
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	/* Commit this transaction and make index swaps visible */
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/*
 	 * While we could set PROC_IN_SAFE_IC if all indexes qualified, there's no
@@ -4300,9 +4416,18 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		PopActiveSnapshot();
 	}
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	/* Commit this transaction to make the updates visible. */
 	CommitTransactionCommand();
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/*
 	 * While we could set PROC_IN_SAFE_IC if all indexes qualified, there's no
@@ -4345,6 +4470,9 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 								 PERFORM_DELETION_CONCURRENT_LOCK | PERFORM_DELETION_INTERNAL);
 	}
 
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
+
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
@@ -4360,6 +4488,12 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 
 	/* Start a new transaction to finish process properly */
 	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
+	}
 
 	/* Log what we did */
 	if ((params->options & REINDEXOPT_VERBOSE) != 0)

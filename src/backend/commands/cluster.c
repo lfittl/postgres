@@ -245,9 +245,6 @@ cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)
 	/* Do the job. */
 	cluster_multiple_rels(rtcs, &params);
 
-	/* Start a new transaction for the cleanup work. */
-	StartTransactionCommand();
-
 	/* Clean up working storage */
 	MemoryContextDelete(cluster_context);
 }
@@ -263,6 +260,10 @@ static void
 cluster_multiple_rels(List *rtcs, ClusterParams *params)
 {
 	ListCell   *lc;
+	InstrumentUsage *instrusage = NULL;
+
+	if (InstrumentUsageActive())
+		instrusage = InstrUsageStop();
 
 	/* Commit to get out of starting transaction */
 	PopActiveSnapshot();
@@ -277,6 +278,12 @@ cluster_multiple_rels(List *rtcs, ClusterParams *params)
 		/* Start a new transaction for each relation. */
 		StartTransactionCommand();
 
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
+
 		/* functions in indexes may want a snapshot set */
 		PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -286,8 +293,20 @@ cluster_multiple_rels(List *rtcs, ClusterParams *params)
 		cluster_rel(rel, rtc->indexOid, params);
 		/* cluster_rel closes the relation, but keeps lock */
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		PopActiveSnapshot();
 		CommitTransactionCommand();
+	}
+
+	/* Start a new transaction for the cleanup work. */
+	StartTransactionCommand();
+
+	if (instrusage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(instrusage);
 	}
 }
 
