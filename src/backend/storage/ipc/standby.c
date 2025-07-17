@@ -1302,7 +1302,7 @@ LogStandbySnapshot(void)
 	/*
 	 * Get details of any AccessExclusiveLocks being held at the moment.
 	 */
-	locks = GetRunningTransactionLocks(&nlocks);
+	locks = GetCurrentAccessExclusiveLocks(&nlocks, true);
 	if (nlocks > 0)
 		LogAccessExclusiveLocks(nlocks, locks);
 	pfree(locks);
@@ -1456,7 +1456,7 @@ LogAccessExclusiveLockPrepare(void)
 	 * hack, but for a corner case not worth adding code for into the main
 	 * commit path. Second, we must assign an xid before the lock is recorded
 	 * in shared memory, otherwise a concurrently executing
-	 * GetRunningTransactionLocks() might see a lock associated with an
+	 * GetCurrentAccessExclusiveLocks() might see a lock associated with an
 	 * InvalidTransactionId which we later assert cannot happen.
 	 */
 	(void) GetCurrentTransactionId();

@@ -595,7 +595,7 @@ extern void RemoveFromWaitQueue(PGPROC *proc, uint32 hashcode);
 extern LockData *GetLockStatusData(void);
 extern BlockedProcsData *GetBlockerStatusData(int blocked_pid);
 
-extern xl_standby_lock *GetRunningTransactionLocks(int *nlocks);
+extern xl_standby_lock *GetCurrentAccessExclusiveLocks(int *nlocks, bool skip_committed);
 extern const char *GetLockmodeName(LOCKMETHODID lockmethodid, LOCKMODE mode);
 
 extern void lock_twophase_recover(FullTransactionId fxid, uint16 info,
