@@ -90,6 +90,7 @@
 #include "tcop/tcopprot.h"
 #include "tsearch/ts_cache.h"
 #include "utils/builtins.h"
+#include "portability/instr_time.h"
 #include "utils/bytea.h"
 #include "utils/float.h"
 #include "utils/guc_hooks.h"
@@ -368,6 +369,15 @@ static const struct config_enum_entry huge_pages_options[] = {
 	{"no", HUGE_PAGES_OFF, true},
 	{"1", HUGE_PAGES_ON, true},
 	{"0", HUGE_PAGES_OFF, true},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry fast_clock_source_options[] = {
+	{"auto", FAST_CLOCK_SOURCE_AUTO, false},
+	{"off", FAST_CLOCK_SOURCE_OFF, false},
+#if !defined(WIN32) && defined(__x86_64__)
+	{"rdtsc", FAST_CLOCK_SOURCE_RDTSC, false},
+#endif
 	{NULL, 0, false}
 };
 
