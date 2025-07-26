@@ -16,6 +16,7 @@ static const char *progname;
 
 static unsigned int test_duration = 3;
 static double max_rprct = 99.99;
+static bool fast_timing = false;
 
 /* record duration in powers of 2 nanoseconds */
 static long long int histogram[32];
@@ -56,6 +57,7 @@ handle_args(int argc, char *argv[])
 	static struct option long_options[] = {
 		{"duration", required_argument, NULL, 'd'},
 		{"cutoff", required_argument, NULL, 'c'},
+		{"fast", no_argument, NULL, 'f'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -68,7 +70,7 @@ handle_args(int argc, char *argv[])
 	{
 		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
 		{
-			printf(_("Usage: %s [-d DURATION] [-c CUTOFF]\n"), progname);
+			printf(_("Usage: %s [-d DURATION] [-c CUTOFF] [--fast]\n"), progname);
 			exit(0);
 		}
 		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
@@ -78,7 +80,7 @@ handle_args(int argc, char *argv[])
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "d:c:",
+	while ((option = getopt_long(argc, argv, "d:c:f:",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -123,6 +125,10 @@ handle_args(int argc, char *argv[])
 							progname, "--cutoff", 0, 100);
 					exit(1);
 				}
+				break;
+
+			case 'f':
+				fast_timing = true;
 				break;
 
 			default:
@@ -173,7 +179,11 @@ test_timing(unsigned int duration)
 
 	total_time = duration > 0 ? duration * INT64CONST(1000000000) : 0;
 
-	INSTR_TIME_SET_CURRENT(start_time);
+	INSTR_TIME_INITIALIZE();
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(start_time);
+	else
+		INSTR_TIME_SET_CURRENT(start_time);
 	cur = INSTR_TIME_GET_NANOSEC(start_time);
 
 	while (time_elapsed < total_time)
@@ -182,7 +192,10 @@ test_timing(unsigned int duration)
 					bits;
 
 		prev = cur;
-		INSTR_TIME_SET_CURRENT(temp);
+		if (fast_timing)
+			INSTR_TIME_SET_CURRENT_FAST(temp);
+		else
+			INSTR_TIME_SET_CURRENT(temp);
 		cur = INSTR_TIME_GET_NANOSEC(temp);
 		diff = cur - prev;
 
@@ -221,7 +234,10 @@ test_timing(unsigned int duration)
 		time_elapsed = INSTR_TIME_GET_NANOSEC(temp);
 	}
 
-	INSTR_TIME_SET_CURRENT(end_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(end_time);
+	else
+		INSTR_TIME_SET_CURRENT(end_time);
 
 	INSTR_TIME_SUBTRACT(end_time, start_time);
 
