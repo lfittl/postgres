@@ -91,6 +91,11 @@ main(int argc, char *argv[])
 	startup_hacks(progname);
 
 	/*
+	 * Initialize timing infrastructure
+	 */
+	pg_initialize_timing();
+
+	/*
 	 * Remember the physical location of the initially given argv[] array for
 	 * possible use by ps display.  On some platforms, the argv[] storage must
 	 * be overwritten in order to set the process title for ps. In such cases
