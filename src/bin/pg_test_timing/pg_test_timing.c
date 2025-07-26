@@ -43,6 +43,9 @@ main(int argc, char *argv[])
 
 	handle_args(argc, argv);
 
+	/* initialize timing infrastructure (required for INSTR_* calls) */
+	pg_initialize_timing();
+
 	loop_count = test_timing(test_duration);
 
 	output(loop_count);
@@ -155,11 +158,10 @@ test_timing(unsigned int duration)
 	uint64		total_time;
 	int64		time_elapsed = 0;
 	uint64		loop_count = 0;
-	uint64		prev,
-				cur;
 	instr_time	start_time,
 				end_time,
-				temp;
+				prev,
+				cur;
 
 	/*
 	 * Pre-zero the statistics data structures.  They're already zero by
@@ -174,7 +176,7 @@ test_timing(unsigned int duration)
 	total_time = duration > 0 ? duration * INT64CONST(1000000000) : 0;
 
 	INSTR_TIME_SET_CURRENT(start_time);
-	cur = INSTR_TIME_GET_NANOSEC(start_time);
+	cur = start_time;
 
 	while (time_elapsed < total_time)
 	{
@@ -182,9 +184,8 @@ test_timing(unsigned int duration)
 					bits;
 
 		prev = cur;
-		INSTR_TIME_SET_CURRENT(temp);
-		cur = INSTR_TIME_GET_NANOSEC(temp);
-		diff = cur - prev;
+		INSTR_TIME_SET_CURRENT(cur);
+		diff = INSTR_TIME_DIFF_NANOSEC(cur, prev);
 
 		/* Did time go backwards? */
 		if (unlikely(diff < 0))
@@ -217,8 +218,7 @@ test_timing(unsigned int duration)
 			largest_diff_count++;
 
 		loop_count++;
-		INSTR_TIME_SUBTRACT(temp, start_time);
-		time_elapsed = INSTR_TIME_GET_NANOSEC(temp);
+		time_elapsed = INSTR_TIME_DIFF_NANOSEC(cur, start_time);
 	}
 
 	INSTR_TIME_SET_CURRENT(end_time);
