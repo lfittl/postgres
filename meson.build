@@ -2035,7 +2035,11 @@ if cc.links('''
     args: test_c_args)
   cdata.set('HAVE__GET_CPUID_COUNT', 1)
 elif cc.links('''
+    #if defined(_MSC_VER)
     #include <intrin.h>
+    #else
+    #include <cpuid.h>
+    #endif
     int main(int arg, char **argv)
     {
         unsigned int exx[4] = {0, 0, 0, 0};
