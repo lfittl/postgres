@@ -30,7 +30,7 @@ static long long int largest_diff_count;
 
 
 static void handle_args(int argc, char *argv[]);
-static uint64 test_timing(unsigned int duration);
+static uint64 test_timing(unsigned int duration, bool fast_timing);
 static void output(uint64 loop_count);
 
 int
@@ -43,9 +43,29 @@ main(int argc, char *argv[])
 
 	handle_args(argc, argv);
 
-	loop_count = test_timing(test_duration);
-
+	/*
+	 * First, test default (non-fast) timing code. A clock source for that is
+	 * always available. Hence, we can unconditionally output the result.
+	 */
+	loop_count = test_timing(test_duration, false);
 	output(loop_count);
+
+	/*
+	 * Second, test the fast timing code. This clock source is not always
+	 * available. In that case the loop count will be 0 and we don't print.
+	 */
+	printf("\n");
+	loop_count = test_timing(test_duration, true);
+	if (loop_count > 0)
+	{
+		output(loop_count);
+		printf("\n");
+
+		if (pg_fast_clock_source_default())
+			printf(_("Fast time source will be used by default, unless fast_clock_source is set to 'off'.\n"));
+		else
+			printf(_("Fast time source will not be used by default, unless fast_clock_source is set to 'rdtsc'.\n"));
+	}
 
 	return 0;
 }
@@ -78,7 +98,7 @@ handle_args(int argc, char *argv[])
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "d:c:",
+	while ((option = getopt_long(argc, argv, "d:c:f:",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -143,23 +163,55 @@ handle_args(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf(ngettext("Testing timing overhead for %u second.\n",
-					"Testing timing overhead for %u seconds.\n",
+	printf(ngettext("Testing timing overhead for %u second.\n\n",
+					"Testing timing overhead for %u seconds.\n\n",
 					test_duration),
 		   test_duration);
 }
 
 static uint64
-test_timing(unsigned int duration)
+test_timing(unsigned int duration, bool fast_timing)
 {
 	uint64		total_time;
 	int64		time_elapsed = 0;
 	uint64		loop_count = 0;
-	uint64		prev,
-				cur;
 	instr_time	start_time,
 				end_time,
-				temp;
+				prev,
+				cur;
+	char	   *time_source = NULL;
+	bool		fast_timing_available = false;
+
+	if (fast_timing)
+		pg_initialize_fast_clock_source();
+
+#if !defined(WIN32) && defined(__x86_64__)
+	if (fast_timing && has_rdtsc)
+	{
+		time_source = "RDTSC";
+		fast_timing_available = true;
+	}
+	else if (has_rdtscp)
+
+		/*
+		 * Note that we never reach RDTSCP currently, because it only gets
+		 * made available by the fast clock source initialization. In
+		 * practice, we assume its performance to be similar to the OS clock
+		 * source.
+		 */
+		time_source = "RDTSCP";
+	else
+		time_source = PG_INSTR_CLOCK_NAME;
+#else
+	time_source = PG_INSTR_CLOCK_NAME;
+#endif
+	if (fast_timing && !fast_timing_available)
+		return 0;
+
+	if (fast_timing)
+		printf(_("Fast time source: %s\n"), time_source);
+	else
+		printf(_("Time source: %s\n"), time_source);
 
 	/*
 	 * Pre-zero the statistics data structures.  They're already zero by
@@ -173,8 +225,11 @@ test_timing(unsigned int duration)
 
 	total_time = duration > 0 ? duration * INT64CONST(1000000000) : 0;
 
-	INSTR_TIME_SET_CURRENT(start_time);
-	cur = INSTR_TIME_GET_NANOSEC(start_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(start_time);
+	else
+		INSTR_TIME_SET_CURRENT(start_time);
+	cur = start_time;
 
 	while (time_elapsed < total_time)
 	{
@@ -182,9 +237,11 @@ test_timing(unsigned int duration)
 					bits;
 
 		prev = cur;
-		INSTR_TIME_SET_CURRENT(temp);
-		cur = INSTR_TIME_GET_NANOSEC(temp);
-		diff = cur - prev;
+		if (fast_timing)
+			INSTR_TIME_SET_CURRENT_FAST(cur);
+		else
+			INSTR_TIME_SET_CURRENT(cur);
+		diff = INSTR_TIME_DIFF_NANOSEC(cur, prev);
 
 		/* Did time go backwards? */
 		if (unlikely(diff < 0))
@@ -217,11 +274,13 @@ test_timing(unsigned int duration)
 			largest_diff_count++;
 
 		loop_count++;
-		INSTR_TIME_SUBTRACT(temp, start_time);
-		time_elapsed = INSTR_TIME_GET_NANOSEC(temp);
+		time_elapsed = INSTR_TIME_DIFF_NANOSEC(cur, start_time);
 	}
 
-	INSTR_TIME_SET_CURRENT(end_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(end_time);
+	else
+		INSTR_TIME_SET_CURRENT(end_time);
 
 	INSTR_TIME_SUBTRACT(end_time, start_time);
 
