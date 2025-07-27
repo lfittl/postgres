@@ -810,6 +810,9 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	/* Initialize portal manager */
 	EnablePortalManager();
 
+	/* initialize high-precision interval timing */
+	INSTR_TIME_INITIALIZE();
+
 	/*
 	 * Load relcache entries for the shared system catalogs.  This must create
 	 * at least entries for pg_database and catalogs used for authentication.

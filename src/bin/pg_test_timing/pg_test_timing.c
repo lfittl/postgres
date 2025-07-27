@@ -16,6 +16,7 @@ static const char *progname;
 
 static unsigned int test_duration = 3;
 static double max_rprct = 99.99;
+static bool fast_timing = false;
 
 /* record duration in powers of 2 nanoseconds */
 static long long int histogram[32];
@@ -56,6 +57,7 @@ handle_args(int argc, char *argv[])
 	static struct option long_options[] = {
 		{"duration", required_argument, NULL, 'd'},
 		{"cutoff", required_argument, NULL, 'c'},
+		{"fast", no_argument, NULL, 'f'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -68,7 +70,7 @@ handle_args(int argc, char *argv[])
 	{
 		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
 		{
-			printf(_("Usage: %s [-d DURATION] [-c CUTOFF]\n"), progname);
+			printf(_("Usage: %s [-d DURATION] [-c CUTOFF] [--fast]\n"), progname);
 			exit(0);
 		}
 		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
@@ -78,7 +80,7 @@ handle_args(int argc, char *argv[])
 		}
 	}
 
-	while ((option = getopt_long(argc, argv, "d:c:",
+	while ((option = getopt_long(argc, argv, "d:c:f:",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -125,6 +127,10 @@ handle_args(int argc, char *argv[])
 				}
 				break;
 
+			case 'f':
+				fast_timing = true;
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 						progname);
@@ -155,11 +161,31 @@ test_timing(unsigned int duration)
 	uint64		total_time;
 	int64		time_elapsed = 0;
 	uint64		loop_count = 0;
-	uint64		prev,
-				cur;
 	instr_time	start_time,
 				end_time,
-				temp;
+				prev,
+				cur;
+	char	   *time_source = NULL;
+	bool		fast_timing_used = false;
+
+	INSTR_TIME_INITIALIZE();
+
+#if !defined(WIN32) && defined(__x86_64__) && defined(__linux__)
+	if (fast_timing && has_rdtsc)
+	{
+		time_source = "RDTSC";
+		fast_timing_used = true;
+	}
+	else if (has_rdtscp)
+		time_source = "RDTSCP";
+	else
+		time_source = PG_INSTR_CLOCK_NAME;
+#else
+	time_source = PG_INSTR_CLOCK_NAME;
+#endif
+	if (fast_timing && !fast_timing_used)
+		printf(_("Warning: Fast timing requested, but not available - regular timing source will be used\n"));
+	printf(_("Time source: %s\n"), time_source);
 
 	/*
 	 * Pre-zero the statistics data structures.  They're already zero by
@@ -173,8 +199,11 @@ test_timing(unsigned int duration)
 
 	total_time = duration > 0 ? duration * INT64CONST(1000000000) : 0;
 
-	INSTR_TIME_SET_CURRENT(start_time);
-	cur = INSTR_TIME_GET_NANOSEC(start_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(start_time);
+	else
+		INSTR_TIME_SET_CURRENT(start_time);
+	cur = start_time;
 
 	while (time_elapsed < total_time)
 	{
@@ -182,9 +211,11 @@ test_timing(unsigned int duration)
 					bits;
 
 		prev = cur;
-		INSTR_TIME_SET_CURRENT(temp);
-		cur = INSTR_TIME_GET_NANOSEC(temp);
-		diff = cur - prev;
+		if (fast_timing)
+			INSTR_TIME_SET_CURRENT_FAST(cur);
+		else
+			INSTR_TIME_SET_CURRENT(cur);
+		diff = INSTR_TIME_DIFF_NANOSEC(cur, prev);
 
 		/* Did time go backwards? */
 		if (unlikely(diff < 0))
@@ -217,11 +248,13 @@ test_timing(unsigned int duration)
 			largest_diff_count++;
 
 		loop_count++;
-		INSTR_TIME_SUBTRACT(temp, start_time);
-		time_elapsed = INSTR_TIME_GET_NANOSEC(temp);
+		time_elapsed = INSTR_TIME_DIFF_NANOSEC(cur, start_time);
 	}
 
-	INSTR_TIME_SET_CURRENT(end_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(end_time);
+	else
+		INSTR_TIME_SET_CURRENT(end_time);
 
 	INSTR_TIME_SUBTRACT(end_time, start_time);
 

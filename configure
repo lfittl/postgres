@@ -17675,12 +17675,16 @@ if ${pgac_cv__cpuidex+:} false; then :
 else
   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
+#if defined(_MSC_VER)
 #include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
 int
 main ()
 {
 unsigned int exx[4] = {0, 0, 0, 0};
-  __get_cpuidex(exx[0], 7, 0);
+  __cpuidex(exx, 7, 0);
 
   ;
   return 0;
