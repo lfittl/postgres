@@ -112,10 +112,13 @@ extern int64 max_ticks_no_overflow;
  */
 #if defined(__darwin__) && defined(CLOCK_MONOTONIC_RAW)
 #define PG_INSTR_CLOCK	CLOCK_MONOTONIC_RAW
+#define PG_INSTR_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC_RAW)"
 #elif defined(CLOCK_MONOTONIC)
 #define PG_INSTR_CLOCK	CLOCK_MONOTONIC
+#define PG_INSTR_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC)"
 #else
 #define PG_INSTR_CLOCK	CLOCK_REALTIME
+#define PG_INSTR_CLOCK_NAME	"clock_gettime (CLOCK_REALTIME)"
 #endif
 
 #if defined(__x86_64__) && defined(__linux__)
@@ -174,7 +177,7 @@ pg_get_ticks(void)
 }
 
 static inline int64_t
-pg_ticks_to_ns(instr_time t)
+pg_ticks_to_ns(int64 ticks)
 {
 	/*
 	 * Would multiplication overflow? If so perform computation in two parts.
@@ -183,7 +186,7 @@ pg_ticks_to_ns(instr_time t)
 	 */
 	int64		ns = 0;
 
-	if (unlikely(t.ticks > max_ticks_no_overflow))
+	if (unlikely(ticks > max_ticks_no_overflow))
 	{
 		/*
 		 * Compute how often the maximum number of ticks fits completely into
@@ -192,7 +195,7 @@ pg_ticks_to_ns(instr_time t)
 		 * value. In a 2nd step we adjust the number of elapsed ticks and
 		 * convert the remaining ticks.
 		 */
-		int64		count = t.ticks / max_ticks_no_overflow;
+		int64		count = ticks / max_ticks_no_overflow;
 		int64		max_ns = max_ticks_no_overflow * ticks_per_ns_scaled / TICKS_TO_NS_PRECISION;
 
 		ns = max_ns * count;
@@ -201,11 +204,11 @@ pg_ticks_to_ns(instr_time t)
 		 * Subtract the ticks that we now already accounted for, so that they
 		 * don't get counted twice.
 		 */
-		t.ticks -= count * max_ticks_no_overflow;
-		Assert(t.ticks >= 0);
+		ticks -= count * max_ticks_no_overflow;
+		Assert(ticks >= 0);
 	}
 
-	ns += t.ticks * ticks_per_ns_scaled / TICKS_TO_NS_PRECISION;
+	ns += ticks * ticks_per_ns_scaled / TICKS_TO_NS_PRECISION;
 	return ns;
 }
 
@@ -226,14 +229,14 @@ pg_initialize_get_ticks()
 #define INSTR_TIME_SET_CURRENT(t) \
 	((t) = pg_get_ticks())
 
-#define INSTR_TIME_GET_NANOSEC(t) \
-	pg_ticks_to_ns(t)
-
+#define INSTR_TIME_TICKS_TO_NANOSEC(ticks) \
+	(pg_ticks_to_ns(ticks))
 
 #else							/* WIN32 */
 
 
 /* Use QueryPerformanceCounter() */
+#define PG_INSTR_CLOCK_NAME	"QueryPerformanceCounter"
 
 /* helper for INSTR_TIME_SET_CURRENT / INSTR_TIME_SET_CURRENT_FAST */
 static inline instr_time
@@ -265,8 +268,8 @@ GetTimerFrequency(void)
 #define INSTR_TIME_SET_CURRENT(t) \
 	((t) = pg_query_performance_counter())
 
-#define INSTR_TIME_GET_NANOSEC(t) \
-	((int64) ((t).ticks * ((double) NS_PER_S / GetTimerFrequency())))
+#define INSTR_TIME_TICKS_TO_NANOSEC(ticks) \
+	((int64) ((ticks) * ((double) NS_PER_S / GetTimerFrequency())))
 
 #endif							/* WIN32 */
 
@@ -285,9 +288,14 @@ GetTimerFrequency(void)
 #define INSTR_TIME_SUBTRACT(x,y) \
 	((x).ticks -= (y).ticks)
 
+#define INSTR_TIME_DIFF_NANOSEC(x,y) \
+	(INSTR_TIME_TICKS_TO_NANOSEC((x).ticks - (y).ticks))
+
 #define INSTR_TIME_ACCUM_DIFF(x,y,z) \
 	((x).ticks += (y).ticks - (z).ticks)
 
+#define INSTR_TIME_GET_NANOSEC(t) \
+	(INSTR_TIME_TICKS_TO_NANOSEC((t).ticks))
 
 #define INSTR_TIME_GET_DOUBLE(t) \
 	((double) INSTR_TIME_GET_NANOSEC(t) / NS_PER_S)
