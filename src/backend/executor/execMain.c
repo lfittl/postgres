@@ -312,6 +312,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	DestReceiver *dest;
 	bool		sendTuples;
 	MemoryContext oldcontext;
+	InstrStackResource *res;
 
 	/* sanity checks */
 	Assert(queryDesc != NULL);
@@ -332,6 +333,9 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
 		InstrStart(queryDesc->totaltime);
+
+	/* Start up per-query node level instrumentation */
+	res = InstrStartQuery();
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -381,6 +385,9 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 */
 	if (sendTuples)
 		dest->rShutdown(dest);
+
+	/* Shut down per-query node level instrumentation */
+	InstrShutdownQuery(res);
 
 	if (queryDesc->totaltime)
 		InstrStop(queryDesc->totaltime, estate->es_processed);

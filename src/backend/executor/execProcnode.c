@@ -823,7 +823,16 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
+	{
 		InstrStopNode(node->instrument, 0);
+
+		/*
+		 * Propagate WAL/buffer stats to the parent node on the
+		 * instrumentation stack (which is where InstrStopNode returned us
+		 * to).
+		 */
+		InstrNodeAddToCurrent(&node->instrument->stack);
+	}
 
 	return false;
 }
