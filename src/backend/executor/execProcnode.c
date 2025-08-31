@@ -823,7 +823,20 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
+	{
 		InstrStopNode(node->instrument, 0);
+
+		/*
+		 * Accumulate usage stats into active one (if any)
+		 *
+		 * This ensures that if we tracked buffer/WAL usage for EXPLAIN ANALYZE, a
+		 * potential extension interested in summary data can also get it.
+		 *
+		 * This is also what's responsible for propagating the stats
+		 * to the parent node (which is where InstrStopNode returned us to).
+		 */
+		InstrUsageAddToCurrent(&node->instrument->instrusage);
+	}
 
 	return false;
 }

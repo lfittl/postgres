@@ -13,14 +13,12 @@
 #ifndef INSTRUMENT_H
 #define INSTRUMENT_H
 
+#include "common/hashfn.h"
+#include "lib/hyperloglog.h"
 #include "portability/instr_time.h"
+#include "utils/resowner.h"
 
 
-/*
- * BufferUsage and WalUsage counters keep being incremented infinitely,
- * i.e., must never be reset to zero, so that we can calculate how much
- * the counters are incremented in an arbitrary period.
- */
 typedef struct BufferUsage
 {
 	int64		shared_blks_hit;	/* # of shared buffer hits */
@@ -63,8 +61,27 @@ typedef enum InstrumentOption
 	INSTRUMENT_BUFFERS = 1 << 1,	/* needs buffer usage */
 	INSTRUMENT_ROWS = 1 << 2,	/* needs row count */
 	INSTRUMENT_WAL = 1 << 3,	/* needs WAL usage */
+	INSTRUMENT_SHARED_HIT_DISTINCT = 1 << 4,	/* needs estimated distinct
+												 * shared hit buffer count */
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
+
+typedef struct InstrumentUsageResource
+{
+	struct InstrumentUsage *previous;
+
+	ResourceOwner owner;
+}			InstrumentUsageResource;
+
+typedef struct InstrumentUsage
+{
+	struct InstrumentUsage *previous;
+	BufferUsage bufusage;
+	WalUsage	walusage;
+	hyperLogLogState *shared_blks_hit_distinct;
+
+	InstrumentUsageResource *res;
+}			InstrumentUsage;
 
 typedef struct Instrumentation
 {
@@ -72,6 +89,9 @@ typedef struct Instrumentation
 	bool		need_timer;		/* true if we need timer data */
 	bool		need_bufusage;	/* true if we need buffer usage data */
 	bool		need_walusage;	/* true if we need WAL usage data */
+	bool		need_shared_hit_distinct;	/* true if we need estimated
+											 * distinct shared hit buffer
+											 * count */
 	bool		async_mode;		/* true if node is in async mode */
 	/* Info about current plan cycle: */
 	bool		running;		/* true if we've completed first tuple */
@@ -79,8 +99,6 @@ typedef struct Instrumentation
 	instr_time	counter;		/* accumulated runtime for this node */
 	double		firsttuple;		/* time for first tuple of this cycle */
 	double		tuplecount;		/* # of tuples emitted so far this cycle */
-	BufferUsage bufusage_start; /* buffer usage at start */
-	WalUsage	walusage_start; /* WAL usage at start */
 	/* Accumulated statistics across all completed cycles: */
 	double		startup;		/* total startup time (in seconds) */
 	double		total;			/* total time (in seconds) */
@@ -89,8 +107,7 @@ typedef struct Instrumentation
 	double		nloops;			/* # of run cycles for this node */
 	double		nfiltered1;		/* # of tuples removed by scanqual or joinqual */
 	double		nfiltered2;		/* # of tuples removed by "other" quals */
-	BufferUsage bufusage;		/* total buffer usage */
-	WalUsage	walusage;		/* total WAL usage */
+	InstrumentUsage instrusage; /* total buffer/WAL usage */
 } Instrumentation;
 
 typedef struct WorkerInstrumentation
@@ -99,23 +116,67 @@ typedef struct WorkerInstrumentation
 	Instrumentation instrument[FLEXIBLE_ARRAY_MEMBER];
 } WorkerInstrumentation;
 
-extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
+extern PGDLLIMPORT InstrumentUsage * pgInstrumentUsageStack;
 
 extern Instrumentation *InstrAlloc(int n, int instrument_options,
 								   bool async_mode);
 extern void InstrInit(Instrumentation *instr, int instrument_options);
+extern void InstrStart(Instrumentation *instr, bool use_resowner);
 extern void InstrStartNode(Instrumentation *instr);
+extern void InstrStop(Instrumentation *instr, double nTuples, bool use_resowner);
 extern void InstrStopNode(Instrumentation *instr, double nTuples);
 extern void InstrUpdateTupleCount(Instrumentation *instr, double nTuples);
 extern void InstrEndLoop(Instrumentation *instr);
 extern void InstrAggNode(Instrumentation *dst, Instrumentation *add);
-extern void InstrStartParallelQuery(void);
-extern void InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void BufferUsageAccumDiff(BufferUsage *dst,
-								 const BufferUsage *add, const BufferUsage *sub);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
+
+static inline bool
+InstrumentUsageActive(void)
+{
+	return pgInstrumentUsageStack != NULL;
+}
+
+#define INSTR_BUFUSAGE_INCR(fld) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->bufusage.fld++; \
+	} while(0)
+#define INSTR_BUFUSAGE_ADD(fld,val) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->bufusage.fld += val; \
+	} while(0)
+#define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
+	if (pgInstrumentUsageStack) \
+		INSTR_TIME_ADD(pgInstrumentUsageStack->bufusage.fld, val); \
+	} while (0)
+#define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
+	if (pgInstrumentUsageStack) \
+		INSTR_TIME_ACCUM_DIFF(pgInstrumentUsageStack->bufusage.fld, endval, startval); \
+	} while (0)
+
+#define INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufId) do { \
+		if (pgInstrumentUsageStack) { \
+			pgInstrumentUsageStack->bufusage.shared_blks_hit++; \
+			if (pgInstrumentUsageStack->shared_blks_hit_distinct) \
+				addHyperLogLog(pgInstrumentUsageStack->shared_blks_hit_distinct, DatumGetUInt32(hash_any((unsigned char *) &bufId, sizeof(int)))); \
+		} \
+	} while(0)
+
+#define INSTR_WALUSAGE_INCR(fld) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->walusage.fld++; \
+	} while(0)
+#define INSTR_WALUSAGE_ADD(fld,val) do { \
+		if (pgInstrumentUsageStack) \
+			pgInstrumentUsageStack->walusage.fld += val; \
+	} while(0)
+
+extern void InstrUsageStart(void);
+extern InstrumentUsage * InstrUsageStop(void);
+extern void InstrUsageAccumToPrevious(void);
+extern void InstrUsageAdd(InstrumentUsage * dst, const InstrumentUsage * add);
+extern void InstrUsageAddToCurrent(InstrumentUsage * instrusage);
+extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 
 #endif							/* INSTRUMENT_H */

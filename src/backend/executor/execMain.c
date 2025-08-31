@@ -331,7 +331,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime, true);
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -383,7 +383,11 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		dest->rShutdown(dest);
 
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, estate->es_processed);
+	{
+		/* allow a potential calling EXPLAIN statement to capture the usage */
+		InstrUsageAccumToPrevious();
+		InstrStop(queryDesc->totaltime, estate->es_processed, true);
+	}
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -433,7 +437,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime, true);
 
 	/* Run ModifyTable nodes to completion */
 	ExecPostprocessPlan(estate);
@@ -443,7 +447,11 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 		AfterTriggerEndQuery(estate);
 
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, 0);
+	{
+		/* allow a potential calling EXPLAIN statement to capture the usage */
+		InstrUsageAccumToPrevious();
+		InstrStop(queryDesc->totaltime, 0, true);
+	}
 
 	MemoryContextSwitchTo(oldcontext);
 

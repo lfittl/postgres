@@ -2019,6 +2019,7 @@ movedb(const char *dbname, const char *tblspcname)
 	DIR		   *dstdir;
 	struct dirent *xlde;
 	movedb_failure_params fparms;
+	InstrumentUsage *initial_usage = NULL;
 
 	/*
 	 * Look up the target database's OID, and get exclusive lock on it. We
@@ -2271,6 +2272,9 @@ movedb(const char *dbname, const char *tblspcname)
 	PG_END_ENSURE_ERROR_CLEANUP(movedb_failure_callback,
 								PointerGetDatum(&fparms));
 
+	if (InstrumentUsageActive())
+		initial_usage = InstrUsageStop();
+
 	/*
 	 * Commit the transaction so that the pg_database update is committed. If
 	 * we crash while removing files, the database won't be corrupt, we'll
@@ -2287,6 +2291,12 @@ movedb(const char *dbname, const char *tblspcname)
 
 	/* Start new transaction for the remaining work; don't need a snapshot */
 	StartTransactionCommand();
+
+	if (initial_usage != NULL)
+	{
+		InstrUsageStart();
+		InstrUsageAddToCurrent(initial_usage);
+	}
 
 	/*
 	 * Remove files from the old tablespace

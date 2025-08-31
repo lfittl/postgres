@@ -2131,6 +2131,7 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 				indexrelid;
 	LOCKTAG		heaplocktag;
 	LOCKMODE	lockmode;
+	InstrumentUsage *instrusage = NULL;
 
 	/*
 	 * A temporary relation uses a non-concurrent DROP.  Other backends can't
@@ -2255,9 +2256,18 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		LockRelationIdForSession(&heaprelid, ShareUpdateExclusiveLock);
 		LockRelationIdForSession(&indexrelid, ShareUpdateExclusiveLock);
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * Now we must wait until no running transaction could be using the
@@ -2288,6 +2298,9 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		/* Finish invalidation of index and mark it as dead */
 		index_concurrently_set_dead(heapId, indexId);
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		PopActiveSnapshot();
 
 		/*
@@ -2296,6 +2309,12 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 		 */
 		CommitTransactionCommand();
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * Wait till every transaction that saw the old index state has
