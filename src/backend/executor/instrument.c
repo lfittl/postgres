@@ -294,21 +294,20 @@ InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add)
 InstrStackResource *
 InstrStartQuery()
 {
-	InstrStack *usage = MemoryContextAllocZero(CurTransactionContext, sizeof(InstrStack));
-	InstrStackResource *usageRes = MemoryContextAllocZero(CurTransactionContext, sizeof(InstrStackResource));
+	InstrStackResource *res = MemoryContextAllocZero(CurTransactionContext, sizeof(InstrStackResource));
 	ResourceOwner owner = CurrentResourceOwner;
 
 	Assert(owner != NULL);
 
-	usageRes->owner = owner;
+	res->owner = owner;
 
 	ResourceOwnerEnlarge(owner);
-	ResourceOwnerRememberInstrStack(owner, usageRes);
+	ResourceOwnerRememberInstrStack(owner, res);
 
-	usage->previous = pgInstrStack;
-	pgInstrStack = usage;
+	res->stack.previous = pgInstrStack;
+	pgInstrStack = &res->stack;
 
-	return usageRes;
+	return res;
 }
 
 void
@@ -317,21 +316,43 @@ InstrShutdownQuery(InstrStackResource * res)
 	Assert(res != NULL);
 	Assert(res->owner != NULL);
 
-	pgInstrStack = res->previous;
+	pgInstrStack = res->stack.previous;
 
 	ResourceOwnerForgetInstrStack(res->owner, res);
+}
+
+static bool
+StackIsParent(InstrStack * stack, InstrStack * entry)
+{
+	if (entry->previous == NULL)
+		return false;
+
+	if (entry->previous == stack)
+		return true;
+
+	return StackIsParent(stack, entry->previous);
 }
 
 static void
 ResOwnerReleaseInstrStack(Datum res)
 {
+	InstrStackResource *r = (InstrStackResource *) DatumGetPointer(res);
+
 	/*
-	 * XXX: Registered resources are *not* called in reverse order, i.e. we'll
-	 * get what was first registered first at shutdown. To avoid handling
-	 * that, we are resetting the stack here on abort (instead of recovering
-	 * to previous).
+	 * Because registered resources are *not* called in reverse order, we'll
+	 * get what was first registered first at shutdown. Thus, on any later
+	 * resources we need to not change the stack, which was already set to
+	 * the correct previous entry.
 	 */
-	pgInstrStack = NULL;
+	if (pgInstrStack == NULL || !StackIsParent(pgInstrStack, &r->stack))
+		pgInstrStack = r->stack.previous;
+
+	/*
+	 * Accumulate collected stats before the abort. In the happy path this is
+	 * expected to be done by the calling code, but in abort situations we have
+	 * to do this.
+	 */
+	InstrNodeAddToCurrent(&r->stack);
 }
 
 void

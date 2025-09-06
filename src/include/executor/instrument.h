@@ -78,7 +78,7 @@ typedef struct InstrStack
 /* Used to manage resetting of instrumentation stack on abort. */
 typedef struct InstrStackResource
 {
-	InstrStack *previous;
+	InstrStack stack;
 	ResourceOwner owner;
 }			InstrStackResource;
 
