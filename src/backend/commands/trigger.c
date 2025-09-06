@@ -2344,7 +2344,7 @@ ExecCallTriggerFunc(TriggerData *trigdata,
 	 * If doing EXPLAIN ANALYZE, start charging time to this trigger.
 	 */
 	if (instr)
-		InstrStartNode(instr + tgindx);
+		InstrStart(instr + tgindx);
 
 	/*
 	 * Do the function evaluation in the per-tuple memory context, so that
@@ -2392,7 +2392,7 @@ ExecCallTriggerFunc(TriggerData *trigdata,
 	 * one "tuple returned" (really the number of firings).
 	 */
 	if (instr)
-		InstrStopNode(instr + tgindx, 1);
+		InstrStop(instr + tgindx, 1);
 
 	return (HeapTuple) DatumGetPointer(result);
 }
@@ -4381,7 +4381,7 @@ AfterTriggerExecute(EState *estate,
 	 * to include time spent re-fetching tuples in the trigger cost.
 	 */
 	if (instr)
-		InstrStartNode(instr + tgindx);
+		InstrStart(instr + tgindx);
 
 	/*
 	 * Fetch the required tuple(s).
@@ -4607,7 +4607,7 @@ AfterTriggerExecute(EState *estate,
 	 * one "tuple returned" (really the number of firings).
 	 */
 	if (instr)
-		InstrStopNode(instr + tgindx, 1);
+		InstrStop(instr + tgindx, 1);
 }
 
 

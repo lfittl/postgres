@@ -16,24 +16,117 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "utils/memutils.h"
 
 BufferUsage pgBufferUsage;
 static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
 static WalUsage save_pgWalUsage;
+InstrStack *pgInstrStack = NULL;
 
 static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
 
+/*
+ * Node-specific instrumentation handling uses ResourceOwner mechanism to
+ * reset pgInstrStack on abort.
+ */
+static void ResOwnerReleaseInstrStack(Datum res);
+static const ResourceOwnerDesc instr_stack_resowner_desc =
+{
+	.name = "instrumentation stack scope",
+	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
+	.release_priority = RELEASE_PRIO_FIRST,
+	.ReleaseResource = ResOwnerReleaseInstrStack,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+static inline void
+ResourceOwnerRememberInstrStack(ResourceOwner owner, InstrStackResource * scope)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(scope), &instr_stack_resowner_desc);
+}
+static inline void
+ResourceOwnerForgetInstrStack(ResourceOwner owner, InstrStackResource * scope)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(scope), &instr_stack_resowner_desc);
+}
 
-/* Allocate new instrumentation structure(s) */
+/* General purpose instrumentation handling */
 Instrumentation *
-InstrAlloc(int n, int instrument_options, bool async_mode)
+InstrAlloc(int n, int instrument_options)
 {
 	Instrumentation *instr;
 
 	/* initialize all fields to zeroes, then modify as needed */
 	instr = palloc0(n * sizeof(Instrumentation));
+	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
+	{
+		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
+		bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
+		bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+		int			i;
+
+		for (i = 0; i < n; i++)
+		{
+			instr[i].need_bufusage = need_buffers;
+			instr[i].need_walusage = need_wal;
+			instr[i].need_timer = need_timer;
+		}
+	}
+
+	return instr;
+}
+void
+InstrStart(Instrumentation *instr)
+{
+	if (instr->need_timer &&
+		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
+		elog(ERROR, "InstrStart called twice in a row");
+
+	if (instr->need_bufusage)
+		instr->bufusage_start = pgBufferUsage;
+
+	if (instr->need_walusage)
+		instr->walusage_start = pgWalUsage;
+}
+void
+InstrStop(Instrumentation *instr, double nTuples)
+{
+	instr_time	endtime;
+
+	/* count the specified tuples */
+	instr->ntuples += nTuples;
+
+	/* let's update the time only if the timer was requested */
+	if (instr->need_timer)
+	{
+		if (INSTR_TIME_IS_ZERO(instr->starttime))
+			elog(ERROR, "InstrStop called without start");
+
+		INSTR_TIME_SET_CURRENT(endtime);
+		INSTR_TIME_ACCUM_DIFF(instr->total, endtime, instr->starttime);
+
+		INSTR_TIME_SET_ZERO(instr->starttime);
+	}
+
+	/* Add delta of buffer usage since entry to node's totals */
+	if (instr->need_bufusage)
+		BufferUsageAccumDiff(&instr->bufusage,
+							 &pgBufferUsage, &instr->bufusage_start);
+
+	if (instr->need_walusage)
+		WalUsageAccumDiff(&instr->walusage,
+						  &pgWalUsage, &instr->walusage_start);
+}
+
+/* Allocate new node instrumentation structure(s) */
+NodeInstrumentation *
+InstrAllocNode(int n, int instrument_options, bool async_mode)
+{
+	NodeInstrumentation *instr;
+
+	/* initialize all fields to zeroes, then modify as needed */
+	instr = palloc0(n * sizeof(NodeInstrumentation));
 	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
 	{
 		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
@@ -55,9 +148,9 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 
 /* Initialize a pre-allocated instrumentation structure. */
 void
-InstrInit(Instrumentation *instr, int instrument_options)
+InstrInitNode(NodeInstrumentation * instr, int instrument_options)
 {
-	memset(instr, 0, sizeof(Instrumentation));
+	memset(instr, 0, sizeof(NodeInstrumentation));
 	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
@@ -65,23 +158,28 @@ InstrInit(Instrumentation *instr, int instrument_options)
 
 /* Entry to a plan node */
 void
-InstrStartNode(Instrumentation *instr)
+InstrStartNode(NodeInstrumentation * instr)
 {
 	if (instr->need_timer &&
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStartNode called twice in a row");
 
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/*
+		 * Ensure that we have an active pgInstrStack (InstrStartQuery must
+		 * have been called)
+		 */
+		Assert(pgInstrStack != NULL);
 
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+		instr->stack.previous = pgInstrStack;
+		pgInstrStack = &instr->stack;
+	}
 }
 
 /* Exit from a plan node */
 void
-InstrStopNode(Instrumentation *instr, double nTuples)
+InstrStopNode(NodeInstrumentation * instr, double nTuples)
 {
 	double		save_tuplecount = instr->tuplecount;
 	instr_time	endtime;
@@ -101,14 +199,12 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that there is a stack entry above the top-most node */
+		Assert(instr->stack.previous != NULL);
+		pgInstrStack = instr->stack.previous;
+	}
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -129,7 +225,7 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 
 /* Update tuple count */
 void
-InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
+InstrUpdateTupleCount(NodeInstrumentation * instr, double nTuples)
 {
 	/* count the returned tuples */
 	instr->tuplecount += nTuples;
@@ -137,7 +233,7 @@ InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
 
 /* Finish a run cycle for a plan node */
 void
-InstrEndLoop(Instrumentation *instr)
+InstrEndLoop(NodeInstrumentation * instr)
 {
 	double		totaltime;
 
@@ -166,7 +262,7 @@ InstrEndLoop(Instrumentation *instr)
 
 /* aggregate instrumentation information */
 void
-InstrAggNode(Instrumentation *dst, Instrumentation *add)
+InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add)
 {
 	if (!dst->running && add->running)
 	{
@@ -189,10 +285,86 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 
 	/* Add delta of buffer usage since entry to node's totals */
 	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
+		BufferUsageAdd(&dst->stack.bufusage, &add->stack.bufusage);
 
 	if (dst->need_walusage)
+		WalUsageAdd(&dst->stack.walusage, &add->stack.walusage);
+}
+
+InstrStackResource *
+InstrStartQuery()
+{
+	InstrStackResource *res = MemoryContextAllocZero(CurTransactionContext, sizeof(InstrStackResource));
+	ResourceOwner owner = CurrentResourceOwner;
+
+	Assert(owner != NULL);
+
+	res->owner = owner;
+
+	ResourceOwnerEnlarge(owner);
+	ResourceOwnerRememberInstrStack(owner, res);
+
+	res->stack.previous = pgInstrStack;
+	pgInstrStack = &res->stack;
+
+	return res;
+}
+
+void
+InstrShutdownQuery(InstrStackResource * res)
+{
+	Assert(res != NULL);
+	Assert(res->owner != NULL);
+
+	pgInstrStack = res->stack.previous;
+
+	ResourceOwnerForgetInstrStack(res->owner, res);
+}
+
+static bool
+StackIsParent(InstrStack * stack, InstrStack * entry)
+{
+	if (entry->previous == NULL)
+		return false;
+
+	if (entry->previous == stack)
+		return true;
+
+	return StackIsParent(stack, entry->previous);
+}
+
+static void
+ResOwnerReleaseInstrStack(Datum res)
+{
+	InstrStackResource *r = (InstrStackResource *) DatumGetPointer(res);
+
+	/*
+	 * Because registered resources are *not* called in reverse order, we'll
+	 * get what was first registered first at shutdown. Thus, on any later
+	 * resources we need to not change the stack, which was already set to
+	 * the correct previous entry.
+	 */
+	if (pgInstrStack == NULL || !StackIsParent(pgInstrStack, &r->stack))
+		pgInstrStack = r->stack.previous;
+
+	/*
+	 * Accumulate collected stats before the abort. In the happy path this is
+	 * expected to be done by the calling code, but in abort situations we have
+	 * to do this.
+	 */
+	InstrNodeAddToCurrent(&r->stack);
+}
+
+void
+InstrNodeAddToCurrent(InstrStack * add)
+{
+	if (pgInstrStack != NULL)
+	{
+		InstrStack *dst = pgInstrStack;
+
+		BufferUsageAdd(&dst->bufusage, &add->bufusage);
 		WalUsageAdd(&dst->walusage, &add->walusage);
+	}
 }
 
 /* note current values during parallel executor startup */

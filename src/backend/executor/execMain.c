@@ -312,6 +312,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	DestReceiver *dest;
 	bool		sendTuples;
 	MemoryContext oldcontext;
+	InstrStackResource *res = NULL;
 
 	/* sanity checks */
 	Assert(queryDesc != NULL);
@@ -331,7 +332,11 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime);
+
+	/* Start up per-query node level instrumentation if needed */
+	if (estate->es_instrument)
+		res = InstrStartQuery();
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -382,8 +387,12 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	if (sendTuples)
 		dest->rShutdown(dest);
 
+	/* Shut down per-query node level instrumentation */
+	if (res != NULL)
+		InstrShutdownQuery(res);
+
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, estate->es_processed);
+		InstrStop(queryDesc->totaltime, estate->es_processed);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -433,7 +442,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime);
 
 	/* Run ModifyTable nodes to completion */
 	ExecPostprocessPlan(estate);
@@ -443,7 +452,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 		AfterTriggerEndQuery(estate);
 
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, 0);
+		InstrStop(queryDesc->totaltime, 0);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1247,7 +1256,7 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0(n * sizeof(ExprState *));
 		if (instrument_options)
-			resultRelInfo->ri_TrigInstrument = InstrAlloc(n, instrument_options, false);
+			resultRelInfo->ri_TrigInstrument = InstrAlloc(n, instrument_options);
 	}
 	else
 	{

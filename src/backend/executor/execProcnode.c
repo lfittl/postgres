@@ -413,8 +413,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAlloc(1, estate->es_instrument,
-										result->async_capable);
+		result->instrument = InstrAllocNode(1, estate->es_instrument,
+											result->async_capable);
 
 	return result;
 }
@@ -823,7 +823,16 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
+	{
 		InstrStopNode(node->instrument, 0);
+
+		/*
+		 * Propagate WAL/buffer stats to the parent node on the
+		 * instrumentation stack (which is where InstrStopNode returned us
+		 * to).
+		 */
+		InstrNodeAddToCurrent(&node->instrument->stack);
+	}
 
 	return false;
 }
