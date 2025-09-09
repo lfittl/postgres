@@ -911,20 +911,12 @@ pgss_planner(Query *parse,
 	{
 		instr_time	start;
 		instr_time	duration;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		InstrStack	stack = {0};
 
-		/* We need to track buffer usage as the planner can access them. */
-		bufusage_start = pgBufferUsage;
-
-		/*
-		 * Similarly the planner could write some WAL records in some cases
-		 * (e.g. setting a hint bit with those being WAL-logged)
-		 */
-		walusage_start = pgWalUsage;
 		INSTR_TIME_SET_CURRENT(start);
+
+		/* We need to track buffer/WAL usage as the planner can access them. */
+		InstrPushStack(&stack);
 
 		nesting_level++;
 		PG_TRY();
@@ -938,20 +930,13 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrPopStack(&stack, true);
 			nesting_level--;
 		}
 		PG_END_TRY();
 
 		INSTR_TIME_SET_CURRENT(duration);
 		INSTR_TIME_SUBTRACT(duration, start);
-
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -960,8 +945,8 @@ pgss_planner(Query *parse,
 				   PGSS_PLAN,
 				   INSTR_TIME_GET_MILLISEC(duration),
 				   0,
-				   &bufusage,
-				   &walusage,
+				   &stack.bufusage,
+				   &stack.walusage,
 				   NULL,
 				   NULL,
 				   0,
@@ -1082,6 +1067,13 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 	if (queryId != INT64CONST(0) && queryDesc->totaltime &&
 		pgss_enabled(nesting_level))
 	{
+		/*
+		 * Check if stack is initialized - it is not when ExecutorRun wasn't
+		 * called
+		 */
+		const BufferUsage *bufusage = queryDesc->totaltime->stack ? &queryDesc->totaltime->stack->bufusage : NULL;
+		const WalUsage *walusage = queryDesc->totaltime->stack ? &queryDesc->totaltime->stack->walusage : NULL;
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
@@ -1089,8 +1081,8 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(queryDesc->totaltime->total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->totaltime->bufusage,
-				   &queryDesc->totaltime->walusage,
+				   bufusage,
+				   walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1157,14 +1149,10 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		instr_time	start;
 		instr_time	duration;
 		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		InstrStack	stack = {0};
 
-		bufusage_start = pgBufferUsage;
-		walusage_start = pgWalUsage;
 		INSTR_TIME_SET_CURRENT(start);
+		InstrPushStack(&stack);
 
 		nesting_level++;
 		PG_TRY();
@@ -1180,6 +1168,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrPopStack(&stack, true);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1208,14 +1197,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
-
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
@@ -1223,8 +1204,8 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(duration),
 				   rows,
-				   &bufusage,
-				   &walusage,
+				   &stack.bufusage,
+				   &stack.walusage,
 				   NULL,
 				   NULL,
 				   0,
@@ -1454,27 +1435,33 @@ pgss_store(const char *query, int64 queryId,
 			}
 		}
 		entry->counters.rows += rows;
-		entry->counters.shared_blks_hit += bufusage->shared_blks_hit;
-		entry->counters.shared_blks_read += bufusage->shared_blks_read;
-		entry->counters.shared_blks_dirtied += bufusage->shared_blks_dirtied;
-		entry->counters.shared_blks_written += bufusage->shared_blks_written;
-		entry->counters.local_blks_hit += bufusage->local_blks_hit;
-		entry->counters.local_blks_read += bufusage->local_blks_read;
-		entry->counters.local_blks_dirtied += bufusage->local_blks_dirtied;
-		entry->counters.local_blks_written += bufusage->local_blks_written;
-		entry->counters.temp_blks_read += bufusage->temp_blks_read;
-		entry->counters.temp_blks_written += bufusage->temp_blks_written;
-		entry->counters.shared_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_read_time);
-		entry->counters.shared_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_write_time);
-		entry->counters.local_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_read_time);
-		entry->counters.local_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_write_time);
-		entry->counters.temp_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_read_time);
-		entry->counters.temp_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_write_time);
+		if (bufusage)
+		{
+			entry->counters.shared_blks_hit += bufusage->shared_blks_hit;
+			entry->counters.shared_blks_read += bufusage->shared_blks_read;
+			entry->counters.shared_blks_dirtied += bufusage->shared_blks_dirtied;
+			entry->counters.shared_blks_written += bufusage->shared_blks_written;
+			entry->counters.local_blks_hit += bufusage->local_blks_hit;
+			entry->counters.local_blks_read += bufusage->local_blks_read;
+			entry->counters.local_blks_dirtied += bufusage->local_blks_dirtied;
+			entry->counters.local_blks_written += bufusage->local_blks_written;
+			entry->counters.temp_blks_read += bufusage->temp_blks_read;
+			entry->counters.temp_blks_written += bufusage->temp_blks_written;
+			entry->counters.shared_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_read_time);
+			entry->counters.shared_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_write_time);
+			entry->counters.local_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_read_time);
+			entry->counters.local_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_write_time);
+			entry->counters.temp_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_read_time);
+			entry->counters.temp_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_write_time);
+		}
 		entry->counters.usage += USAGE_EXEC(total_time);
-		entry->counters.wal_records += walusage->wal_records;
-		entry->counters.wal_fpi += walusage->wal_fpi;
-		entry->counters.wal_bytes += walusage->wal_bytes;
-		entry->counters.wal_buffers_full += walusage->wal_buffers_full;
+		if (walusage)
+		{
+			entry->counters.wal_records += walusage->wal_records;
+			entry->counters.wal_fpi += walusage->wal_fpi;
+			entry->counters.wal_bytes += walusage->wal_bytes;
+			entry->counters.wal_buffers_full += walusage->wal_buffers_full;
+		}
 		if (jitusage)
 		{
 			entry->counters.jit_functions += jitusage->created_functions;

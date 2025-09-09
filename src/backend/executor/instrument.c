@@ -16,15 +16,87 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 
 BufferUsage pgBufferUsage;
 static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
+InstrStack *pgInstrStack = NULL;
 static WalUsage save_pgWalUsage;
 
 static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
 
+/*
+ * Use ResourceOwner mechanism to correctly reset pgInstrStack on abort.
+ */
+static void ResOwnerReleaseInstrumentation(Datum res);
+static const ResourceOwnerDesc instrumentation_resowner_desc =
+{
+	.name = "instrumentation",
+	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+	.release_priority = RELEASE_PRIO_INSTRUMENTATION,
+	.ReleaseResource = ResOwnerReleaseInstrumentation,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrStack(ResourceOwner owner, InstrStack * stack)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(stack), &instrumentation_resowner_desc);
+}
+
+static inline void
+ResourceOwnerForgetInstrStack(ResourceOwner owner, InstrStack * stack)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(stack), &instrumentation_resowner_desc);
+}
+
+static bool
+StackIsParent(InstrStack * stack, InstrStack * entry)
+{
+	if (entry->previous == NULL)
+		return false;
+
+	if (entry->previous == stack)
+		return true;
+
+	return StackIsParent(stack, entry->previous);
+}
+
+static void
+ResOwnerReleaseInstrumentation(Datum res)
+{
+	InstrStack *stack = (InstrStack *) DatumGetPointer(res);
+
+	if (pgInstrStack)
+	{
+		/*
+		 * Because registered resources are *not* cleaned up in a guaranteed
+		 * order, we may get a child context after we've processed the parent.
+		 * Thus, we only change the stack if its not already a parent of the
+		 * stack being released.
+		 *
+		 * If we already walked up the stack with an earlier resource, simply
+		 * accumulate all collected stats before the abort to the current
+		 * stack.
+		 *
+		 * Note that StackIsParent will recurse as needed, so it is
+		 * inadvisible to use deeply nested stacks.
+		 */
+		if (!StackIsParent(pgInstrStack, stack))
+			InstrPopStack(stack, true);
+		else
+			InstrStackAdd(pgInstrStack, stack);
+	}
+
+	/*
+	 * Ensure long-lived memory is freed now, as we don't expect InstrStop to
+	 * be called
+	 */
+	pfree(stack);
+}
 
 /* General purpose instrumentation handling */
 Instrumentation *
@@ -51,15 +123,31 @@ InstrStart(Instrumentation *instr)
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStart called twice in a row");
 
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		Assert(CurrentResourceOwner != NULL);
+		instr->owner = CurrentResourceOwner;
 
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+		/*
+		 * Allocate the stack resource in a memory context that survives
+		 * during an abort. This will be freed by InstrStop (regular
+		 * execution) or ResOwnerReleaseInstrumentation (abort).
+		 *
+		 * We don't do this in InstrAlloc to avoid leaking when InstrStart +
+		 * InstrStop isn't called.
+		 */
+		if (instr->stack == NULL)
+			instr->stack = MemoryContextAllocZero(CurTransactionContext, sizeof(InstrStack));
+
+		ResourceOwnerEnlarge(instr->owner);
+		ResourceOwnerRememberInstrStack(instr->owner, instr->stack);
+
+		InstrPushStack(instr->stack);
+	}
 }
 
 void
-InstrStop(Instrumentation *instr)
+InstrStop(Instrumentation *instr, bool finalize)
 {
 	instr_time	endtime;
 
@@ -75,14 +163,28 @@ InstrStop(Instrumentation *instr)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		InstrPopStack(instr->stack, finalize);
 
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+		Assert(instr->owner != NULL);
+		ResourceOwnerForgetInstrStack(instr->owner, instr->stack);
+		instr->owner = NULL;
+
+		if (finalize)
+		{
+			/*
+			 * To avoid keeping memory allocated beyond when its needed, copy
+			 * the result to the current memory context, and free it in the
+			 * transaction context.
+			 */
+			InstrStack *stack = palloc(sizeof(InstrStack));
+
+			memcpy(stack, instr->stack, sizeof(InstrStack));
+			pfree(instr->stack);
+			instr->stack = stack;
+		}
+	}
 }
 
 /* Trigger instrumentation handling */
@@ -90,16 +192,16 @@ TriggerInstrumentation *
 InstrAllocTrigger(int n, int instrument_options)
 {
 	TriggerInstrumentation *tginstr = palloc0(n * sizeof(TriggerInstrumentation));
+	bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 	bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
-	bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 	int			i;
 
 	for (i = 0; i < n; i++)
 	{
+		tginstr[i].instr.need_timer = need_timer;
 		tginstr[i].instr.need_bufusage = need_buffers;
 		tginstr[i].instr.need_walusage = need_wal;
-		tginstr[i].instr.need_timer = need_timer;
 	}
 
 	return tginstr;
@@ -114,7 +216,12 @@ InstrStartTrigger(TriggerInstrumentation *tginstr)
 void
 InstrStopTrigger(TriggerInstrumentation *tginstr, int firings)
 {
-	InstrStop(&tginstr->instr);
+	/*
+	 * This trigger may be called again, so we don't finalize instrumentation
+	 * here. Accumulation to the parent happens at ExecutorFinish through
+	 * ExecAccumTriggerInstrumentation.
+	 */
+	InstrStop(&tginstr->instr, false);
 	tginstr->firings += firings;
 }
 
@@ -150,12 +257,13 @@ InstrStartNode(NodeInstrumentation *instr)
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStartNode called twice in a row");
 
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(pgInstrStack != NULL);
 
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+		InstrPushStack(&instr->stack);
+	}
 }
 
 /* Exit from a plan node */
@@ -180,14 +288,14 @@ InstrStopNode(NodeInstrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(instr->stack.previous != NULL);
 
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+		/* Adding to parent is handled by ExecAccumNodeInstrumentation */
+		InstrPopStack(&instr->stack, false);
+	}
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
@@ -265,13 +373,13 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 
 	/* Add delta of buffer usage since entry to node's totals */
 	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
+		BufferUsageAdd(&dst->stack.bufusage, &add->stack.bufusage);
 
 	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
+		WalUsageAdd(&dst->stack.walusage, &add->stack.walusage);
 }
 
-/* note current values during parallel executor startup */
+/* start instrumentation during parallel executor startup */
 void
 InstrStartParallelQuery(void)
 {
@@ -293,8 +401,26 @@ InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 void
 InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 {
+	if (pgInstrStack != NULL)
+	{
+		InstrStack *dst = pgInstrStack;
+
+		BufferUsageAdd(&dst->bufusage, bufusage);
+		WalUsageAdd(&dst->walusage, walusage);
+	}
+
 	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
+}
+
+void
+InstrStackAdd(InstrStack * dst, InstrStack * add)
+{
+	Assert(dst != NULL);
+	Assert(add != NULL);
+
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
 }
 
 /* dst += add */
