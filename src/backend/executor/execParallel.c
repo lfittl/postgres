@@ -1455,6 +1455,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
+	Instrumentation *instr;
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	DestReceiver *receiver;
@@ -1515,7 +1516,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1531,7 +1532,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution. */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
 	/* Report instrumentation data if any instrumentation options are set. */

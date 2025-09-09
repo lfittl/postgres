@@ -122,6 +122,8 @@
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecRememberNodeInstrumentation_walker(PlanState *node, void *context);
+static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -824,6 +826,83 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
 		InstrStopNode(node->instrument, 0);
+
+	return false;
+}
+
+/*
+ * ExecRememberNodeInstrumentation
+ *
+ * Register all per-node instrumentation stacks as unfinalized children of the
+ * executor's instrumentation stack. This is needed for abort recovery: if the
+ * executor aborts, we need to walk each per-node instrumentation stack to
+ * recover buffer/WAL data from nodes that never got finalized, that someone
+ * might be interested in as an aggregate.
+ */
+void
+ExecRememberNodeInstrumentation(PlanState *node, InstrStack *parent)
+{
+	(void) ExecRememberNodeInstrumentation_walker(node, parent);
+}
+
+static bool
+ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	InstrStack *parent = (InstrStack *) context;
+
+	Assert(parent != NULL);
+
+	if (node == NULL)
+		return false;
+
+	if (node->instrument && (node->instrument->need_bufusage ||
+							 node->instrument->need_walusage))
+	{
+		InstrRememberNodeStack(parent, &node->instrument->stack);
+	}
+
+	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
+}
+
+/*
+ * ExecFinalizeNodeInstrumentation
+ *
+ * Accumulate instrumentation stats from all execution nodes to their respective
+ * parents (or the original parent instrumentation stack).
+ *
+ * This must run after the cleanup done by ExecShutdownNode, and not rely on any
+ * resources cleaned up by it. We also expect shutdown actions to have occurred,
+ * e.g. parallel worker instrumentation to have been added to the leader.
+ */
+void
+ExecFinalizeNodeInstrumentation(PlanState *node)
+{
+	(void) ExecFinalizeNodeInstrumentation_walker(node, (InstrStack *) CurrentInstrStack);
+}
+
+static bool
+ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	InstrStack *parent = (InstrStack *) context;
+
+	Assert(parent != NULL);
+
+	if (node == NULL)
+		return false;
+
+	/*
+	 * Recurse into children first (bottom-up accumulation), passing our stack
+	 * as the parent context.  This ensures children can accumulate to us even
+	 * if they were never executed by the leader (e.g. nodes beneath Gather
+	 * that only workers ran, where stack.previous would not be initialized).
+	 */
+	planstate_tree_walker(node, ExecFinalizeNodeInstrumentation_walker,
+						  node->instrument ? &node->instrument->stack : parent);
+
+	if (!node->instrument)
+		return false;
+
+	node->instrument = InstrFinalizeNode(node->instrument, parent);
 
 	return false;
 }
