@@ -321,13 +321,15 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 						 QueryEnvironment *queryEnv)
 {
 	PlannedStmt *plan;
-	instr_time	planstart,
-				planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	Instrumentation *instr = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+
+	if (es->buffers)
+		instr = InstrAlloc(1, INSTRUMENT_TIMER | INSTRUMENT_BUFFERS);
+	else
+		instr = InstrAlloc(1, INSTRUMENT_TIMER);
 
 	if (es->memory)
 	{
@@ -345,15 +347,12 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	if (es->buffers)
-		bufusage_start = pgBufferUsage;
-	INSTR_TIME_SET_CURRENT(planstart);
+	InstrStart(instr);
 
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params);
 
-	INSTR_TIME_SET_CURRENT(planduration);
-	INSTR_TIME_SUBTRACT(planduration, planstart);
+	InstrStop(instr, 0, true);
 
 	if (es->memory)
 	{
@@ -361,16 +360,9 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
-	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-	}
-
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
+				   &instr->total, (es->buffers ? &INSTR_GET_BUFUSAGE(instr) : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 

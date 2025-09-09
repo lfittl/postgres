@@ -109,15 +109,20 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext oldcontext;
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
-	instr_time	start,
-				end;
-	BufferUsage instr_start;
+	Instrumentation *instr = NULL;
 
 	/* only measure time, buffers if requested */
-	if (myState->es->timing)
-		INSTR_TIME_SET_CURRENT(start);
-	if (myState->es->buffers)
-		instr_start = pgBufferUsage;
+	if (myState->es->timing || myState->es->buffers)
+	{
+		InstrumentOption instrument_options = 0;
+
+		if (myState->es->timing)
+			instrument_options |= INSTRUMENT_TIMER;
+		if (myState->es->buffers)
+			instrument_options |= INSTRUMENT_BUFFERS;
+		instr = InstrAlloc(1, instrument_options);
+		InstrStart(instr);
+	}
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -185,18 +190,16 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextReset(myState->tmpcontext);
 
+	if (myState->es->timing || myState->es->buffers)
+		InstrStop(instr, 0, true);
+
 	/* Update timing data */
 	if (myState->es->timing)
-	{
-		INSTR_TIME_SET_CURRENT(end);
-		INSTR_TIME_ACCUM_DIFF(myState->metrics.timeSpent, end, start);
-	}
+		INSTR_TIME_ADD(myState->metrics.timeSpent, instr->total);
 
 	/* Update buffer metrics */
 	if (myState->es->buffers)
-		BufferUsageAccumDiff(&myState->metrics.bufferUsage,
-							 &pgBufferUsage,
-							 &instr_start);
+		BufferUsageAdd(&myState->metrics.bufferUsage, &INSTR_GET_BUFUSAGE(instr));
 
 	return true;
 }

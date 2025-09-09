@@ -18,11 +18,9 @@
 #include "executor/instrument.h"
 #include "utils/memutils.h"
 
-BufferUsage pgBufferUsage;
 WalUsage	pgWalUsage;
 InstrStack *pgInstrStack = NULL;
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
 
 /*
@@ -111,6 +109,27 @@ ResOwnerReleaseInstrumentation(Datum res)
 		InstrStackAdd(pgInstrStack, &instr->stack);
 
 	instr->finalized = true;
+}
+
+InstrStack *
+InstrPushStack()
+{
+	InstrStack *stack = palloc0(sizeof(InstrStack));
+
+	stack->previous = pgInstrStack;
+	pgInstrStack = stack;
+
+	return stack;
+}
+
+void
+InstrPopStack(InstrStack * stack)
+{
+	Assert(stack != NULL);
+
+	pgInstrStack = stack->previous;
+	if (pgInstrStack)
+		InstrStackAdd(pgInstrStack, stack);
 }
 
 /* General purpose instrumentation handling */
@@ -393,12 +412,11 @@ InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 		WalUsageAdd(&dst->walusage, walusage);
 	}
 
-	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -417,36 +435,6 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->local_blk_write_time, add->local_blk_write_time);
 	INSTR_TIME_ADD(dst->temp_blk_read_time, add->temp_blk_read_time);
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
-}
-
-/* dst += add - sub */
-void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
 }
 
 /* helper functions for WAL usage accumulation */
