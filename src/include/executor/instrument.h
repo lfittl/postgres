@@ -186,8 +186,8 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
-extern void InstrStartParallelQuery(void);
-extern void InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
+pg_nodiscard extern Instrumentation *InstrStartParallelQuery(void);
+extern void InstrEndParallelQuery(Instrumentation *instr, BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
 extern void BufferUsageAccumDiff(BufferUsage *dst,
 								 const BufferUsage *add, const BufferUsage *sub);
