@@ -145,7 +145,6 @@ typedef struct WorkerInstrumentation
 	NodeInstrumentation instrument[FLEXIBLE_ARRAY_MEMBER];
 } WorkerInstrumentation;
 
-extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
 extern PGDLLIMPORT InstrStack * pgInstrStack;
 
@@ -189,28 +188,23 @@ extern void InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add);
 extern Instrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(Instrumentation *instr, BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void BufferUsageAccumDiff(BufferUsage *dst,
-								 const BufferUsage *add, const BufferUsage *sub);
+extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
 
 #define INSTR_BUFUSAGE_INCR(fld) do { \
-		pgBufferUsage.fld++; \
 		if (pgInstrStack) \
 			pgInstrStack->bufusage.fld++; \
 	} while(0)
 #define INSTR_BUFUSAGE_ADD(fld,val) do { \
-		pgBufferUsage.fld += val; \
 		if (pgInstrStack) \
 			pgInstrStack->bufusage.fld += val; \
 	} while(0)
 #define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
-	INSTR_TIME_ADD(pgBufferUsage.fld, val); \
 	if (pgInstrStack) \
 		INSTR_TIME_ADD(pgInstrStack->bufusage.fld, val); \
 	} while (0)
 #define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
-	INSTR_TIME_ACCUM_DIFF(pgBufferUsage.fld, endval, startval); \
 	if (pgInstrStack) \
 		INSTR_TIME_ACCUM_DIFF(pgInstrStack->bufusage.fld, endval, startval); \
 	} while (0)
