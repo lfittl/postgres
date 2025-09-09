@@ -113,7 +113,7 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	Instrumentation *instr = &myState->metrics.instr;
 
 	/* only measure time, buffers if requested */
-	if (instr->need_timer || instr->need_bufusage)
+	if (instr->need_timer || instr->need_stack)
 		InstrStart(instr);
 
 	/* Set or update my derived attribute info, if needed */
@@ -183,7 +183,7 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContextReset(myState->tmpcontext);
 
 	/* Stop per-tuple measurement */
-	if (instr->need_timer || instr->need_bufusage)
+	if (instr->need_timer || instr->need_stack)
 		InstrStop(instr);
 
 	return true;
@@ -240,6 +240,8 @@ static void
 serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	InstrFinalizeChild(&receiver->metrics.instr, instr_stack.current);
 
 	if (receiver->finfos)
 		pfree(receiver->finfos);
