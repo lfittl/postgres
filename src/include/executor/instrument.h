@@ -147,6 +147,9 @@ extern Instrumentation *InstrAlloc(int n, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr, double nTuples, bool finalize);
 
+extern InstrStack * InstrPushStack(void);
+extern void InstrPopStack(InstrStack * res);
+
 extern NodeInstrumentation * InstrAllocNode(int n, int instrument_options,
 											bool async_mode);
 extern void InstrInitNode(NodeInstrumentation * instr, int instrument_options);
