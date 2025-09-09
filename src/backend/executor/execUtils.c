@@ -150,7 +150,7 @@ CreateExecutorState(void)
 	estate->es_total_processed = 0;
 
 	estate->es_top_eflags = 0;
-	estate->es_instrument = 0;
+	estate->es_instrument = NULL;
 	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
