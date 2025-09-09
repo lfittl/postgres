@@ -929,11 +929,10 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
-
-		InstrStop(&instr);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -995,19 +994,9 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 */
 	if (pgss_enabled(nesting_level) && queryDesc->plannedstmt->queryId != INT64CONST(0))
 	{
-		/*
-		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
-		 * space is allocated in the per-query context so it will go away at
-		 * ExecutorEnd.
-		 */
+		/* Set up to track total elapsed time in ExecutorRun. */
 		if (queryDesc->totaltime == NULL)
-		{
-			MemoryContext oldcxt;
-
-			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-			queryDesc->totaltime = InstrAlloc(INSTRUMENT_ALL);
-			MemoryContextSwitchTo(oldcxt);
-		}
+			queryDesc->totaltime = InstrQueryAlloc(INSTRUMENT_ALL);
 	}
 }
 
@@ -1069,10 +1058,10 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   queryDesc->plannedstmt->stmt_location,
 				   queryDesc->plannedstmt->stmt_len,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(queryDesc->totaltime->total),
+				   INSTR_TIME_GET_MILLISEC(queryDesc->totaltime->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->totaltime->bufusage,
-				   &queryDesc->totaltime->walusage,
+				   &queryDesc->totaltime->instr.bufusage,
+				   &queryDesc->totaltime->instr.walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1156,6 +1145,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1169,8 +1159,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 * For the same reason, we can't risk restoring pstmt->queryId to its
 		 * former value, which'd otherwise be a good idea.
 		 */
-
-		InstrStop(&instr);
 
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
