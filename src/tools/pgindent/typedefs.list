@@ -1335,6 +1335,7 @@ InjectionPointSharedState
 InjectionPointsCtl
 InlineCodeBlock
 InsertStmt
+InstrStackState
 Instrumentation
 Int128AggState
 Int8TransTypeData
@@ -2450,6 +2451,7 @@ QueryCompletion
 QueryDesc
 QueryEnvironment
 QueryInfo
+QueryInstrumentation
 QueryItem
 QueryItemType
 QueryMode

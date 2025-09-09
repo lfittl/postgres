@@ -580,13 +580,16 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	ListCell   *p;
 	ParamListInfo paramLI = NULL;
 	EState	   *estate = NULL;
-	instr_time	planstart;
-	instr_time	planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	QueryInstrumentation *instr = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+	int			instrument_options = INSTRUMENT_TIMER;
+
+	if (es->buffers)
+		instrument_options |= INSTRUMENT_BUFFERS;
+
+	instr = InstrQueryAlloc(instrument_options);
 
 	if (es->memory)
 	{
@@ -598,9 +601,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	if (es->buffers)
-		bufusage_start = pgBufferUsage;
-	INSTR_TIME_SET_CURRENT(planstart);
+	InstrQueryStart(instr);
 
 	/* Look it up in the hash table */
 	entry = FetchPreparedStatement(execstmt->name, true);
@@ -635,20 +636,12 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	cplan = GetCachedPlan(entry->plansource, paramLI,
 						  CurrentResourceOwner, pstate->p_queryEnv);
 
-	INSTR_TIME_SET_CURRENT(planduration);
-	INSTR_TIME_SUBTRACT(planduration, planstart);
+	instr = InstrQueryStopFinalize(instr);
 
 	if (es->memory)
 	{
 		MemoryContextSwitchTo(saved_ctx);
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
-	}
-
-	/* calc differences of buffer counters. */
-	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 	}
 
 	plan_list = cplan->stmt_list;
@@ -660,7 +653,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 		if (pstmt->commandType != CMD_UTILITY)
 			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
-						   &planduration, (es->buffers ? &bufusage : NULL),
+						   &instr->instr.total, (es->buffers ? &instr->instr.bufusage : NULL),
 						   es->memory ? &mem_counters : NULL);
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);
