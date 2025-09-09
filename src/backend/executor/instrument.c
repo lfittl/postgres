@@ -20,10 +20,8 @@
 #include "utils/resowner.h"
 
 BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
 InstrStack *pgInstrStack = NULL;
-static WalUsage save_pgWalUsage;
 
 static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
@@ -400,21 +398,22 @@ InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add)
 }
 
 /* start instrumentation during parallel executor startup */
-void
+Instrumentation *
 InstrStartParallelQuery(void)
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
+	Instrumentation *instr = InstrAlloc(1, INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+
+	InstrStart(instr);
+	return instr;
 }
 
 /* report usage after parallel executor shutdown */
 void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrEndParallelQuery(Instrumentation *instr, BufferUsage *bufusage, WalUsage *walusage)
 {
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
+	InstrStop(instr, true);
+	memcpy(bufusage, &instr->stack->bufusage, sizeof(BufferUsage));
+	memcpy(walusage, &instr->stack->walusage, sizeof(WalUsage));
 }
 
 /* accumulate work done by workers in leader's stats */
