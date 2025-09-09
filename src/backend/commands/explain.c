@@ -324,7 +324,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 						 QueryEnvironment *queryEnv)
 {
 	PlannedStmt *plan;
-	Instrumentation plan_instr = {0};
+	QueryInstrumentation *plan_instr = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
@@ -333,7 +333,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	if (es->buffers)
 		instrument_options |= INSTRUMENT_BUFFERS;
 
-	InstrInitOptions(&plan_instr, instrument_options);
+	plan_instr = InstrQueryAlloc(instrument_options);
 
 	if (es->memory)
 	{
@@ -351,12 +351,12 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	InstrStart(&plan_instr);
+	InstrQueryStart(plan_instr);
 
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params, es);
 
-	InstrStop(&plan_instr);
+	InstrQueryStopFinalize(plan_instr);
 
 	if (es->memory)
 	{
@@ -366,7 +366,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
-				   &plan_instr.total, (es->buffers ? &plan_instr.bufusage : NULL),
+				   &plan_instr->instr.total, (es->buffers ? &plan_instr->instr.bufusage : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 
