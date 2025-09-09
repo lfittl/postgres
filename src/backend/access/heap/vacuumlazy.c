@@ -628,8 +628,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	TimestampTz starttime = 0;
 	PgStat_Counter startreadtime = 0,
 				startwritetime = 0;
-	WalUsage	startwalusage = pgWalUsage;
-	BufferUsage startbufferusage = pgBufferUsage;
+	Instrumentation *instr = NULL;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
 
@@ -644,6 +643,8 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 			startreadtime = pgStatBlockReadTime;
 			startwritetime = pgStatBlockWriteTime;
 		}
+		instr = InstrAlloc(1, INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrStart(instr);
 	}
 
 	/* Used for instrumentation and stats report */
@@ -946,14 +947,14 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
+		InstrStop(instr, 0, true);
+
 		if (verbose || params.log_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
 									   params.log_min_duration))
 		{
 			long		secs_dur;
 			int			usecs_dur;
-			WalUsage	walusage;
-			BufferUsage bufferusage;
 			StringInfoData buf;
 			char	   *msgfmt;
 			int32		diff;
@@ -964,17 +965,13 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 			int64		total_blks_dirtied;
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
-			memset(&walusage, 0, sizeof(WalUsage));
-			WalUsageAccumDiff(&walusage, &pgWalUsage, &startwalusage);
-			memset(&bufferusage, 0, sizeof(BufferUsage));
-			BufferUsageAccumDiff(&bufferusage, &pgBufferUsage, &startbufferusage);
 
-			total_blks_hit = bufferusage.shared_blks_hit +
-				bufferusage.local_blks_hit;
-			total_blks_read = bufferusage.shared_blks_read +
-				bufferusage.local_blks_read;
-			total_blks_dirtied = bufferusage.shared_blks_dirtied +
-				bufferusage.local_blks_dirtied;
+			total_blks_hit = INSTR_GET_BUFUSAGE(instr).shared_blks_hit +
+				INSTR_GET_BUFUSAGE(instr).local_blks_hit;
+			total_blks_read = INSTR_GET_BUFUSAGE(instr).shared_blks_read +
+				INSTR_GET_BUFUSAGE(instr).local_blks_read;
+			total_blks_dirtied = INSTR_GET_BUFUSAGE(instr).shared_blks_dirtied +
+				INSTR_GET_BUFUSAGE(instr).local_blks_dirtied;
 
 			initStringInfo(&buf);
 			if (verbose)
@@ -1136,10 +1133,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams params,
 							 total_blks_dirtied);
 			appendStringInfo(&buf,
 							 _("WAL usage: %" PRId64 " records, %" PRId64 " full page images, %" PRIu64 " bytes, %" PRId64 " buffers full\n"),
-							 walusage.wal_records,
-							 walusage.wal_fpi,
-							 walusage.wal_bytes,
-							 walusage.wal_buffers_full);
+							 INSTR_GET_WALUSAGE(instr).wal_records,
+							 INSTR_GET_WALUSAGE(instr).wal_fpi,
+							 INSTR_GET_WALUSAGE(instr).wal_bytes,
+							 INSTR_GET_WALUSAGE(instr).wal_buffers_full);
 			appendStringInfo(&buf, _("system usage: %s"), pg_rusage_show(&ru0));
 
 			ereport(verbose ? INFO : LOG,

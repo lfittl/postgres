@@ -85,7 +85,7 @@ typedef struct FixedParallelExecutorState
  * instrument_options: Same meaning here as in instrument.c.
  *
  * instrument_offset: Offset, relative to the start of this structure,
- * of the first Instrumentation object.  This will depend on the length of
+ * of the first NodeInstrumentation object.  This will depend on the length of
  * the plan_node_id array.
  *
  * num_workers: Number of workers.
@@ -102,11 +102,15 @@ struct SharedExecutorInstrumentation
 	int			num_workers;
 	int			num_plan_nodes;
 	int			plan_node_id[FLEXIBLE_ARRAY_MEMBER];
-	/* array of num_plan_nodes * num_workers Instrumentation objects follows */
+
+	/*
+	 * array of num_plan_nodes * num_workers NodeInstrumentation objects
+	 * follows
+	 */
 };
 #define GetInstrumentationArray(sei) \
 	(AssertVariableIsOfTypeMacro(sei, SharedExecutorInstrumentation *), \
-	 (Instrumentation *) (((char *) sei) + sei->instrument_offset))
+	 (NodeInstrumentation *) (((char *) sei) + sei->instrument_offset))
 
 /* Context object for ExecParallelEstimate. */
 typedef struct ExecParallelEstimateContext
@@ -713,7 +717,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation_len = MAXALIGN(instrumentation_len);
 		instrument_offset = instrumentation_len;
 		instrumentation_len +=
-			mul_size(sizeof(Instrumentation),
+			mul_size(sizeof(NodeInstrumentation),
 					 mul_size(e.nnodes, nworkers));
 		shm_toc_estimate_chunk(&pcxt->estimator, instrumentation_len);
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
@@ -799,7 +803,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 */
 	if (estate->es_instrument)
 	{
-		Instrumentation *instrument;
+		NodeInstrumentation *instrument;
 		int			i;
 
 		instrumentation = shm_toc_allocate(pcxt->toc, instrumentation_len);
@@ -809,7 +813,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation->num_plan_nodes = e.nnodes;
 		instrument = GetInstrumentationArray(instrumentation);
 		for (i = 0; i < nworkers * e.nnodes; ++i)
-			InstrInit(&instrument[i], estate->es_instrument);
+			InstrInitNode(&instrument[i], estate->es_instrument);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION,
 					   instrumentation);
 		pei->instrumentation = instrumentation;
@@ -1036,7 +1040,7 @@ static bool
 ExecParallelRetrieveInstrumentation(PlanState *planstate,
 									SharedExecutorInstrumentation *instrumentation)
 {
-	Instrumentation *instrument;
+	NodeInstrumentation *instrument;
 	int			i;
 	int			n;
 	int			ibytes;
@@ -1064,7 +1068,7 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	 * Switch into per-query memory context.
 	 */
 	oldcontext = MemoryContextSwitchTo(planstate->state->es_query_cxt);
-	ibytes = mul_size(instrumentation->num_workers, sizeof(Instrumentation));
+	ibytes = mul_size(instrumentation->num_workers, sizeof(NodeInstrumentation));
 	planstate->worker_instrument =
 		palloc(ibytes + offsetof(WorkerInstrumentation, instrument));
 	MemoryContextSwitchTo(oldcontext);
@@ -1296,7 +1300,7 @@ ExecParallelReportInstrumentation(PlanState *planstate,
 {
 	int			i;
 	int			plan_node_id = planstate->plan->plan_node_id;
-	Instrumentation *instrument;
+	NodeInstrumentation *instrument;
 
 	InstrEndLoop(planstate->instrument);
 
@@ -1430,6 +1434,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
+	Instrumentation *instr;
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	DestReceiver *receiver;
@@ -1490,7 +1495,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1506,7 +1511,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution. */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
 	/* Report instrumentation data if any instrumentation options are set. */

@@ -16,24 +16,204 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "utils/memutils.h"
 
-BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
-static WalUsage save_pgWalUsage;
+InstrStack *pgInstrStack = NULL;
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 static void WalUsageAdd(WalUsage *dst, WalUsage *add);
 
-
-/* Allocate new instrumentation structure(s) */
-Instrumentation *
-InstrAlloc(int n, int instrument_options, bool async_mode)
+/*
+ * Use ResourceOwner mechanism to correctly reset pgInstrStack on abort.
+ */
+static void ResOwnerReleaseInstrumentation(Datum res);
+static const ResourceOwnerDesc instrumentation_resowner_desc =
 {
-	Instrumentation *instr;
+	.name = "instrumentation",
+	.release_phase = RESOURCE_RELEASE_BEFORE_LOCKS,
+	.release_priority = RELEASE_PRIO_FIRST,
+	.ReleaseResource = ResOwnerReleaseInstrumentation,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrStack(ResourceOwner owner, Instrumentation *instr)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(instr), &instrumentation_resowner_desc);
+}
+
+static inline void
+ResourceOwnerForgetInstrStack(ResourceOwner owner, Instrumentation *instr)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(instr), &instrumentation_resowner_desc);
+}
+
+static void
+InstrPushStackResource(Instrumentation *res)
+{
+	ResourceOwner owner = CurrentResourceOwner;
+
+	Assert(owner != NULL);
+
+	res->owner = owner;
+
+	ResourceOwnerEnlarge(owner);
+	ResourceOwnerRememberInstrStack(owner, res);
+
+	res->stack.previous = pgInstrStack;
+	pgInstrStack = &res->stack;
+}
+
+static void
+InstrPopStackResource(Instrumentation *res)
+{
+	Assert(res != NULL);
+	Assert(res->owner != NULL);
+
+	pgInstrStack = res->stack.previous;
+
+	ResourceOwnerForgetInstrStack(res->owner, res);
+}
+
+static bool
+StackIsParent(InstrStack * stack, InstrStack * entry)
+{
+	if (entry->previous == NULL)
+		return false;
+
+	if (entry->previous == stack)
+		return true;
+
+	return StackIsParent(stack, entry->previous);
+}
+
+static void
+ResOwnerReleaseInstrumentation(Datum res)
+{
+	Instrumentation *instr = (Instrumentation *) DatumGetPointer(res);
+
+	/*
+	 * Because registered resources are *not* called in reverse order, we'll
+	 * get what was first registered first at shutdown. Thus, on any later
+	 * resources we need to not change the stack, which was already set to the
+	 * correct previous entry.
+	 */
+	if (pgInstrStack && !StackIsParent(pgInstrStack, &instr->stack))
+		pgInstrStack = instr->stack.previous;
+
+	/*
+	 * Always accumulate all collected stats before the abort, even if we
+	 * already walked up the stack with an earlier resource.
+	 */
+	if (pgInstrStack)
+		InstrStackAdd(pgInstrStack, &instr->stack);
+
+	instr->finalized = true;
+}
+
+InstrStack *
+InstrPushStack()
+{
+	InstrStack *stack = palloc0(sizeof(InstrStack));
+
+	stack->previous = pgInstrStack;
+	pgInstrStack = stack;
+
+	return stack;
+}
+
+void
+InstrPopStack(InstrStack * stack)
+{
+	Assert(stack != NULL);
+
+	pgInstrStack = stack->previous;
+	if (pgInstrStack)
+		InstrStackAdd(pgInstrStack, stack);
+}
+
+/* General purpose instrumentation handling */
+Instrumentation *
+InstrAlloc(int n, int instrument_options)
+{
+	Instrumentation *instr = NULL;
+	bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
+	bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
+	bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+	int			i;
+
+	/*
+	 * If resource owner will be used, we must allocate in the transaction
+	 * context (not the calling context, usually a lower context), because the
+	 * memory might otherwise be freed too early in an abort situation.
+	 */
+	if (need_buffers || need_wal)
+		instr = MemoryContextAllocZero(CurTransactionContext, n * sizeof(Instrumentation));
+	else
+		instr = palloc0(n * sizeof(Instrumentation));
+
+	for (i = 0; i < n; i++)
+	{
+		instr[i].need_bufusage = need_buffers;
+		instr[i].need_walusage = need_wal;
+		instr[i].need_timer = need_timer;
+	}
+
+	return instr;
+}
+
+void
+InstrStart(Instrumentation *instr)
+{
+	Assert(!instr->finalized);
+
+	if (instr->need_timer &&
+		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
+		elog(ERROR, "InstrStart called twice in a row");
+
+	if (instr->need_bufusage || instr->need_walusage)
+		InstrPushStackResource(instr);
+}
+
+void
+InstrStop(Instrumentation *instr, double nTuples, bool finalize)
+{
+	instr_time	endtime;
+
+	/* count the specified tuples */
+	instr->ntuples += nTuples;
+
+	/* let's update the time only if the timer was requested */
+	if (instr->need_timer)
+	{
+		if (INSTR_TIME_IS_ZERO(instr->starttime))
+			elog(ERROR, "InstrStop called without start");
+
+		INSTR_TIME_SET_CURRENT(endtime);
+		INSTR_TIME_ACCUM_DIFF(instr->total, endtime, instr->starttime);
+
+		INSTR_TIME_SET_ZERO(instr->starttime);
+	}
+
+	if (instr->need_bufusage || instr->need_walusage)
+		InstrPopStackResource(instr);
+
+	if (finalize)
+	{
+		instr->finalized = true;
+		if (pgInstrStack)
+			InstrStackAdd(pgInstrStack, &instr->stack);
+	}
+}
+
+/* Allocate new node instrumentation structure(s) */
+NodeInstrumentation *
+InstrAllocNode(int n, int instrument_options, bool async_mode)
+{
+	NodeInstrumentation *instr;
 
 	/* initialize all fields to zeroes, then modify as needed */
-	instr = palloc0(n * sizeof(Instrumentation));
+	instr = palloc0(n * sizeof(NodeInstrumentation));
 	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
 	{
 		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
@@ -55,9 +235,9 @@ InstrAlloc(int n, int instrument_options, bool async_mode)
 
 /* Initialize a pre-allocated instrumentation structure. */
 void
-InstrInit(Instrumentation *instr, int instrument_options)
+InstrInitNode(NodeInstrumentation * instr, int instrument_options)
 {
-	memset(instr, 0, sizeof(Instrumentation));
+	memset(instr, 0, sizeof(NodeInstrumentation));
 	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
@@ -65,23 +245,25 @@ InstrInit(Instrumentation *instr, int instrument_options)
 
 /* Entry to a plan node */
 void
-InstrStartNode(Instrumentation *instr)
+InstrStartNode(NodeInstrumentation * instr)
 {
 	if (instr->need_timer &&
 		!INSTR_TIME_SET_CURRENT_LAZY(instr->starttime))
 		elog(ERROR, "InstrStartNode called twice in a row");
 
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(pgInstrStack != NULL);
 
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+		instr->stack.previous = pgInstrStack;
+		pgInstrStack = &instr->stack;
+	}
 }
 
 /* Exit from a plan node */
 void
-InstrStopNode(Instrumentation *instr, double nTuples)
+InstrStopNode(NodeInstrumentation * instr, double nTuples)
 {
 	double		save_tuplecount = instr->tuplecount;
 	instr_time	endtime;
@@ -101,20 +283,18 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(instr->stack.previous != NULL);
+		pgInstrStack = instr->stack.previous;
+	}
 
 	/* Is this the first tuple of this cycle? */
 	if (!instr->running)
 	{
 		instr->running = true;
-		instr->firsttuple = INSTR_TIME_GET_DOUBLE(instr->counter);
+		instr->firsttuple = instr->counter;
 	}
 	else
 	{
@@ -123,13 +303,13 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		 * this might be the first tuple
 		 */
 		if (instr->async_mode && save_tuplecount < 1.0)
-			instr->firsttuple = INSTR_TIME_GET_DOUBLE(instr->counter);
+			instr->firsttuple = instr->counter;
 	}
 }
 
 /* Update tuple count */
 void
-InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
+InstrUpdateTupleCount(NodeInstrumentation * instr, double nTuples)
 {
 	/* count the returned tuples */
 	instr->tuplecount += nTuples;
@@ -137,10 +317,8 @@ InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
 
 /* Finish a run cycle for a plan node */
 void
-InstrEndLoop(Instrumentation *instr)
+InstrEndLoop(NodeInstrumentation * instr)
 {
-	double		totaltime;
-
 	/* Skip if nothing has happened, or already shut down */
 	if (!instr->running)
 		return;
@@ -149,10 +327,8 @@ InstrEndLoop(Instrumentation *instr)
 		elog(ERROR, "InstrEndLoop called on running node");
 
 	/* Accumulate per-cycle statistics into totals */
-	totaltime = INSTR_TIME_GET_DOUBLE(instr->counter);
-
-	instr->startup += instr->firsttuple;
-	instr->total += totaltime;
+	INSTR_TIME_ADD(instr->startup, instr->firsttuple);
+	INSTR_TIME_ADD(instr->total, instr->counter);
 	instr->ntuples += instr->tuplecount;
 	instr->nloops += 1;
 
@@ -160,27 +336,27 @@ InstrEndLoop(Instrumentation *instr)
 	instr->running = false;
 	INSTR_TIME_SET_ZERO(instr->starttime);
 	INSTR_TIME_SET_ZERO(instr->counter);
-	instr->firsttuple = 0;
+	INSTR_TIME_SET_ZERO(instr->firsttuple);
 	instr->tuplecount = 0;
 }
 
 /* aggregate instrumentation information */
 void
-InstrAggNode(Instrumentation *dst, Instrumentation *add)
+InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add)
 {
 	if (!dst->running && add->running)
 	{
 		dst->running = true;
 		dst->firsttuple = add->firsttuple;
 	}
-	else if (dst->running && add->running && dst->firsttuple > add->firsttuple)
+	else if (dst->running && add->running && INSTR_TIME_CMP_LT(dst->firsttuple, add->firsttuple))
 		dst->firsttuple = add->firsttuple;
 
 	INSTR_TIME_ADD(dst->counter, add->counter);
 
 	dst->tuplecount += add->tuplecount;
-	dst->startup += add->startup;
-	dst->total += add->total;
+	INSTR_TIME_ADD(dst->startup, add->startup);
+	INSTR_TIME_ADD(dst->total, add->total);
 	dst->ntuples += add->ntuples;
 	dst->ntuples2 += add->ntuples2;
 	dst->nloops += add->nloops;
@@ -189,40 +365,58 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 
 	/* Add delta of buffer usage since entry to node's totals */
 	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
+		BufferUsageAdd(&dst->stack.bufusage, &add->stack.bufusage);
 
 	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
+		WalUsageAdd(&dst->stack.walusage, &add->stack.walusage);
 }
 
-/* note current values during parallel executor startup */
 void
+InstrStackAdd(InstrStack * dst, InstrStack * add)
+{
+	Assert(dst != NULL);
+	Assert(add != NULL);
+
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
+}
+
+/* start instrumentation during parallel executor startup */
+Instrumentation *
 InstrStartParallelQuery(void)
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
+	Instrumentation *instr = InstrAlloc(1, INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+
+	InstrStart(instr);
+	return instr;
 }
 
 /* report usage after parallel executor shutdown */
 void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrEndParallelQuery(Instrumentation *instr, BufferUsage *bufusage, WalUsage *walusage)
 {
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
+	InstrStop(instr, 0, true);
+	memcpy(bufusage, &INSTR_GET_BUFUSAGE(instr), sizeof(BufferUsage));
+	memcpy(walusage, &INSTR_GET_WALUSAGE(instr), sizeof(WalUsage));
 }
 
 /* accumulate work done by workers in leader's stats */
 void
 InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
+	if (pgInstrStack != NULL)
+	{
+		InstrStack *dst = pgInstrStack;
+
+		BufferUsageAdd(&dst->bufusage, bufusage);
+		WalUsageAdd(&dst->walusage, walusage);
+	}
+
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -241,36 +435,6 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->local_blk_write_time, add->local_blk_write_time);
 	INSTR_TIME_ADD(dst->temp_blk_read_time, add->temp_blk_read_time);
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
-}
-
-/* dst += add - sub */
-void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
 }
 
 /* helper functions for WAL usage accumulation */
