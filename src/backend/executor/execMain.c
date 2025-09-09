@@ -251,6 +251,15 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	estate->es_jit_flags = queryDesc->plannedstmt->jitFlags;
 
 	/*
+	 * Set up query-level instrumentation if extensions have requested it via
+	 * totaltime_options. Ensure an extension has not allocated totaltime
+	 * itself.
+	 */
+	Assert(queryDesc->totaltime == NULL);
+	if (queryDesc->totaltime_options)
+		queryDesc->totaltime = InstrQueryAlloc(queryDesc->totaltime_options);
+
+	/*
 	 * Set up an AFTER-trigger statement context, unless told not to, or
 	 * unless it's EXPLAIN-only mode (when ExecutorFinish won't be called).
 	 */
