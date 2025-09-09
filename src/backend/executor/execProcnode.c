@@ -122,6 +122,7 @@
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecAccumNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -824,6 +825,36 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
 		InstrStopNode(node->instrument, 0);
+
+	return false;
+}
+
+/*
+ * ExecAccumNodeInstrumentation
+ *
+ * Accumulate instrumentation stats from all execution nodes to their respective
+ * parents (or the original parent instrumentation stack).
+ *
+ * This must run after the cleanup done by ExecShutdownNode, and not rely on any
+ * resources cleaned up by it. We also expect shutdown actions to have occurred,
+ * e.g. parallel worker instrumentation to have been added to the leader.
+ */
+void
+ExecAccumNodeInstrumentation(PlanState *node)
+{
+	(void) ExecAccumNodeInstrumentation_walker(node, NULL);
+}
+
+static bool
+ExecAccumNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	planstate_tree_walker(node, ExecAccumNodeInstrumentation_walker, context);
+
+	if (node->instrument && node->instrument->stack.previous)
+		InstrStackAdd(node->instrument->stack.previous, &node->instrument->stack);
 
 	return false;
 }

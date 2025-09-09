@@ -67,12 +67,25 @@ typedef enum InstrumentOption
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
 
+/* Stack of WAL/buffer usage used for per-node instrumentation */
+typedef struct InstrStack
+{
+	struct InstrStack *previous;
+	BufferUsage bufusage;
+	WalUsage	walusage;
+}			InstrStack;
+
 /*
  * General purpose instrumentation that can capture time and WAL/buffer usage
  *
  * Initialized through InstrAlloc, followed by one or more calls to a pair of
  * InstrStart/InstrStop (activity is measured inbetween).
+ *
+ * Uses resource owner mechanism for handling aborts, as such, the caller *must* not exit out of
+ * top level transaction between InstrStart/InstrStop calls in regular execution. If this is needed,
+ * directly use InstrPushStack/InstrPopStack in a PG_TRY/PG_FINALLY block instead.
  */
+struct ResourceOwnerData;
 typedef struct Instrumentation
 {
 	/* Parameters set at creation: */
@@ -81,12 +94,10 @@ typedef struct Instrumentation
 	bool		need_walusage;	/* true if we need WAL usage data */
 	/* Internal state keeping: */
 	instr_time	starttime;		/* start time of last InstrStart */
-	BufferUsage bufusage_start; /* buffer usage at start */
-	WalUsage	walusage_start; /* WAL usage at start */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
-	BufferUsage bufusage;		/* total buffer usage */
-	WalUsage	walusage;		/* total WAL usage */
+	InstrStack *stack;			/* stack tracking buffer/WAL usage */
+	struct ResourceOwnerData *owner;
 } Instrumentation;
 
 /* Trigger instrumentation */
@@ -99,6 +110,10 @@ typedef struct TriggerInstrumentation
 
 /*
  * Specialized instrumentation for per-node execution statistics
+ *
+ * Requires use of an outer InstrStart/InstrStop to handle the stack used for WAL/buffer
+ * usage statistics, and relies on it for managing aborts. Solely intended for
+ * the executor and anyone reporting about its activities (e.g. EXPLAIN ANALYZE).
  */
 typedef struct NodeInstrumentation
 {
@@ -113,8 +128,6 @@ typedef struct NodeInstrumentation
 	instr_time	counter;		/* accumulated runtime for this node */
 	instr_time	firsttuple;		/* time for first tuple of this cycle */
 	double		tuplecount;		/* # of tuples emitted so far this cycle */
-	BufferUsage bufusage_start; /* buffer usage at start */
-	WalUsage	walusage_start; /* WAL usage at start */
 	/* Accumulated statistics across all completed cycles: */
 	instr_time	startup;		/* total startup time */
 	instr_time	total;			/* total time */
@@ -123,8 +136,7 @@ typedef struct NodeInstrumentation
 	double		nloops;			/* # of run cycles for this node */
 	double		nfiltered1;		/* # of tuples removed by scanqual or joinqual */
 	double		nfiltered2;		/* # of tuples removed by "other" quals */
-	BufferUsage bufusage;		/* total buffer usage */
-	WalUsage	walusage;		/* total WAL usage */
+	InstrStack	stack;			/* stack tracking buffer/WAL usage */
 }			NodeInstrumentation;
 
 typedef struct WorkerInstrumentation
@@ -135,10 +147,31 @@ typedef struct WorkerInstrumentation
 
 extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
+extern PGDLLIMPORT InstrStack * pgInstrStack;
+
+extern void InstrStackAdd(InstrStack * dst, InstrStack * add);
+
+static inline void
+InstrPushStack(InstrStack * stack)
+{
+	stack->previous = pgInstrStack;
+	pgInstrStack = stack;
+}
+
+static inline void
+InstrPopStack(InstrStack * stack, bool add_to_parent)
+{
+	Assert(stack != NULL);
+
+	pgInstrStack = stack->previous;
+
+	if (pgInstrStack && add_to_parent)
+		InstrStackAdd(pgInstrStack, stack);
+}
 
 extern Instrumentation *InstrAlloc(int n, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
-extern void InstrStop(Instrumentation *instr);
+extern void InstrStop(Instrumentation *instr, bool finalize);
 
 extern TriggerInstrumentation * InstrAllocTrigger(int n, int instrument_options);
 extern void InstrStartTrigger(TriggerInstrumentation * tginstr);
@@ -163,21 +196,34 @@ extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 
 #define INSTR_BUFUSAGE_INCR(fld) do { \
 		pgBufferUsage.fld++; \
+		if (pgInstrStack) \
+			pgInstrStack->bufusage.fld++; \
 	} while(0)
 #define INSTR_BUFUSAGE_ADD(fld,val) do { \
 		pgBufferUsage.fld += val; \
+		if (pgInstrStack) \
+			pgInstrStack->bufusage.fld += val; \
 	} while(0)
 #define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
 	INSTR_TIME_ADD(pgBufferUsage.fld, val); \
+	if (pgInstrStack) \
+		INSTR_TIME_ADD(pgInstrStack->bufusage.fld, val); \
 	} while (0)
 #define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
 	INSTR_TIME_ACCUM_DIFF(pgBufferUsage.fld, endval, startval); \
+	if (pgInstrStack) \
+		INSTR_TIME_ACCUM_DIFF(pgInstrStack->bufusage.fld, endval, startval); \
 	} while (0)
+
 #define INSTR_WALUSAGE_INCR(fld) do { \
 		pgWalUsage.fld++; \
+		if (pgInstrStack) \
+			pgInstrStack->walusage.fld++; \
 	} while(0)
 #define INSTR_WALUSAGE_ADD(fld,val) do { \
 		pgWalUsage.fld += val; \
+		if (pgInstrStack) \
+			pgInstrStack->walusage.fld += val; \
 	} while(0)
 
 #endif							/* INSTRUMENT_H */
