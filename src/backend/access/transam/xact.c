@@ -40,6 +40,7 @@
 #include "commands/tablecmds.h"
 #include "commands/trigger.h"
 #include "common/pg_prng.h"
+#include "executor/instrument.h"
 #include "executor/spi.h"
 #include "libpq/be-fsstubs.h"
 #include "libpq/pqsignal.h"
@@ -2937,6 +2938,7 @@ AbortTransaction(void)
 	 * do abort processing
 	 */
 	AfterTriggerEndXact(false); /* 'false' means it's abort */
+	AtAbort_Instrumentation();
 	AtAbort_Portals();
 	smgrDoPendingSyncs(false, is_parallel_worker);
 	AtEOXact_LargeObject(false);
@@ -5338,6 +5340,7 @@ AbortSubTransaction(void)
 	if (s->curTransactionOwner)
 	{
 		AfterTriggerEndSubXact(false);
+		AtSubAbort_Instrumentation(s->nestingLevel);
 		AtSubAbort_Portals(s->subTransactionId,
 						   s->parent->subTransactionId,
 						   s->curTransactionOwner,

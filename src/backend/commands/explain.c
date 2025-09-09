@@ -324,13 +324,15 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 						 QueryEnvironment *queryEnv)
 {
 	PlannedStmt *plan;
-	instr_time	planstart,
-				planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	QueryInstrumentation *instr = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+
+	if (es->buffers)
+		instr = InstrQueryAlloc(INSTRUMENT_TIMER | INSTRUMENT_BUFFERS);
+	else
+		instr = InstrQueryAlloc(INSTRUMENT_TIMER);
 
 	if (es->memory)
 	{
@@ -348,15 +350,12 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	if (es->buffers)
-		bufusage_start = pgBufferUsage;
-	INSTR_TIME_SET_CURRENT(planstart);
+	InstrQueryStart(instr);
 
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params, es);
 
-	INSTR_TIME_SET_CURRENT(planduration);
-	INSTR_TIME_SUBTRACT(planduration, planstart);
+	instr = InstrQueryStopFinalize(instr);
 
 	if (es->memory)
 	{
@@ -364,16 +363,9 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
-	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-	}
-
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
+				   &instr->instr.total, (es->buffers ? &instr->instr.bufusage : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 
@@ -590,7 +582,12 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 
 	/* grab serialization metrics before we destroy the DestReceiver */
 	if (es->serialize != EXPLAIN_SERIALIZE_NONE)
-		serializeMetrics = GetSerializationMetrics(dest);
+	{
+		SerializeMetrics *metrics = GetSerializationMetrics(dest);
+
+		if (metrics)
+			memcpy(&serializeMetrics, metrics, sizeof(SerializeMetrics));
+	}
 
 	/* call the DestReceiver's destroy method even during explain */
 	dest->rDestroy(dest);
@@ -1019,7 +1016,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		ExplainIndentText(es);
 		if (es->timing)
 			appendStringInfo(es->str, "Serialization: time=%.3f ms  output=" UINT64_FORMAT "kB  format=%s\n",
-							 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->timeSpent),
+							 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->instr.total),
 							 BYTES_TO_KILOBYTES(metrics->bytesSent),
 							 format);
 		else
@@ -1027,10 +1024,10 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 							 BYTES_TO_KILOBYTES(metrics->bytesSent),
 							 format);
 
-		if (es->buffers && peek_buffer_usage(es, &metrics->bufferUsage))
+		if (es->buffers && peek_buffer_usage(es, &metrics->instr.bufusage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->instr.bufusage);
 			es->indent--;
 		}
 	}
@@ -1038,13 +1035,13 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 	{
 		if (es->timing)
 			ExplainPropertyFloat("Time", "ms",
-								 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->timeSpent),
+								 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->instr.total),
 								 3, es);
 		ExplainPropertyUInteger("Output Volume", "kB",
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->instr.bufusage);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
