@@ -911,6 +911,11 @@ CREATE VIEW pg_stat_activity AS
         LEFT JOIN pg_database AS D ON (S.datid = D.oid)
         LEFT JOIN pg_authid AS U ON (S.usesysid = U.oid);
 
+CREATE VIEW pg_exclusive_locks AS
+    SELECT L.database, L.relation, L.transactionid, A.pid
+      FROM pg_exclusive_lock_status() L
+           LEFT JOIN pg_stat_activity A ON (L.transactionid = A.backend_xid);
+
 CREATE VIEW pg_stat_replication AS
     SELECT
             S.pid,
