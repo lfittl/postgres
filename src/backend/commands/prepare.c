@@ -580,8 +580,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	EState	   *estate = NULL;
 	instr_time	planstart;
 	instr_time	planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	InstrumentUsage *usage = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
@@ -597,7 +596,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	}
 
 	if (es->buffers)
-		bufusage_start = pgBufferUsage;
+		InstrUsageStart();
 	INSTR_TIME_SET_CURRENT(planstart);
 
 	/* Look it up in the hash table */
@@ -642,12 +641,8 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
 	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-	}
+		usage = InstrUsageStop();
 
 	plan_list = cplan->stmt_list;
 
@@ -658,7 +653,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 		if (pstmt->commandType != CMD_UTILITY)
 			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
-						   &planduration, (es->buffers ? &bufusage : NULL),
+						   &planduration, (es->buffers ? &usage->bufusage : NULL),
 						   es->memory ? &mem_counters : NULL);
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);

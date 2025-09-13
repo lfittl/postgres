@@ -705,7 +705,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 		{
 			PinLocalBuffer(bufHdr, true);
 
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 
 			return true;
 		}
@@ -737,7 +737,8 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 			else
 				PinBuffer_Locked(bufHdr);	/* pin for first time */
 
-			pgBufferUsage.shared_blks_hit++;
+			INSTR_BUFUSAGE_INCR(shared_blks_hit);
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr->buf_id);
 
 			return true;
 		}
@@ -1147,14 +1148,14 @@ PinBufferForBlock(Relation rel,
 	{
 		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr);
 		if (*foundPtr)
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 	}
 	else
 	{
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
 							 strategy, foundPtr, io_context);
 		if (*foundPtr)
-			pgBufferUsage.shared_blks_hit++;
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(bufHdr->buf_id);
 	}
 	if (rel)
 	{
@@ -1888,9 +1889,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 										  true);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_hit += 1;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 		else
-			pgBufferUsage.shared_blks_hit += 1;
+			INSTR_BUFUSAGE_COUNT_SHARED_HIT(blocknum);
 
 		if (operation->rel)
 			pgstat_count_buffer_hit(operation->rel);
@@ -1958,9 +1959,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 								io_start, 1, io_buffers_len * BLCKSZ);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(local_blks_read, io_buffers_len);
 		else
-			pgBufferUsage.shared_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(shared_blks_read, io_buffers_len);
 
 		/*
 		 * Track vacuum cost when issuing IO, not after waiting for it.
@@ -2842,7 +2843,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 		TerminateBufferIO(buf_hdr, false, BM_VALID, true, false);
 	}
 
-	pgBufferUsage.shared_blks_written += extend_by;
+	INSTR_BUFUSAGE_ADD(shared_blks_written, extend_by);
 
 	*extended_by = extend_by;
 
@@ -2960,7 +2961,7 @@ MarkBufferDirty(Buffer buffer)
 	 */
 	if (!(old_buf_state & BM_DIRTY))
 	{
-		pgBufferUsage.shared_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
@@ -4368,7 +4369,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	pgstat_count_io_op_time(IOOBJECT_RELATION, io_context,
 							IOOP_WRITE, io_start, 1, BLCKSZ);
 
-	pgBufferUsage.shared_blks_written++;
+	INSTR_BUFUSAGE_INCR(shared_blks_written);
 
 	/*
 	 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
@@ -5524,7 +5525,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
 
 		if (dirtied)
 		{
-			pgBufferUsage.shared_blks_dirtied++;
+			INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 			if (VacuumCostActive)
 				VacuumCostBalance += VacuumCostPageDirty;
 		}

@@ -20940,6 +20940,7 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		LOCKTAG		tag;
 		char	   *parentrelname;
 		char	   *partrelname;
+		InstrumentUsage *instrusage = NULL;
 
 		/*
 		 * Add a new constraint to the partition being detached, which
@@ -20972,11 +20973,20 @@ ATExecDetachPartition(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		table_close(rel, NoLock);
 		tab->rel = NULL;
 
+		if (InstrumentUsageActive())
+			instrusage = InstrUsageStop();
+
 		/* Make updated catalog entry visible */
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 
 		StartTransactionCommand();
+
+		if (instrusage != NULL)
+		{
+			InstrUsageStart();
+			InstrUsageAddToCurrent(instrusage);
+		}
 
 		/*
 		 * Now wait.  This ensures that all queries that were planned
