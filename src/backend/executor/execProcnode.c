@@ -122,6 +122,7 @@
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecAccumNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -413,8 +414,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAlloc(1, estate->es_instrument,
-										result->async_capable);
+		result->instrument = InstrAllocNode(1, estate->es_instrument,
+											result->async_capable);
 
 	return result;
 }
@@ -824,6 +825,34 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
 		InstrStopNode(node->instrument, 0);
+
+	return false;
+}
+
+/*
+ * ExecAccumNodeInstrumentation
+ *
+ * Accumulate instrumentation stats from all execution nodes to their respective
+ * parents (or the original parent instrumentation stack).
+ */
+void
+ExecAccumNodeInstrumentation(PlanState *node)
+{
+	(void) ExecAccumNodeInstrumentation_walker(node, NULL);
+}
+
+static bool
+ExecAccumNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	check_stack_depth();
+
+	planstate_tree_walker(node, ExecAccumNodeInstrumentation_walker, context);
+
+	if (node->instrument && node->instrument->stack.previous)
+		InstrStackAdd(node->instrument->stack.previous, &node->instrument->stack);
 
 	return false;
 }

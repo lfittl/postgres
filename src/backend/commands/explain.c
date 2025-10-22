@@ -322,13 +322,15 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 						 QueryEnvironment *queryEnv)
 {
 	PlannedStmt *plan;
-	instr_time	planstart,
-				planduration;
-	BufferUsage bufusage_start,
-				bufusage;
+	Instrumentation *instr = NULL;
 	MemoryContextCounters mem_counters;
 	MemoryContext planner_ctx = NULL;
 	MemoryContext saved_ctx = NULL;
+
+	if (es->buffers)
+		instr = InstrAlloc(1, INSTRUMENT_TIMER | INSTRUMENT_BUFFERS);
+	else
+		instr = InstrAlloc(1, INSTRUMENT_TIMER);
 
 	if (es->memory)
 	{
@@ -346,15 +348,12 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		saved_ctx = MemoryContextSwitchTo(planner_ctx);
 	}
 
-	if (es->buffers)
-		bufusage_start = pgBufferUsage;
-	INSTR_TIME_SET_CURRENT(planstart);
+	InstrStart(instr);
 
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params, es);
 
-	INSTR_TIME_SET_CURRENT(planduration);
-	INSTR_TIME_SUBTRACT(planduration, planstart);
+	InstrStop(instr, 0, true);
 
 	if (es->memory)
 	{
@@ -362,16 +361,9 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
 
-	/* calc differences of buffer counters. */
-	if (es->buffers)
-	{
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-	}
-
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
+				   &instr->total, (es->buffers ? &INSTR_GET_BUFUSAGE(instr) : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
 
@@ -1103,9 +1095,6 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 		char	   *relname;
 		char	   *conname = NULL;
 
-		/* Must clean up instrumentation state */
-		InstrEndLoop(instr);
-
 		/*
 		 * We ignore triggers that were never invoked; they likely aren't
 		 * relevant to the current query type.
@@ -1136,7 +1125,7 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 				appendStringInfo(es->str, " on %s", relname);
 			if (es->timing)
 				appendStringInfo(es->str, ": time=%.3f calls=%.0f\n",
-								 1000.0 * instr->total, instr->ntuples);
+								 1000.0 * INSTR_TIME_GET_DOUBLE(instr->total), instr->ntuples);
 			else
 				appendStringInfo(es->str, ": calls=%.0f\n", instr->ntuples);
 		}
@@ -1147,7 +1136,7 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 				ExplainPropertyText("Constraint Name", conname, es);
 			ExplainPropertyText("Relation", relname, es);
 			if (es->timing)
-				ExplainPropertyFloat("Time", "ms", 1000.0 * instr->total, 3,
+				ExplainPropertyFloat("Time", "ms", 1000.0 * INSTR_TIME_GET_DOUBLE(instr->total), 3,
 									 es);
 			ExplainPropertyFloat("Calls", NULL, instr->ntuples, 0, es);
 		}
@@ -1835,8 +1824,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		planstate->instrument && planstate->instrument->nloops > 0)
 	{
 		double		nloops = planstate->instrument->nloops;
-		double		startup_ms = 1000.0 * planstate->instrument->startup / nloops;
-		double		total_ms = 1000.0 * planstate->instrument->total / nloops;
+		double		startup_ms = INSTR_TIME_GET_MILLISEC(planstate->instrument->startup) / nloops;
+		double		total_ms = INSTR_TIME_GET_MILLISEC(planstate->instrument->total) / nloops;
 		double		rows = planstate->instrument->ntuples / nloops;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
@@ -1893,7 +1882,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 		for (int n = 0; n < w->num_workers; n++)
 		{
-			Instrumentation *instrument = &w->instrument[n];
+			NodeInstrumentation *instrument = &w->instrument[n];
 			double		nloops = instrument->nloops;
 			double		startup_ms;
 			double		total_ms;
@@ -1901,8 +1890,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			if (nloops <= 0)
 				continue;
-			startup_ms = 1000.0 * instrument->startup / nloops;
-			total_ms = 1000.0 * instrument->total / nloops;
+			startup_ms = INSTR_TIME_GET_MILLISEC(instrument->startup) / nloops;
+			total_ms = INSTR_TIME_GET_MILLISEC(instrument->total) / nloops;
 			rows = instrument->ntuples / nloops;
 
 			ExplainOpenWorker(n, es);
@@ -2289,9 +2278,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->bufusage);
+		show_buffer_usage(es, &planstate->instrument->stack.bufusage);
 	if (es->wal && planstate->instrument)
-		show_wal_usage(es, &planstate->instrument->walusage);
+		show_wal_usage(es, &planstate->instrument->stack.walusage);
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
@@ -2300,7 +2289,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 		for (int n = 0; n < w->num_workers; n++)
 		{
-			Instrumentation *instrument = &w->instrument[n];
+			NodeInstrumentation *instrument = &w->instrument[n];
 			double		nloops = instrument->nloops;
 
 			if (nloops <= 0)
@@ -2308,9 +2297,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->bufusage);
+				show_buffer_usage(es, &instrument->stack.bufusage);
 			if (es->wal)
-				show_wal_usage(es, &instrument->walusage);
+				show_wal_usage(es, &instrument->stack.walusage);
 			ExplainCloseWorker(n, es);
 		}
 	}

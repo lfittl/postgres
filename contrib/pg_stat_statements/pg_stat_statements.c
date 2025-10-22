@@ -911,20 +911,12 @@ pgss_planner(Query *parse,
 	{
 		instr_time	start;
 		instr_time	duration;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		InstrStack *stack;
 
-		/* We need to track buffer usage as the planner can access them. */
-		bufusage_start = pgBufferUsage;
-
-		/*
-		 * Similarly the planner could write some WAL records in some cases
-		 * (e.g. setting a hint bit with those being WAL-logged)
-		 */
-		walusage_start = pgWalUsage;
 		INSTR_TIME_SET_CURRENT(start);
+
+		/* We need to track buffer/WAL usage as the planner can access them. */
+		stack = InstrPushStack();
 
 		nesting_level++;
 		PG_TRY();
@@ -938,20 +930,13 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrPopStack(stack);
 			nesting_level--;
 		}
 		PG_END_TRY();
 
 		INSTR_TIME_SET_CURRENT(duration);
 		INSTR_TIME_SUBTRACT(duration, start);
-
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -960,8 +945,8 @@ pgss_planner(Query *parse,
 				   PGSS_PLAN,
 				   INSTR_TIME_GET_MILLISEC(duration),
 				   0,
-				   &bufusage,
-				   &walusage,
+				   &stack->bufusage,
+				   &stack->walusage,
 				   NULL,
 				   NULL,
 				   0,
@@ -1023,7 +1008,7 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContext oldcxt;
 
 			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
+			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL);
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
@@ -1082,21 +1067,15 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 	if (queryId != INT64CONST(0) && queryDesc->totaltime &&
 		pgss_enabled(nesting_level))
 	{
-		/*
-		 * Make sure stats accumulation is done.  (Note: it's okay if several
-		 * levels of hook all do this.)
-		 */
-		InstrEndLoop(queryDesc->totaltime);
-
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
 				   queryDesc->plannedstmt->stmt_len,
 				   PGSS_EXEC,
-				   queryDesc->totaltime->total * 1000.0,	/* convert to msec */
+				   INSTR_TIME_GET_MILLISEC(queryDesc->totaltime->total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->totaltime->bufusage,
-				   &queryDesc->totaltime->walusage,
+				   &INSTR_GET_BUFUSAGE(queryDesc->totaltime),
+				   &INSTR_GET_WALUSAGE(queryDesc->totaltime),
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1163,14 +1142,10 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		instr_time	start;
 		instr_time	duration;
 		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		InstrStack *stack;
 
-		bufusage_start = pgBufferUsage;
-		walusage_start = pgWalUsage;
 		INSTR_TIME_SET_CURRENT(start);
+		stack = InstrPushStack();
 
 		nesting_level++;
 		PG_TRY();
@@ -1186,6 +1161,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrPopStack(stack);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1214,14 +1190,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
-
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
@@ -1229,8 +1197,8 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(duration),
 				   rows,
-				   &bufusage,
-				   &walusage,
+				   &stack->bufusage,
+				   &stack->walusage,
 				   NULL,
 				   NULL,
 				   0,
