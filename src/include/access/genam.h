@@ -17,6 +17,7 @@
 #include "access/htup.h"
 #include "access/sdir.h"
 #include "access/skey.h"
+#include "executor/instrument.h"
 #include "nodes/tidbitmap.h"
 #include "storage/buf.h"
 #include "storage/lockdefs.h"
@@ -40,6 +41,8 @@ typedef struct IndexScanInstrumentation
 {
 	/* Index search count (incremented with pgstat_count_index_scan call) */
 	uint64		nsearches;
+	/* Buffer usage of heap access during index scans */
+	InstrStack	table_stack;
 } IndexScanInstrumentation;
 
 /*

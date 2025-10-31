@@ -395,6 +395,31 @@ InstrAggNode(NodeInstrumentation * dst, NodeInstrumentation * add)
 		WalUsageAdd(&dst->stack.walusage, &add->stack.walusage);
 }
 
+void
+InstrStartNodeStack(NodeInstrumentation * instr, InstrStack * stack)
+{
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(pgInstrStack != NULL);
+
+		InstrPushStack(stack);
+	}
+}
+
+void
+InstrStopNodeStack(NodeInstrumentation * instr, InstrStack * stack)
+{
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure that we always have a parent, even at the top most node */
+		Assert(stack->previous != NULL);
+
+		/* Adding to parent is handled by ExecAccumNodeInstrumentation */
+		InstrPopStack(stack, false);
+	}
+}
+
 /* start instrumentation during parallel executor startup */
 Instrumentation *
 InstrStartParallelQuery(void)

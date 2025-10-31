@@ -854,7 +854,20 @@ ExecAccumNodeInstrumentation_walker(PlanState *node, void *context)
 	planstate_tree_walker(node, ExecAccumNodeInstrumentation_walker, context);
 
 	if (node->instrument && node->instrument->stack.previous)
+	{
+		/*
+		 * Index Scan nodes account for heap buffer usage separately, so we
+		 * need to explitly add here
+		 */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			InstrStackAdd(node->instrument->stack.previous, &iss->iss_Instrument.table_stack);
+		}
+
 		InstrStackAdd(node->instrument->stack.previous, &node->instrument->stack);
+	}
 
 	return false;
 }
