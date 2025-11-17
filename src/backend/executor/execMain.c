@@ -329,9 +329,16 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
+	/*
+	 * Start up required top-level instrumentation stack for WAL/buffer
+	 * tracking
+	 */
+	if (!queryDesc->totaltime && (estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)))
+		queryDesc->totaltime = InstrAlloc(1, estate->es_instrument);
+
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime);
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -383,7 +390,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		dest->rShutdown(dest);
 
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, estate->es_processed);
+		InstrStop(queryDesc->totaltime, false);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -433,7 +440,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime);
 
 	/* Run ModifyTable nodes to completion */
 	ExecPostprocessPlan(estate);
@@ -442,8 +449,15 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	if (!(estate->es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS))
 		AfterTriggerEndQuery(estate);
 
+	/*
+	 * Accumulate per node statistics, and then shut down instrumentation
+	 * stack
+	 */
+	if (queryDesc->totaltime && estate->es_instrument)
+		ExecAccumNodeInstrumentation(queryDesc->planstate);
+
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, 0);
+		InstrStop(queryDesc->totaltime, true);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1266,7 +1280,15 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0(n * sizeof(ExprState *));
 		if (instrument_options)
-			resultRelInfo->ri_TrigInstrument = InstrAlloc(n, instrument_options, false);
+		{
+			/*
+			 * Triggers do not individually track buffer/WAL usage, even if
+			 * otherwise tracked
+			 */
+			int			opts = (instrument_options & INSTRUMENT_TIMER) != 0 ? INSTRUMENT_TIMER : INSTRUMENT_ROWS;
+
+			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(n, opts);
+		}
 	}
 	else
 	{

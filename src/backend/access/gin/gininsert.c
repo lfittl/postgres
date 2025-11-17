@@ -2107,6 +2107,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
+	Instrumentation *instr;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -2175,7 +2176,7 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	tuplesort_attach_shared(sharedsort, seg);
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Might as well use reliable figure when doling out maintenance_work_mem
@@ -2190,7 +2191,8 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &bufferusage[ParallelWorkerNumber],
 						  &walusage[ParallelWorkerNumber]);
 
 	index_close(indexRel, indexLockmode);
