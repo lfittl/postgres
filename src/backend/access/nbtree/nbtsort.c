@@ -1750,6 +1750,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
+	Instrumentation *instr;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -1825,7 +1826,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	}
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/* Perform sorting of spool, and possibly a spool2 */
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
@@ -1835,7 +1836,8 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &bufferusage[ParallelWorkerNumber],
 						  &walusage[ParallelWorkerNumber]);
 
 #ifdef BTREE_BUILD_STATS

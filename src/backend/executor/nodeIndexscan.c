@@ -83,6 +83,7 @@ IndexNext(IndexScanState *node)
 	ExprContext *econtext;
 	ScanDirection direction;
 	IndexScanDesc scandesc;
+	ItemPointer tid;
 	TupleTableSlot *slot;
 
 	/*
@@ -128,8 +129,20 @@ IndexNext(IndexScanState *node)
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
+		if (node->ss.ps.instrument)
+			InstrStartNodeStack(node->ss.ps.instrument, &node->iss_Instrument.table_stack);
+
+		if (unlikely(!index_fetch_heap(scandesc, slot)))
+			continue;
+
+		if (node->ss.ps.instrument)
+			InstrStopNodeStack(node->ss.ps.instrument, &node->iss_Instrument.table_stack);
+
+		if (scandesc->xs_heap_continue)
+			elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
+
 		CHECK_FOR_INTERRUPTS();
 
 		/*
