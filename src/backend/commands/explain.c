@@ -143,7 +143,7 @@ static void show_instrumentation_count(const char *qlabel, int which,
 static void show_foreignscan_info(ForeignScanState *fsstate, ExplainState *es);
 static const char *explain_get_index_name(Oid indexId);
 static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
-static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
+static void show_buffer_usage(ExplainState *es, const BufferUsage *usage, const char *title);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -603,7 +603,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		}
 
 		if (bufusage)
-			show_buffer_usage(es, bufusage);
+			show_buffer_usage(es, bufusage, NULL);
 
 		if (mem_counters)
 			show_memory_counters(es, mem_counters);
@@ -1020,7 +1020,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		if (es->buffers && peek_buffer_usage(es, &metrics->bufferUsage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 			es->indent--;
 		}
 	}
@@ -1034,7 +1034,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->bufferUsage);
+			show_buffer_usage(es, &metrics->bufferUsage, NULL);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
@@ -1962,6 +1962,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_indexsearches_info(planstate, es);
+
+			if (es->buffers && planstate->instrument)
+				show_buffer_usage(es, &((IndexScanState *) planstate)->iss_Instrument.table_stack.bufusage, "Table");
 			break;
 		case T_IndexOnlyScan:
 			show_scan_qual(((IndexOnlyScan *) plan)->indexqual,
@@ -2280,7 +2283,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->stack.bufusage);
+		show_buffer_usage(es, &planstate->instrument->stack.bufusage,
+						  IsA(plan, IndexScan) ? "Index" : NULL);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->stack.walusage);
 
@@ -2299,7 +2303,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->stack.bufusage);
+				show_buffer_usage(es, &instrument->stack.bufusage, NULL);
 			if (es->wal)
 				show_wal_usage(es, &instrument->stack.walusage);
 			ExplainCloseWorker(n, es);
@@ -4099,7 +4103,7 @@ peek_buffer_usage(ExplainState *es, const BufferUsage *usage)
  * Show buffer usage details.  This better be sync with peek_buffer_usage.
  */
 static void
-show_buffer_usage(ExplainState *es, const BufferUsage *usage)
+show_buffer_usage(ExplainState *es, const BufferUsage *usage, const char *title)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
@@ -4124,6 +4128,8 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 		if (has_shared || has_local || has_temp)
 		{
 			ExplainIndentText(es);
+			if (title)
+				appendStringInfo(es->str, "%s ", title);
 			appendStringInfoString(es->str, "Buffers:");
 
 			if (has_shared)
@@ -4179,6 +4185,8 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 		if (has_shared_timing || has_local_timing || has_temp_timing)
 		{
 			ExplainIndentText(es);
+			if (title)
+				appendStringInfo(es->str, "%s ", title);
 			appendStringInfoString(es->str, "I/O Timings:");
 
 			if (has_shared_timing)
@@ -4220,44 +4228,46 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 	}
 	else
 	{
-		ExplainPropertyInteger("Shared Hit Blocks", NULL,
+		char	   *prefix = title ? psprintf("%s ", title) : pstrdup("");
+
+		ExplainPropertyInteger(psprintf("%sShared Hit Blocks", prefix), NULL,
 							   usage->shared_blks_hit, es);
-		ExplainPropertyInteger("Shared Read Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sShared Read Blocks", prefix), NULL,
 							   usage->shared_blks_read, es);
-		ExplainPropertyInteger("Shared Dirtied Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sShared Dirtied Blocks", prefix), NULL,
 							   usage->shared_blks_dirtied, es);
-		ExplainPropertyInteger("Shared Written Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sShared Written Blocks", prefix), NULL,
 							   usage->shared_blks_written, es);
-		ExplainPropertyInteger("Local Hit Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sLocal Hit Blocks", prefix), NULL,
 							   usage->local_blks_hit, es);
-		ExplainPropertyInteger("Local Read Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sLocal Read Blocks", prefix), NULL,
 							   usage->local_blks_read, es);
-		ExplainPropertyInteger("Local Dirtied Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sLocal Dirtied Blocks", prefix), NULL,
 							   usage->local_blks_dirtied, es);
-		ExplainPropertyInteger("Local Written Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sLocal Written Blocks", prefix), NULL,
 							   usage->local_blks_written, es);
-		ExplainPropertyInteger("Temp Read Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sTemp Read Blocks", prefix), NULL,
 							   usage->temp_blks_read, es);
-		ExplainPropertyInteger("Temp Written Blocks", NULL,
+		ExplainPropertyInteger(psprintf("%sTemp Written Blocks", prefix), NULL,
 							   usage->temp_blks_written, es);
 		if (track_io_timing)
 		{
-			ExplainPropertyFloat("Shared I/O Read Time", "ms",
+			ExplainPropertyFloat(psprintf("%sShared I/O Read Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->shared_blk_read_time),
 								 3, es);
-			ExplainPropertyFloat("Shared I/O Write Time", "ms",
+			ExplainPropertyFloat(psprintf("%sShared I/O Write Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->shared_blk_write_time),
 								 3, es);
-			ExplainPropertyFloat("Local I/O Read Time", "ms",
+			ExplainPropertyFloat(psprintf("%sLocal I/O Read Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->local_blk_read_time),
 								 3, es);
-			ExplainPropertyFloat("Local I/O Write Time", "ms",
+			ExplainPropertyFloat(psprintf("%sLocal I/O Write Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->local_blk_write_time),
 								 3, es);
-			ExplainPropertyFloat("Temp I/O Read Time", "ms",
+			ExplainPropertyFloat(psprintf("%sTemp I/O Read Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->temp_blk_read_time),
 								 3, es);
-			ExplainPropertyFloat("Temp I/O Write Time", "ms",
+			ExplainPropertyFloat(psprintf("%sTemp I/O Write Time", prefix), "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->temp_blk_write_time),
 								 3, es);
 		}

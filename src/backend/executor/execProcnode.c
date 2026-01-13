@@ -856,6 +856,17 @@ ExecAccumNodeInstrumentation_walker(PlanState *node, void *context)
 	if (!node->instrument || !node->instrument->stack.previous)
 		return false;
 
+	/*
+	 * Index Scan nodes account for table buffer usage separately, so we need
+	 * to explitly add it here.
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrStackAdd(node->instrument->stack.previous, &iss->iss_Instrument.table_stack);
+	}
+
 	InstrStackAdd(node->instrument->stack.previous, &node->instrument->stack);
 
 	return false;
