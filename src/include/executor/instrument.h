@@ -239,6 +239,11 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
+extern InstrStack *InstrAllocAdditionalNodeStack(NodeInstrumentation *instr);
+extern void InstrStartNodeStack(NodeInstrumentation *dst, InstrStack *stack);
+extern void InstrStopNodeStack(NodeInstrumentation *dst, InstrStack *stack);
+extern InstrStack *InstrFinalizeAdditionalNodeStack(InstrStack *stack, NodeInstrumentation *instr);
+
 pg_nodiscard extern Instrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(Instrumentation *instr, BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);

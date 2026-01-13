@@ -506,6 +506,59 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 		WalUsageAdd(&dst->stack.walusage, &add->stack.walusage);
 }
 
+/*
+ * Allocate an additional InstrStack for a node, e.g. for tracking table
+ * buffer usage separately from index buffer usage. Allocated in
+ * TopTransactionContext so it survives long enough for abort recovery.
+ */
+InstrStack *
+InstrAllocAdditionalNodeStack(NodeInstrumentation *instr)
+{
+	if (instr->need_bufusage || instr->need_walusage)
+		return MemoryContextAllocZero(TopTransactionContext, sizeof(InstrStack));
+
+	return NULL;
+}
+
+void
+InstrStartNodeStack(NodeInstrumentation *instr, InstrStack *stack)
+{
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Ensure the executor set up a parent node below the top level stack */
+		Assert(CurrentInstrStack != &TopInstrStack);
+
+		InstrPushStack(stack);
+	}
+}
+
+void
+InstrStopNodeStack(NodeInstrumentation *instr, InstrStack *stack)
+{
+	if (instr->need_bufusage || instr->need_walusage)
+	{
+		/* Adding to parent is handled by InstrFinalizeAdditionalNodeStack */
+		InstrPopStack(stack);
+	}
+}
+
+/* Add additional node stacks to the parent and move into per-query memory context */
+InstrStack *
+InstrFinalizeAdditionalNodeStack(InstrStack *stack, NodeInstrumentation *instr)
+{
+	InstrStack *dst = palloc(sizeof(InstrStack));
+
+	memcpy(dst, stack, sizeof(InstrStack));
+	pfree(stack);
+
+	/* Avoid stale pointer references */
+	dst->previous = NULL;
+
+	InstrStackAdd(&instr->stack, dst);
+
+	return dst;
+}
+
 /* start instrumentation during parallel executor startup */
 Instrumentation *
 InstrStartParallelQuery(void)

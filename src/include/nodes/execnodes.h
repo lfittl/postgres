@@ -1728,6 +1728,13 @@ typedef struct IndexScanState
 	IndexScanInstrumentation iss_Instrument;
 	SharedIndexScanInstrumentation *iss_SharedInfo;
 
+	/*
+	 * Instrumentation stack utilized for tracking table access. This is
+	 * separate from iss_Instrument since it needs to be allocated in the
+	 * right context and IndexScanInstrumentation shouldn't contain pointers.
+	 */
+	InstrStack *iss_InstrumentTableStack;
+
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;
 	bool		iss_ReachedEnd;

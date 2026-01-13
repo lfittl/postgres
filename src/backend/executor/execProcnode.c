@@ -415,8 +415,18 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
+	{
 		result->instrument = InstrAllocNode(estate->es_instrument,
 											result->async_capable);
+
+		/* IndexScan tracks table access separately from index access. */
+		if (IsA(result, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, result);
+
+			iss->iss_InstrumentTableStack = InstrAllocAdditionalNodeStack(result->instrument);
+		}
+	}
 
 	return result;
 }
@@ -859,6 +869,15 @@ ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
 							 node->instrument->need_walusage))
 	{
 		InstrRememberNodeStack(parent, &node->instrument->stack);
+
+		/* IndexScan has a separate stack to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			if (iss->iss_InstrumentTableStack)
+				InstrRememberNodeStack(parent, iss->iss_InstrumentTableStack);
+		}
 	}
 
 	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
@@ -901,6 +920,15 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 
 	if (!node->instrument)
 		return false;
+
+	/* IndexScan has a separate stack to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_InstrumentTableStack)
+			iss->iss_InstrumentTableStack = InstrFinalizeAdditionalNodeStack(iss->iss_InstrumentTableStack, node->instrument);
+	}
 
 	node->instrument = InstrFinalizeNode(node->instrument, parent);
 
