@@ -65,6 +65,17 @@ typedef struct
 /* Number of columns in pg_locks output */
 #define NUM_LOCK_STATUS_COLUMNS		16
 
+/* Working status for pg_exclusive_lock_status */
+typedef struct
+{
+	xl_standby_lock *locks;		/* exclusive lock data from lmgr */
+	int			nlocks;			/* number of exclusive locks */
+	int			currIdx;		/* current lock data index */
+}			PG_Exclusive_Lock_Status;
+
+/* Number of columns in pg_exclusive_lock_status output */
+#define NUM_EXCLUSIVE_LOCK_STATUS_COLUMNS		3
+
 /*
  * VXIDGetDatum - Construct a text representation of a VXID
  *
@@ -433,6 +444,82 @@ pg_lock_status(PG_FUNCTION_ARGS)
 		values[13] = BoolGetDatum(true);
 		values[14] = BoolGetDatum(false);
 		nulls[15] = true;
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * pg_exclusive_lock_status - produce a view with one row per AccessExclusiveLock currently held
+ */
+Datum
+pg_exclusive_lock_status(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	PG_Exclusive_Lock_Status *mystatus;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc	tupdesc;
+		MemoryContext oldcontext;
+
+		/* create a function context for cross-call persistence */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/*
+		 * switch to memory context appropriate for multiple function calls
+		 */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* build tupdesc for result tuples */
+		/* this had better match function's declaration in pg_proc.h */
+		tupdesc = CreateTemplateTupleDesc(NUM_EXCLUSIVE_LOCK_STATUS_COLUMNS);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "relation",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "transactionid",
+						   XIDOID, -1, 0);
+
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+
+		/*
+		 * Collect all the locking information that we will format and send
+		 * out as a result set.
+		 */
+		mystatus = (PG_Exclusive_Lock_Status *) palloc(sizeof(PG_Exclusive_Lock_Status));
+		funcctx->user_fctx = mystatus;
+
+		mystatus->locks = GetCurrentAccessExclusiveLocks(&mystatus->nlocks, false);
+		mystatus->currIdx = 0;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	mystatus = (PG_Exclusive_Lock_Status *) funcctx->user_fctx;
+
+	while (mystatus->currIdx < mystatus->nlocks)
+	{
+		Datum		values[NUM_EXCLUSIVE_LOCK_STATUS_COLUMNS] = {0};
+		bool		nulls[NUM_EXCLUSIVE_LOCK_STATUS_COLUMNS] = {0};
+		HeapTuple	tuple;
+		Datum		result;
+		xl_standby_lock *lock;
+
+		lock = &(mystatus->locks[mystatus->currIdx]);
+		mystatus->currIdx++;
+
+		/*
+		 * Form tuple with appropriate data.
+		 */
+		values[0] = ObjectIdGetDatum(lock->dbOid);
+		values[1] = ObjectIdGetDatum(lock->relOid);
+		values[2] = ObjectIdGetDatum(lock->xid);
 
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 		result = HeapTupleGetDatum(tuple);

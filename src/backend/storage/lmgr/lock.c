@@ -963,7 +963,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	 *
 	 * Only AccessExclusiveLocks can conflict with lock types that read-only
 	 * transactions can acquire in a standby server. Make sure this definition
-	 * matches the one in GetRunningTransactionLocks().
+	 * matches the one in GetCurrentAccessExclusiveLocks().
 	 */
 	if (lockmode >= AccessExclusiveLock &&
 		locktag->locktag_type == LOCKTAG_RELATION &&
@@ -4157,8 +4157,11 @@ GetSingleProcBlockerStatusData(PGPROC *blocked_proc, BlockedProcsData *data)
 
 /*
  * Returns a list of currently held AccessExclusiveLocks, for use by
- * LogStandbySnapshot().  The result is a palloc'd array,
- * with the number of elements returned into *nlocks.
+ * LogStandbySnapshot(), or user level reporting. The skip_committed argument
+ * allows skipping locks by committed transactions that are not yet released.
+ *
+ * The result is a palloc'd array, with the number of elements returned into
+ * *nlocks.
  *
  * XXX This currently takes a lock on all partitions of the lock table,
  * but it's possible to do better.  By reference counting locks and storing
@@ -4168,7 +4171,7 @@ GetSingleProcBlockerStatusData(PGPROC *blocked_proc, BlockedProcsData *data)
  * is pretty dubious though.
  */
 xl_standby_lock *
-GetRunningTransactionLocks(int *nlocks)
+GetCurrentAccessExclusiveLocks(int *nlocks, bool skip_committed)
 {
 	xl_standby_lock *accessExclusiveLocks;
 	PROCLOCK   *proclock;
@@ -4221,7 +4224,7 @@ GetRunningTransactionLocks(int *nlocks)
 			 * lock. It is still possible that we see locks held by already
 			 * complete transactions, if they haven't yet zeroed their xids.
 			 */
-			if (!TransactionIdIsValid(xid))
+			if (skip_committed && !TransactionIdIsValid(xid))
 				continue;
 
 			accessExclusiveLocks[index].xid = xid;
