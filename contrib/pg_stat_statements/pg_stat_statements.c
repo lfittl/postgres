@@ -2390,13 +2390,15 @@ qtext_load_file(Size *buffer_size)
 
 	/*
 	 * OK, slurp in the file.  Windows fails if we try to read more than
-	 * INT_MAX bytes at once, and other platforms might not like that either,
-	 * so read a very large file in 1GB segments.
+	 * INT_MAX bytes at once, and we might have a statement timeout in effect,
+	 * so read a very large file in 100MB segments.
 	 */
 	nread = 0;
 	while (nread < stat.st_size)
 	{
-		int			toread = Min(1024 * 1024 * 1024, stat.st_size - nread);
+		int			toread = Min(1024 * 1024 * 100, stat.st_size - nread);
+
+		CHECK_FOR_INTERRUPTS();
 
 		/*
 		 * If we get a short read and errno doesn't get set, the reason is
