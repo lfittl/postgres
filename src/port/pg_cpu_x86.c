@@ -17,13 +17,11 @@
 
 #if defined(USE_SSE2) || defined(__i386__)
 
-#if defined(HAVE__GET_CPUID) || defined(HAVE__GET_CPUID_COUNT)
-#include <cpuid.h>
-#endif
-
-#if defined(HAVE__CPUID) || defined(HAVE__CPUIDEX)
+#if defined(_MSC_VER)
 #include <intrin.h>
-#endif
+#else
+#include <cpuid.h>
+#endif							/* defined(_MSC_VER) */
 
 #ifdef HAVE_XSAVE_INTRINSICS
 #include <immintrin.h>
