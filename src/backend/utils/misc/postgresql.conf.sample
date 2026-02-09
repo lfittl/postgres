@@ -127,6 +127,10 @@
 # RESOURCE USAGE (except WAL)
 #------------------------------------------------------------------------------
 
+# - Time -
+
+#fast_clock_source = auto               # auto, off, rdtsc (if supported)
+
 # - Memory -
 
 #shared_buffers = 128MB                 # min 128kB

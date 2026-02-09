@@ -714,6 +714,7 @@ const char *const config_group_names[] =
 	[CONN_AUTH_TCP] = gettext_noop("Connections and Authentication / TCP Settings"),
 	[CONN_AUTH_AUTH] = gettext_noop("Connections and Authentication / Authentication"),
 	[CONN_AUTH_SSL] = gettext_noop("Connections and Authentication / SSL"),
+	[RESOURCES_TIME] = gettext_noop("Resource Usage / Time"),
 	[RESOURCES_MEM] = gettext_noop("Resource Usage / Memory"),
 	[RESOURCES_DISK] = gettext_noop("Resource Usage / Disk"),
 	[RESOURCES_KERNEL] = gettext_noop("Resource Usage / Kernel Resources"),
