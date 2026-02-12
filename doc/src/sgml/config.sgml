@@ -2578,6 +2578,11 @@ include_dir 'conf.d'
           Use of RDTSC/RDTSC is not supported on older CPUs or hypervisors that don't pass the TSC
           frequency to guest VMs, and is not advised on systems that utilize an emulated TSC.
         </para>
+        <para>
+          To help decide which clock source to use on an x86-64 system you can run the
+          <application>pg_test_timing</application> utility to check TSC availability, and
+          perform timing measurements.
+        </para>
       </listitem>
      </varlistentry>
      </variablelist>
