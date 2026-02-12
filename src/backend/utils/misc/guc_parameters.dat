@@ -1035,6 +1035,16 @@
   max => '3',
 },
 
+{ name => 'fast_clock_source', type => 'enum', context => 'PGC_USERSET', group => 'RESOURCES_TIME',
+  short_desc => 'Controls the use of fast clock source on architectures that support it.',
+  long_desc => 'This enables the use of the faster RDTSC instruction on x86 systems (if available) to support timing measurements during EXPLAIN and other instrumentation.',
+  variable => 'fast_clock_source',
+  boot_val => 'FAST_CLOCK_SOURCE_AUTO',
+  options => 'fast_clock_source_options',
+  check_hook => 'check_fast_clock_source',
+  assign_hook => 'assign_fast_clock_source',
+},
+
 { name => 'file_copy_method', type => 'enum', context => 'PGC_USERSET', group => 'RESOURCES_DISK',
   short_desc => 'Selects the file copy method.',
   variable => 'file_copy_method',
