@@ -588,9 +588,6 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	InitializeGUCOptions();
 
-	/* initialize timing infrastructure (required for INSTR_* calls) */
-	pg_initialize_timing();
-
 	opterr = 1;
 
 	/*

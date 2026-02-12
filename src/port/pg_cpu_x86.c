@@ -25,6 +25,11 @@
 #endif							/* defined(_MSC_VER) */
 #endif
 
+#ifdef __linux__
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #ifdef HAVE_XSAVE_INTRINSICS
 #include <immintrin.h>
 #endif
@@ -53,6 +58,18 @@ mask_available(uint32 value, uint32 mask)
 	return (value & mask) == mask;
 }
 
+static inline void
+pg_cpuid(int leaf, uint32 *r)
+{
+#if defined(HAVE__GET_CPUID)
+	__get_cpuid(leaf, &r[0], &r[1], &r[2], &r[3]);
+#elif defined(HAVE__CPUID)
+	__cpuid(r, leaf);
+#else
+#error cpuid instruction not available
+#endif
+}
+
 /*
  * Parse the CPU ID info for runtime checks.
  */
@@ -64,31 +81,27 @@ set_x86_features(void)
 {
 	unsigned int exx[4] = {0, 0, 0, 0};
 
-#if defined(HAVE__GET_CPUID)
-	__get_cpuid(1, &exx[0], &exx[1], &exx[2], &exx[3]);
-#elif defined(HAVE__CPUID)
-	__cpuid(exx, 1);
-#else
-#error cpuid instruction not available
-#endif
+	pg_cpuid(1, exx);
 
 	X86Features[PG_SSE4_2] = exx[2] >> 20 & 1;
 	X86Features[PG_POPCNT] = exx[2] >> 23 & 1;
+	X86Features[PG_HYPERVISOR] = exx[2] >> 31 & 1;
 
-	/* All these features depend on OSXSAVE */
+	/* Use leaf 7 to check TSC_ADJUST and extended AVX-512 support */
+	memset(exx, 0, 4 * sizeof(exx[0]));
+
+#if defined(HAVE__GET_CPUID_COUNT)
+	__get_cpuid_count(7, 0, &exx[0], &exx[1], &exx[2], &exx[3]);
+#elif defined(HAVE__CPUIDEX)
+	__cpuidex(exx, 7, 0);
+#endif
+
+	X86Features[PG_TSC_ADJUST] = (exx[1] & (1 << 1)) != 0;
+
+	/* All relevant AVX-512 features depend on OSXSAVE */
 	if (exx[2] & (1 << 27))
 	{
 		uint32		xcr0_val = 0;
-
-		/* second cpuid call on leaf 7 to check extended AVX-512 support */
-
-		memset(exx, 0, 4 * sizeof(exx[0]));
-
-#if defined(HAVE__GET_CPUID_COUNT)
-		__get_cpuid_count(7, 0, &exx[0], &exx[1], &exx[2], &exx[3]);
-#elif defined(HAVE__CPUIDEX)
-		__cpuidex(exx, 7, 0);
-#endif
 
 #ifdef HAVE_XSAVE_INTRINSICS
 		/* get value of Extended Control Register */
@@ -107,7 +120,218 @@ set_x86_features(void)
 		}
 	}
 
+	/* Check for other TSC related flags */
+	pg_cpuid(0x80000001, exx);
+	X86Features[PG_RDTSCP] = (exx[3] & (1 << 27)) != 0;
+
+	pg_cpuid(0x80000007, exx);
+	X86Features[PG_TSC_INVARIANT] = (exx[3] & (1 << 8)) != 0;
+
 	X86Features[INIT_PG_X86] = true;
 }
+
+/*
+ * Return the number of logical processors per physical CPU package (socket).
+ *
+ * This uses CPUID.0B (Extended Topology Enumeration) to enumerate topology
+ * levels. Each sub-leaf reports a level type in ECX[15:8] (1 = SMT, 2 = Core)
+ * and the number of logical processors at that level and below in EBX[15:0].
+ * The value at the highest level gives us logical processors per package.
+ *
+ * Vendor-specific leaves (0x1F for Intel, 0x80000026 for AMD) provide
+ * finer-grained sub-package topology but are assumed to report the same
+ * per-package totals on current hardware.
+ *
+ * Returns 0 if topology information is not available.
+ */
+int
+x86_logical_processors_per_package(void)
+{
+	int			logical_per_package = 0;
+
+	for (int subleaf = 0; subleaf < 8; subleaf++)
+	{
+		uint32		exx[4] = {0, 0, 0, 0};
+		uint32		level_type;
+
+#if defined(HAVE__GET_CPUID_COUNT)
+		__get_cpuid_count(0x0B, subleaf, &exx[0], &exx[1], &exx[2], &exx[3]);
+#elif defined(HAVE__CPUIDEX)
+		__cpuidex(exx, 0x0B, subleaf);
+#else
+		return 0;
+#endif
+
+		level_type = (exx[2] >> 8) & 0xff;
+
+		/* level_type 0 means end of enumeration */
+		if (level_type == 0)
+			break;
+
+		logical_per_package = exx[1] & 0xffff;
+	}
+
+	return logical_per_package;
+}
+
+/* TSC (Time-stamp Counter) handling code */
+
+static uint32 x86_hypervisor_tsc_frequency_khz(void);
+static uint32 hyperv_read_tsc_msr(void);
+
+/*
+ * Determine the TSC frequency of the CPU, where supported.
+ *
+ * Needed to interpret the tick value returned by RDTSC/RDTSCP. Return value of
+ * 0 indicates TSC is not invariant, or the frequency information was not
+ * accessible and the instructions should not be used.
+ */
+uint32
+x86_tsc_frequency_khz(void)
+{
+	unsigned int exx[4] = {0, 0, 0, 0};
+
+	if (!x86_feature_available(PG_TSC_INVARIANT))
+		return 0;
+
+	if (x86_feature_available(PG_HYPERVISOR))
+		return x86_hypervisor_tsc_frequency_khz();
+
+	/*
+	 * On modern Intel CPUs, the TSC is implemented by invariant timekeeping
+	 * hardware, also called "Always Running Timer", or ART. The ART stays
+	 * consistent even if the CPU changes frequency due to changing power
+	 * levels.
+	 *
+	 * As documented in "Determining the Processor Base Frequency" in the
+	 * "Intel® 64 and IA-32 Architectures Software Developer’s Manual",
+	 * February 2026 Edition, we can get the TSC frequency as follows:
+	 *
+	 * Nominal TSC frequency = ( CPUID.15H:ECX[31:0] * CPUID.15H:EBX[31:0] ) /
+	 * CPUID.15H:EAX[31:0]
+	 *
+	 * With CPUID.15H:ECX representing the nominal core crystal clock
+	 * frequency, and EAX/EBX representing values used to translate the TSC
+	 * value to that frequency, see "Chapter 20.17 "Time-Stamp Counter" of
+	 * that manual.
+	 *
+	 * Older Intel CPUs, and other vendors do not set CPUID.15H:ECX, and as
+	 * such we fall back to alternate approaches.
+	 */
+	pg_cpuid(0x15, exx);
+	if (exx[2] > 0)
+	{
+		/*
+		 * EBX not being set indicates invariant TSC is not available. Require
+		 * EAX being non-zero too, to avoid a theoretical divide by zero.
+		 */
+		if (exx[0] == 0 || exx[1] == 0)
+			return 0;
+
+		return exx[2] / 1000 * exx[1] / exx[0];
+	}
+
+	/*
+	 * When CPUID.15H is not available/incomplete, but we have verified an
+	 * invariant TSC is used, we can instead get the processor base frequency
+	 * in MHz from CPUID.16H:EAX, the "Processor Frequency Information Leaf".
+	 */
+	pg_cpuid(0x16, exx);
+	if (exx[0] > 0)
+		return exx[0] * 1000;
+
+	return 0;
+}
+
+/*
+ * Support for reading TSC frequency for hypervisors passing it to a guest VM.
+ *
+ * There are two mechanisms to access the TSC frequency that are known to work:
+ * 1) The 0x40000010 leaf (EAX) for VMWare and KVM
+ * 2) The HV_X64_MSR_TSC_FREQUENCY MSR for HyperV
+ *
+ * The hypervisor is determined using the 0x40000000 Hypervisor information
+ * leaf, which requires use of __cpuidex to set ECX to 0 to access it.
+ *
+ * The similar __get_cpuid_count function does not work as expected since it
+ * contains a check for __get_cpuid_max, which has been observed to be lower
+ * than the special Hypervisor leaf, despite it being available.
+ */
+#define CPUID_HYPERVISOR_VMWARE(words) (words[1] == 0x61774d56 && words[2] == 0x4d566572 && words[3] == 0x65726177) /* VMwareVMware */
+#define CPUID_HYPERVISOR_KVM(words) (words[1] == 0x4b4d564b && words[2] == 0x564b4d56 && words[3] == 0x0000004d)	/* KVMKVMKVM */
+#define CPUID_HYPERVISOR_HYPERV(words) (words[1] == 0x7263694D && words[2] == 0x666F736F && words[3] == 0x76482074) /* Microsoft Hv */
+static uint32
+x86_hypervisor_tsc_frequency_khz(void)
+{
+	int			exx[4] = {0, 0, 0, 0};
+
+#if defined(HAVE__CPUIDEX)
+	__cpuidex(exx, 0x40000000, 0);
+
+	if (exx[0] >= 0x40000010 && (CPUID_HYPERVISOR_VMWARE(exx) || CPUID_HYPERVISOR_KVM(exx)))
+	{
+		__cpuidex(exx, 0x40000010, 0);
+		if (exx[0] > 0)
+			return exx[0];
+	}
+	else if (CPUID_HYPERVISOR_HYPERV(exx) && exx[0] >= 0x40000003)
+	{
+		__cpuidex(exx, 0x40000003, 0);
+
+		/*
+		 * Check the VM partition has permission (EAX:11), and the frequency
+		 * MSR is implemented (EDX:8)
+		 *
+		 * See "Hypervisor Feature Identification" (CPUID leaf 0x40000003) and
+		 * "HV_PARTITION_PRIVILEGE_MASK" in the Microsoft Hypervisor Top-Level
+		 * Functional Specification.
+		 */
+		if ((exx[0] & (1 << 11)) && (exx[3] & (1 << 8)))
+		{
+			uint32		freq = hyperv_read_tsc_msr();
+
+			if (freq > 0)
+				return freq;
+		}
+	}
+#endif							/* HAVE__CPUIDEX */
+
+	return 0;
+}
+
+/*
+ * Hyper-V provides TSC frequency through a synthetic MSR.
+ *
+ * We are not permitted to read the MSR directly in user mode, so we have to
+ * rely on the operating system to make it available.
+ *
+ * On Linux this can be accessed through the /dev/cpu/0/msr device, which
+ * requires the "msr" kernel module to be loaded and read permission on the
+ * device file to be granted. Other systems are currently not supported.
+ */
+static uint32
+hyperv_read_tsc_msr(void)
+{
+#ifdef __linux__
+	int			fd;
+	uint64		value = 0;
+
+	fd = open("/dev/cpu/0/msr", O_RDONLY);
+	if (fd < 0)
+		return 0;
+
+	if (pread(fd, &value, sizeof(value), 0x40000022) ==
+		sizeof(value) && value > 0)
+	{
+		close(fd);
+		return (uint32) (value / 1000); /* Hz to kHz */
+	}
+
+	close(fd);
+#endif							/* __linux__ */
+
+	return 0;
+}
+
 
 #endif							/* defined(USE_SSE2) || defined(__i386__) */
