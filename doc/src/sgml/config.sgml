@@ -2585,6 +2585,10 @@ include_dir 'conf.d'
           utilize an emulated TSC. The TSC clock source is currently not supported on
           other architectures.
         </para>
+        <para>
+          To help decide which clock source to use you can run the <application>pg_test_timing</application>
+          utility to check TSC availability, and perform timing measurements.
+        </para>
       </listitem>
      </varlistentry>
      </variablelist>
