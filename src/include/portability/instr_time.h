@@ -4,9 +4,10 @@
  *	  portable high-precision interval timing
  *
  * This file provides an abstraction layer to hide portability issues in
- * interval timing.  On Unix we use clock_gettime(), and on Windows we use
- * QueryPerformanceCounter().  These macros also give some breathing room to
- * use other high-precision-timing APIs.
+ * interval timing. On x86 we use the RDTSC/RDTSCP instruction directly in
+ * certain cases, or alternatively clock_gettime() on Unix-like systems and
+ * QueryPerformanceCounter() on Windows. These macros also give some breathing
+ * room to use other high-precision-timing APIs.
  *
  * The basic data type is instr_time, which all callers should treat as an
  * opaque typedef.  instr_time can store either an absolute time (of
@@ -17,10 +18,11 @@
  *
  * INSTR_TIME_SET_ZERO(t)			set t to zero (memset is acceptable too)
  *
- * INSTR_TIME_SET_CURRENT(t)		set t to current time
+ * INSTR_TIME_SET_CURRENT_FAST(t)	set t to current time without waiting
+ * 									for instructions in out-of-order window
  *
- * INSTR_TIME_SET_CURRENT_LAZY(t)	set t to current time if t is zero,
- *									evaluates to whether t changed
+ * INSTR_TIME_SET_CURRENT(t)		set t to current time while waiting for
+ * 									instructions in OOO to retire
  *
  * INSTR_TIME_ADD(x, y)				x += y
  *
@@ -93,12 +95,53 @@ typedef struct instr_time
 extern PGDLLIMPORT uint64 ticks_per_ns_scaled;
 extern PGDLLIMPORT uint64 max_ticks_no_overflow;
 
+#if defined(__x86_64__)
+#include <x86intrin.h>
+
+/* Whether to actually use RDTSC/RDTSCP based on availability and GUC settings. */
+extern PGDLLIMPORT bool use_tsc;
+#endif
+
+typedef enum
+{
+	TIMING_CLOCK_SOURCE_AUTO,
+	TIMING_CLOCK_SOURCE_SYSTEM,
+	TIMING_CLOCK_SOURCE_TSC
+}			TimingClockSourceType;
+
+extern int	timing_clock_source;
+
+/*
+ * Returns the current timing clock source effectively in use, resolving
+ * TIMING_CLOCK_SOURCE_AUTO to either TIMING_CLOCK_SOURCE_SYSTEM or
+ * TIMING_CLOCK_SOURCE_TSC.
+ */
+static inline TimingClockSourceType pg_current_timing_clock_source(void)
+{
+#if defined(__x86_64__)
+	return use_tsc ? TIMING_CLOCK_SOURCE_TSC : TIMING_CLOCK_SOURCE_SYSTEM;
+#else
+	return TIMING_CLOCK_SOURCE_SYSTEM;
+#endif
+}
+
 /*
  * Initialize timing infrastructure
  *
- * This must be called at least once before using INSTR_TIME_SET_CURRENT* macros.
+ * This must be called at least once by frontend programs before using
+ * INSTR_TIME_SET_CURRENT* macros. Backend programs automatically initialize
+ * this through the GUC check hook.
  */
 extern void pg_initialize_timing(void);
+
+/*
+ * Sets the time source to be used. Mainly intended for frontend programs,
+ * the backend should set it via the timing_clock_source GUC instead.
+ *
+ * Returns false if the clock source could not be set, for example when TSC
+ * is not available despite being explicitly set.
+ */
+extern bool pg_set_timing_clock_source(TimingClockSourceType source);
 
 #ifndef WIN32
 
@@ -117,22 +160,25 @@ extern void pg_initialize_timing(void);
  * than CLOCK_MONOTONIC.  In particular, as of macOS 10.12, Apple provides
  * CLOCK_MONOTONIC_RAW which is both faster to read and higher resolution than
  * their version of CLOCK_MONOTONIC.
+ *
+ * Note this does not get used in case the TSC clock source logic is used,
+ * which directly calls architecture specific timing instructions (e.g. RDTSC).
  */
 #if defined(__darwin__) && defined(CLOCK_MONOTONIC_RAW)
-#define PG_INSTR_CLOCK	CLOCK_MONOTONIC_RAW
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC_RAW
 #elif defined(CLOCK_MONOTONIC)
-#define PG_INSTR_CLOCK	CLOCK_MONOTONIC
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC
 #else
-#define PG_INSTR_CLOCK	CLOCK_REALTIME
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_REALTIME
 #endif
 
 static inline instr_time
-pg_get_ticks(void)
+pg_get_ticks_system(void)
 {
 	instr_time	now;
 	struct timespec tmp;
 
-	clock_gettime(PG_INSTR_CLOCK, &tmp);
+	clock_gettime(PG_INSTR_SYSTEM_CLOCK, &tmp);
 	now.ticks = tmp.tv_sec * NS_PER_S + tmp.tv_nsec;
 
 	return now;
@@ -143,7 +189,7 @@ pg_get_ticks(void)
 /* On Windows, use QueryPerformanceCounter() for system clock source */
 
 static inline instr_time
-pg_get_ticks(void)
+pg_get_ticks_system(void)
 {
 	instr_time	now;
 	LARGE_INTEGER tmp;
@@ -199,6 +245,39 @@ pg_ticks_to_ns(int64 ticks)
 #endif
 }
 
+static inline instr_time
+pg_get_ticks_fast(void)
+{
+#if defined(__x86_64__)
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+
+		now.ticks = __rdtsc();
+		return now;
+	}
+#endif
+
+	return pg_get_ticks_system();
+}
+
+static inline instr_time
+pg_get_ticks(void)
+{
+#if defined(__x86_64__)
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+		uint32		unused;
+
+		now.ticks = __rdtscp(&unused);
+		return now;
+	}
+#endif
+
+	return pg_get_ticks_system();
+}
+
 /*
  * Common macros
  */
@@ -207,8 +286,8 @@ pg_ticks_to_ns(int64 ticks)
 
 #define INSTR_TIME_SET_ZERO(t)	((t).ticks = 0)
 
-#define INSTR_TIME_SET_CURRENT_LAZY(t) \
-	(INSTR_TIME_IS_ZERO(t) ? INSTR_TIME_SET_CURRENT(t), true : false)
+#define INSTR_TIME_SET_CURRENT_FAST(t) \
+	((t) = pg_get_ticks_fast())
 
 #define INSTR_TIME_SET_CURRENT(t) \
 	((t) = pg_get_ticks())
