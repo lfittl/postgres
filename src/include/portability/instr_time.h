@@ -28,6 +28,8 @@
  *
  * INSTR_TIME_SUBTRACT(x, y)		x -= y
  *
+ * INSTR_TIME_DIFF_NANOSEC(x, y)	x - y (in nanoseconds)
+ *
  * INSTR_TIME_ACCUM_DIFF(x, y, z)	x += (y - z)
  *
  * INSTR_TIME_GET_DOUBLE(t)			convert t to double (in seconds)
@@ -164,10 +166,13 @@ extern bool pg_set_timing_clock_source(TimingClockSourceType source);
  */
 #if defined(__darwin__) && defined(CLOCK_MONOTONIC_RAW)
 #define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC_RAW
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC_RAW)"
 #elif defined(CLOCK_MONOTONIC)
 #define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC)"
 #else
 #define PG_INSTR_SYSTEM_CLOCK	CLOCK_REALTIME
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_REALTIME)"
 #endif
 
 static inline instr_time
@@ -186,6 +191,7 @@ pg_get_ticks_system(void)
 
 /* On Windows, use QueryPerformanceCounter() for system clock source */
 
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"QueryPerformanceCounter"
 static inline instr_time
 pg_get_ticks_system(void)
 {
@@ -288,6 +294,9 @@ pg_get_ticks(void)
 
 #define INSTR_TIME_SUBTRACT(x,y) \
 	((x).ticks -= (y).ticks)
+
+#define INSTR_TIME_DIFF_NANOSEC(x,y) \
+	(pg_ticks_to_ns((x).ticks - (y).ticks))
 
 #define INSTR_TIME_ACCUM_DIFF(x,y,z) \
 	((x).ticks += (y).ticks - (z).ticks)
