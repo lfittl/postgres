@@ -7334,6 +7334,9 @@ main(int argc, char **argv)
 		initRandomState(&state[i].cs_func_rs);
 	}
 
+	/* initialize timing infrastructure (required for INSTR_* calls) */
+	pg_initialize_timing();
+
 	/* opening connection... */
 	con = doConnect();
 	if (con == NULL)

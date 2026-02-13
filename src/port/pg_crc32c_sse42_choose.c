@@ -20,11 +20,11 @@
 
 #include "c.h"
 
-#if defined(HAVE__GET_CPUID) || defined(HAVE__GET_CPUID_COUNT)
+#if defined(HAVE__GET_CPUID) || defined(HAVE__GET_CPUID_COUNT) || (defined(HAVE__CPUIDEX) && !defined(_MSC_VER))
 #include <cpuid.h>
 #endif
 
-#if defined(HAVE__CPUID) || defined(HAVE__CPUIDEX)
+#if defined(HAVE__CPUID) || (defined(HAVE__CPUIDEX) && defined(_MSC_VER))
 #include <intrin.h>
 #endif
 
