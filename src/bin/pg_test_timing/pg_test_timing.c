@@ -30,7 +30,7 @@ static long long int largest_diff_count;
 
 
 static void handle_args(int argc, char *argv[]);
-static uint64 test_timing(unsigned int duration);
+static uint64 test_timing(unsigned int duration, TimingClockSourceType source, bool fast_timing);
 static void output(uint64 loop_count);
 
 int
@@ -43,9 +43,49 @@ main(int argc, char *argv[])
 
 	handle_args(argc, argv);
 
-	loop_count = test_timing(test_duration);
+	/* initialize timing infrastructure (required for INSTR_* calls) */
+	pg_initialize_timing();
 
+	/*
+	 * First, test default (non-fast) timing code. A clock source for that is
+	 * always available. Hence, we can unconditionally output the result.
+	 */
+	loop_count = test_timing(test_duration, TIMING_CLOCK_SOURCE_SYSTEM, false);
 	output(loop_count);
+
+#if defined(__x86_64__)
+
+	/*
+	 * If on a supported architecture, test the RDTSC clock source. This clock
+	 * source is not always available. In that case the loop count will be 0
+	 * and we don't print.
+	 *
+	 * We first emit RDTSCP timings, which is slower, and gets used for higher
+	 * precision measurements when the TSC clock source is enabled. We emit
+	 * RDTSC second, which is used for faster timing measurements with lower
+	 * precision.
+	 */
+	printf("\n");
+	loop_count = test_timing(test_duration, TIMING_CLOCK_SOURCE_TSC, false);
+	if (loop_count > 0)
+	{
+		output(loop_count);
+		printf("\n");
+
+		/* Now, emit fast timing measurements */
+		loop_count = test_timing(test_duration, TIMING_CLOCK_SOURCE_TSC, true);
+		output(loop_count);
+		printf("\n");
+
+		pg_set_timing_clock_source(TIMING_CLOCK_SOURCE_AUTO);
+		if (pg_current_timing_clock_source() == TIMING_CLOCK_SOURCE_TSC)
+			printf(_("TSC clock source will be used by default, unless timing_clock_source is set to 'system'.\n"));
+		else
+			printf(_("TSC clock source will not be used by default, unless timing_clock_source is set to 'tsc'.\n"));
+	}
+	else
+		printf(_("TSC clock source is not usable. Likely unable to determine TSC frequency. are you running in an unsupported virtualized environment?.\n"));
+#endif
 
 	return 0;
 }
@@ -143,23 +183,41 @@ handle_args(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf(ngettext("Testing timing overhead for %u second.\n",
-					"Testing timing overhead for %u seconds.\n",
+	printf(ngettext("Testing timing overhead for %u second.\n\n",
+					"Testing timing overhead for %u seconds.\n\n",
 					test_duration),
 		   test_duration);
 }
 
 static uint64
-test_timing(unsigned int duration)
+test_timing(unsigned int duration, TimingClockSourceType source, bool fast_timing)
 {
 	uint64		total_time;
 	int64		time_elapsed = 0;
 	uint64		loop_count = 0;
-	uint64		prev,
-				cur;
 	instr_time	start_time,
 				end_time,
-				temp;
+				prev,
+				cur;
+	char	   *time_source = NULL;
+
+	if (!pg_set_timing_clock_source(source))
+		return 0;
+
+#if defined(__x86_64__)
+	if (pg_current_timing_clock_source() == TIMING_CLOCK_SOURCE_TSC)
+		time_source = fast_timing ? "RDTSC" : "RDTSCP";
+	else
+		time_source = PG_INSTR_SYSTEM_CLOCK_NAME;
+#else
+	time_source = PG_INSTR_SYSTEM_CLOCK_NAME;
+#endif
+	if (fast_timing)
+		printf(_("Fast clock source: %s\n"), time_source);
+	else if (source == TIMING_CLOCK_SOURCE_SYSTEM)
+		printf(_("System clock source: %s\n"), time_source);
+	else
+		printf(_("Clock source: %s\n"), time_source);
 
 	/*
 	 * Pre-zero the statistics data structures.  They're already zero by
@@ -173,8 +231,11 @@ test_timing(unsigned int duration)
 
 	total_time = duration > 0 ? duration * INT64CONST(1000000000) : 0;
 
-	INSTR_TIME_SET_CURRENT(start_time);
-	cur = INSTR_TIME_GET_NANOSEC(start_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(start_time);
+	else
+		INSTR_TIME_SET_CURRENT(start_time);
+	cur = start_time;
 
 	while (time_elapsed < total_time)
 	{
@@ -182,9 +243,11 @@ test_timing(unsigned int duration)
 					bits;
 
 		prev = cur;
-		INSTR_TIME_SET_CURRENT(temp);
-		cur = INSTR_TIME_GET_NANOSEC(temp);
-		diff = cur - prev;
+		if (fast_timing)
+			INSTR_TIME_SET_CURRENT_FAST(cur);
+		else
+			INSTR_TIME_SET_CURRENT(cur);
+		diff = INSTR_TIME_DIFF_NANOSEC(cur, prev);
 
 		/* Did time go backwards? */
 		if (unlikely(diff < 0))
@@ -217,11 +280,13 @@ test_timing(unsigned int duration)
 			largest_diff_count++;
 
 		loop_count++;
-		INSTR_TIME_SUBTRACT(temp, start_time);
-		time_elapsed = INSTR_TIME_GET_NANOSEC(temp);
+		time_elapsed = INSTR_TIME_DIFF_NANOSEC(cur, start_time);
 	}
 
-	INSTR_TIME_SET_CURRENT(end_time);
+	if (fast_timing)
+		INSTR_TIME_SET_CURRENT_FAST(end_time);
+	else
+		INSTR_TIME_SET_CURRENT(end_time);
 
 	INSTR_TIME_SUBTRACT(end_time, start_time);
 
