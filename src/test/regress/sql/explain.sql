@@ -188,3 +188,197 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 -- Test tuplestore storage usage in Window aggregate (memory and disk case, final result is disk)
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
+
+-- EXPLAIN (ANALYZE, BUFFERS) should report buffer usage from PL/pgSQL
+-- EXCEPTION blocks, even after subtransaction rollback.
+CREATE TEMP TABLE explain_exc_tab (a int, b char(20));
+INSERT INTO explain_exc_tab VALUES (0, 'zzz');
+
+CREATE FUNCTION explain_exc_func() RETURNS void AS $$
+DECLARE
+    v int;
+BEGIN
+    WITH ins AS (INSERT INTO explain_exc_tab VALUES (1, 'aaa') RETURNING a)
+    SELECT a / 0 INTO v FROM ins;
+EXCEPTION WHEN division_by_zero THEN
+    NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION check_explain_exception_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    total_buffers int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT explain_exc_func()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    total_buffers :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+    RETURN total_buffers > 0;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT check_explain_exception_buffers() AS exception_buffers_visible;
+
+-- Also test with nested EXPLAIN ANALYZE (two levels of instrumentation)
+CREATE FUNCTION check_explain_exception_buffers_nested() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    total_buffers int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT check_explain_exception_buffers()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    total_buffers :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+    RETURN total_buffers > 0;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT check_explain_exception_buffers_nested() AS exception_buffers_nested_visible;
+
+DROP FUNCTION check_explain_exception_buffers_nested;
+DROP FUNCTION check_explain_exception_buffers;
+DROP FUNCTION explain_exc_func;
+DROP TABLE explain_exc_tab;
+
+-- Cursor instrumentation test.
+-- Verify that buffer usage is correctly tracked through cursor execution paths.
+-- Non-scrollable cursors exercise ExecShutdownNode after each ExecutorRun
+-- (EXEC_FLAG_BACKWARD is not set), while scrollable cursors only shut down
+-- nodes in ExecutorFinish. In both cases, buffer usage from the inner cursor
+-- scan should be correctly accumulated.
+
+CREATE TEMP TABLE cursor_buf_test AS SELECT * FROM tenk1;
+
+CREATE FUNCTION cursor_noscroll_scan() RETURNS bigint AS $$
+DECLARE
+    cur NO SCROLL CURSOR FOR SELECT * FROM cursor_buf_test;
+    rec RECORD;
+    cnt bigint := 0;
+BEGIN
+    OPEN cur;
+    LOOP
+        FETCH NEXT FROM cur INTO rec;
+        EXIT WHEN NOT FOUND;
+        cnt := cnt + 1;
+    END LOOP;
+    CLOSE cur;
+    RETURN cnt;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION cursor_scroll_scan() RETURNS bigint AS $$
+DECLARE
+    cur SCROLL CURSOR FOR SELECT * FROM cursor_buf_test;
+    rec RECORD;
+    cnt bigint := 0;
+BEGIN
+    OPEN cur;
+    LOOP
+        FETCH NEXT FROM cur INTO rec;
+        EXIT WHEN NOT FOUND;
+        cnt := cnt + 1;
+    END LOOP;
+    CLOSE cur;
+    RETURN cnt;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION check_cursor_explain_buffers() RETURNS TABLE(noscroll_ok boolean, scroll_ok boolean) AS $$
+DECLARE
+    plan_json json;
+    node json;
+    direct_buf int;
+    noscroll_buf int;
+    scroll_buf int;
+BEGIN
+    -- Direct scan: get leaf Seq Scan node buffers as baseline
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT * FROM cursor_buf_test' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    direct_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Non-scrollable cursor path: ExecShutdownNode runs after each ExecutorRun
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT cursor_noscroll_scan()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    noscroll_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Scrollable cursor path: ExecShutdownNode is skipped
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT cursor_scroll_scan()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    scroll_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Both cursor paths should report buffer counts about as high as
+    -- the direct scan (same data plus minor catalog overhead), and not
+    -- double-counted (< 2x the direct scan)
+    RETURN QUERY SELECT
+        (noscroll_buf >= direct_buf * 0.5 AND noscroll_buf < direct_buf * 2),
+        (scroll_buf >= direct_buf * 0.5 AND scroll_buf < direct_buf * 2);
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT * FROM check_cursor_explain_buffers();
+
+DROP FUNCTION check_cursor_explain_buffers;
+DROP FUNCTION cursor_noscroll_scan;
+DROP FUNCTION cursor_scroll_scan;
+DROP TABLE cursor_buf_test;
+
+-- Parallel query buffer double-counting test.
+--
+-- Compares serial Seq Scan buffers vs parallel Seq Scan buffers.
+-- They scan the same table so the buffer count should be similar.
+-- Double-counting would make the parallel count ~2x larger.
+CREATE FUNCTION check_parallel_explain_buffers() RETURNS TABLE(ratio numeric) AS $$
+DECLARE
+    plan_json json;
+    serial_buffers int;
+    parallel_buffers int;
+    node json;
+BEGIN
+    -- Serial --
+    SET LOCAL max_parallel_workers_per_gather = 0;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(*) FROM tenk1' INTO plan_json;
+    node := plan_json->0->'Plan';
+    serial_buffers :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    -- Parallel --
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(*) FROM tenk1' INTO plan_json;
+    node := plan_json->0->'Plan';
+    parallel_buffers :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    RETURN QUERY SELECT round(parallel_buffers::numeric / GREATEST(serial_buffers, 1));
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT * FROM check_parallel_explain_buffers();
+
+DROP FUNCTION check_parallel_explain_buffers;
