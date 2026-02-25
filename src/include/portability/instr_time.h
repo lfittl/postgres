@@ -17,8 +17,9 @@
  *
  * INSTR_TIME_SET_ZERO(t)			set t to zero (memset is acceptable too)
  *
- * INSTR_TIME_SET_CURRENT(t)		set t to current time
+ * INSTR_TIME_SET_NANOSEC(t, x)		set t to the specified value (in nanosecs)
  *
+ * INSTR_TIME_SET_CURRENT(t)		set t to current time
  *
  * INSTR_TIME_ADD(x, y)				x += y
  *
@@ -170,6 +171,7 @@ GetTimerFrequency(void)
 
 #define INSTR_TIME_SET_ZERO(t)	((t).ticks = 0)
 
+#define INSTR_TIME_SET_NANOSEC(t, n)	((t).ticks = n)
 
 #define INSTR_TIME_ADD(x,y) \
 	((x).ticks += (y).ticks)
