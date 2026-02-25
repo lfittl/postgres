@@ -2134,7 +2134,8 @@ elif cc.links('''
 endif
 
 
-# Check for __get_cpuid_count() and __cpuidex() in a similar fashion.
+# Check for __get_cpuid_count() and __cpuidex() separately, since we sometimes
+# need __cpuidex() even if __get_cpuid_count() is available.
 if cc.links('''
     #include <cpuid.h>
     int main(int arg, char **argv)
@@ -2145,11 +2146,16 @@ if cc.links('''
     ''', name: '__get_cpuid_count',
     args: test_c_args)
   cdata.set('HAVE__GET_CPUID_COUNT', 1)
-elif cc.links('''
+endif
+if cc.links('''
+    #ifdef _MSC_VER
     #include <intrin.h>
+    #else
+    #include <cpuid.h>
+    #endif
     int main(int arg, char **argv)
     {
-        unsigned int exx[4] = {0, 0, 0, 0};
+        int exx[4] = {0, 0, 0, 0};
         __cpuidex(exx, 7, 0);
     }
     ''', name: '__cpuidex',
