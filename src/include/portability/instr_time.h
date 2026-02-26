@@ -264,8 +264,6 @@ pg_ticks_to_ns(int64 ticks)
 
 #ifdef _MSC_VER
 #include <intrin.h>
-#else
-#include <x86intrin.h>
 #endif							/* defined(_MSC_VER) */
 
 static inline instr_time
@@ -275,7 +273,12 @@ pg_get_ticks_fast(void)
 	{
 		instr_time	now;
 
+#ifdef _MSC_VER
 		now.ticks = __rdtsc();
+#else
+		/* Avoid complex includes on clang/GCC that raise compile times */
+		now.ticks = __builtin_ia32_rdtsc();
+#endif							/* defined(_MSC_VER) */
 		return now;
 	}
 
@@ -290,7 +293,11 @@ pg_get_ticks(void)
 		instr_time	now;
 		uint32		unused;
 
+#ifdef _MSC_VER
 		now.ticks = __rdtscp(&unused);
+#else
+		now.ticks = __builtin_ia32_rdtscp(&unused);
+#endif							/* defined(_MSC_VER) */
 		return now;
 	}
 
