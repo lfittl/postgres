@@ -4,9 +4,10 @@
  *	  portable high-precision interval timing
  *
  * This file provides an abstraction layer to hide portability issues in
- * interval timing.  On Unix we use clock_gettime(), and on Windows we use
- * QueryPerformanceCounter().  These macros also give some breathing room to
- * use other high-precision-timing APIs.
+ * interval timing. On x86 we use the RDTSC/RDTSCP instruction directly in
+ * certain cases, or alternatively clock_gettime() on Unix-like systems and
+ * QueryPerformanceCounter() on Windows. These macros also give some breathing
+ * room to use other high-precision-timing APIs.
  *
  * The basic data type is instr_time, which all callers should treat as an
  * opaque typedef.  instr_time can store either an absolute time (of
@@ -17,8 +18,13 @@
  *
  * INSTR_TIME_SET_ZERO(t)			set t to zero (memset is acceptable too)
  *
- * INSTR_TIME_SET_CURRENT(t)		set t to current time
+ * INSTR_TIME_SET_NANOSEC(t, x)		set t to the specified value (in nanosecs)
  *
+ * INSTR_TIME_SET_CURRENT_FAST(t)	set t to current time without waiting
+ * 									for instructions in out-of-order window
+ *
+ * INSTR_TIME_SET_CURRENT(t)		set t to current time while waiting for
+ * 									instructions in OOO to retire
  *
  * INSTR_TIME_ADD(x, y)				x += y
  *
@@ -78,11 +84,75 @@ typedef struct instr_time
 #define NS_PER_MS	INT64CONST(1000000)
 #define NS_PER_US	INT64CONST(1000)
 
+/*
+ * Make sure this is a power-of-two, so that the compiler can turn the
+ * multiplications and divisions into shifts.
+ */
+#define TICKS_TO_NS_PRECISION (1<<14)
+
+/*
+ * Variables used to translate ticks to nanoseconds, initialized by
+ * pg_initialize_timing.
+ */
+extern PGDLLIMPORT uint64 ticks_per_ns_scaled;
+extern PGDLLIMPORT uint64 max_ticks_no_overflow;
+
+typedef enum
+{
+	TIMING_CLOCK_SOURCE_AUTO,
+	TIMING_CLOCK_SOURCE_SYSTEM,
+	TIMING_CLOCK_SOURCE_TSC
+}			TimingClockSourceType;
+
+extern int	timing_clock_source;
+
+/*
+ * Initialize timing infrastructure
+ *
+ * This must be called at least once by frontend programs before using
+ * INSTR_TIME_SET_CURRENT* macros. Backend programs automatically initialize
+ * this through the GUC check hook.
+ */
+extern void pg_initialize_timing(void);
+
+/*
+ * Sets the time source to be used. Mainly intended for frontend programs,
+ * the backend should set it via the timing_clock_source GUC instead.
+ *
+ * Returns false if the clock source could not be set, for example when TSC
+ * is not available despite being explicitly set.
+ */
+extern bool pg_set_timing_clock_source(TimingClockSourceType source);
+
+#if defined(__x86_64__) || defined(_M_X64)
+#define PG_INSTR_TSC_CLOCK 1
+#define PG_INSTR_TSC_CLOCK_NAME_FAST  "RDTSC"
+#define PG_INSTR_TSC_CLOCK_NAME "RDTSCP"
+
+/* Whether to actually use TSC based on availability and GUC settings. */
+extern PGDLLIMPORT bool use_tsc;
+
+#else
+#define PG_INSTR_TSC_CLOCK 0
+#endif
+
+/*
+ * Returns the current timing clock source effectively in use, resolving
+ * TIMING_CLOCK_SOURCE_AUTO to either TIMING_CLOCK_SOURCE_SYSTEM or
+ * TIMING_CLOCK_SOURCE_TSC.
+ */
+static inline TimingClockSourceType pg_current_timing_clock_source(void)
+{
+#if PG_INSTR_TSC_CLOCK
+	return use_tsc ? TIMING_CLOCK_SOURCE_TSC : TIMING_CLOCK_SOURCE_SYSTEM;
+#else
+	return TIMING_CLOCK_SOURCE_SYSTEM;
+#endif
+}
 
 #ifndef WIN32
 
-
-/* Use clock_gettime() */
+/* On POSIX, use clock_gettime() for system clock source */
 
 #include <time.h>
 
@@ -97,43 +167,40 @@ typedef struct instr_time
  * than CLOCK_MONOTONIC.  In particular, as of macOS 10.12, Apple provides
  * CLOCK_MONOTONIC_RAW which is both faster to read and higher resolution than
  * their version of CLOCK_MONOTONIC.
+ *
+ * Note this does not get used in case the TSC clock source logic is used,
+ * which directly calls architecture specific timing instructions (e.g. RDTSC).
  */
 #if defined(__darwin__) && defined(CLOCK_MONOTONIC_RAW)
-#define PG_INSTR_CLOCK	CLOCK_MONOTONIC_RAW
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC_RAW
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC_RAW)"
 #elif defined(CLOCK_MONOTONIC)
-#define PG_INSTR_CLOCK	CLOCK_MONOTONIC
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_MONOTONIC
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_MONOTONIC)"
 #else
-#define PG_INSTR_CLOCK	CLOCK_REALTIME
+#define PG_INSTR_SYSTEM_CLOCK	CLOCK_REALTIME
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"clock_gettime (CLOCK_REALTIME)"
 #endif
 
-/* helper for INSTR_TIME_SET_CURRENT */
 static inline instr_time
-pg_clock_gettime_ns(void)
+pg_get_ticks_system(void)
 {
 	instr_time	now;
 	struct timespec tmp;
 
-	clock_gettime(PG_INSTR_CLOCK, &tmp);
+	clock_gettime(PG_INSTR_SYSTEM_CLOCK, &tmp);
 	now.ticks = tmp.tv_sec * NS_PER_S + tmp.tv_nsec;
 
 	return now;
 }
 
-#define INSTR_TIME_SET_CURRENT(t) \
-	((t) = pg_clock_gettime_ns())
-
-#define INSTR_TIME_GET_NANOSEC(t) \
-	((int64) (t).ticks)
-
-
 #else							/* WIN32 */
 
+/* On Windows, use QueryPerformanceCounter() for system clock source */
 
-/* Use QueryPerformanceCounter() */
-
-/* helper for INSTR_TIME_SET_CURRENT */
+#define PG_INSTR_SYSTEM_CLOCK_NAME	"QueryPerformanceCounter"
 static inline instr_time
-pg_query_performance_counter(void)
+pg_get_ticks_system(void)
 {
 	instr_time	now;
 	LARGE_INTEGER tmp;
@@ -144,23 +211,114 @@ pg_query_performance_counter(void)
 	return now;
 }
 
-static inline double
-GetTimerFrequency(void)
-{
-	LARGE_INTEGER f;
-
-	QueryPerformanceFrequency(&f);
-	return (double) f.QuadPart;
-}
-
-#define INSTR_TIME_SET_CURRENT(t) \
-	((t) = pg_query_performance_counter())
-
-#define INSTR_TIME_GET_NANOSEC(t) \
-	((int64) ((t).ticks * ((double) NS_PER_S / GetTimerFrequency())))
-
 #endif							/* WIN32 */
 
+static inline int64
+pg_ticks_to_ns(int64 ticks)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+	int64		ns = 0;
+
+	/*
+	 * Avoid doing work if we don't use scaled ticks, e.g. system clock on
+	 * Unix
+	 */
+	if (ticks_per_ns_scaled == 0)
+		return ticks;
+
+	/*
+	 * Would multiplication overflow? If so perform computation in two parts.
+	 * Check overflow without actually overflowing via: a * b > max <=> a >
+	 * max / b
+	 */
+	if (unlikely(ticks > (int64) max_ticks_no_overflow))
+	{
+		/*
+		 * Compute how often the maximum number of ticks fits completely into
+		 * the number of elapsed ticks and convert that number into
+		 * nanoseconds. Then multiply by the count to arrive at the final
+		 * value. In a 2nd step we adjust the number of elapsed ticks and
+		 * convert the remaining ticks.
+		 */
+		int64		count = ticks / max_ticks_no_overflow;
+		int64		max_ns = max_ticks_no_overflow * ticks_per_ns_scaled / TICKS_TO_NS_PRECISION;
+
+		ns = max_ns * count;
+
+		/*
+		 * Subtract the ticks that we now already accounted for, so that they
+		 * don't get counted twice.
+		 */
+		ticks -= count * max_ticks_no_overflow;
+		Assert(ticks >= 0);
+	}
+
+	ns += ticks * ticks_per_ns_scaled / TICKS_TO_NS_PRECISION;
+	return ns;
+#else
+	return ticks;
+#endif
+}
+
+#if PG_INSTR_TSC_CLOCK
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif							/* defined(_MSC_VER) */
+
+static inline instr_time
+pg_get_ticks_fast(void)
+{
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+
+#ifdef _MSC_VER
+		now.ticks = __rdtsc();
+#else
+		/* Avoid complex includes on clang/GCC that raise compile times */
+		now.ticks = __builtin_ia32_rdtsc();
+#endif							/* defined(_MSC_VER) */
+		return now;
+	}
+
+	return pg_get_ticks_system();
+}
+
+static inline instr_time
+pg_get_ticks(void)
+{
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+		uint32		unused;
+
+#ifdef _MSC_VER
+		now.ticks = __rdtscp(&unused);
+#else
+		now.ticks = __builtin_ia32_rdtscp(&unused);
+#endif							/* defined(_MSC_VER) */
+		return now;
+	}
+
+	return pg_get_ticks_system();
+}
+
+#else
+
+static inline instr_time
+pg_get_ticks_fast(void)
+{
+	return pg_get_ticks_system();
+}
+
+static inline instr_time
+pg_get_ticks(void)
+{
+	return pg_get_ticks_system();
+}
+
+#endif							/* PG_INSTR_TSC_CLOCK */
 
 /*
  * Common macros
@@ -170,6 +328,13 @@ GetTimerFrequency(void)
 
 #define INSTR_TIME_SET_ZERO(t)	((t).ticks = 0)
 
+#define INSTR_TIME_SET_NANOSEC(t, n)	((t).ticks = n)
+
+#define INSTR_TIME_SET_CURRENT_FAST(t) \
+	((t) = pg_get_ticks_fast())
+
+#define INSTR_TIME_SET_CURRENT(t) \
+	((t) = pg_get_ticks())
 
 #define INSTR_TIME_ADD(x,y) \
 	((x).ticks += (y).ticks)
@@ -182,6 +347,9 @@ GetTimerFrequency(void)
 
 #define INSTR_TIME_GT(x,y) \
 	((x).ticks > (y).ticks)
+
+#define INSTR_TIME_GET_NANOSEC(t) \
+	(pg_ticks_to_ns((t).ticks))
 
 #define INSTR_TIME_GET_DOUBLE(t) \
 	((double) INSTR_TIME_GET_NANOSEC(t) / NS_PER_S)

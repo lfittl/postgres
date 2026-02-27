@@ -14,16 +14,16 @@
 
 #ifdef HAVE_X86_64_POPCNTQ
 
-#if defined(HAVE__GET_CPUID) || defined(HAVE__GET_CPUID_COUNT)
+#if defined(HAVE__GET_CPUID) || defined(HAVE__GET_CPUID_COUNT) || defined(HAVE__CPUIDEX)
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
 #include <cpuid.h>
+#endif							/* defined(_MSC_VER) */
 #endif
 
 #ifdef USE_AVX512_POPCNT_WITH_RUNTIME_CHECK
 #include <immintrin.h>
-#endif
-
-#if defined(HAVE__CPUID) || defined(HAVE__CPUIDEX)
-#include <intrin.h>
 #endif
 
 #include "port/pg_bitutils.h"
