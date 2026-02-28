@@ -32,6 +32,10 @@
  </indexterm>
 
  <indexterm>
+  <primary>pg_buffercache_relation_stats</primary>
+ </indexterm>
+
+ <indexterm>
   <primary>pg_buffercache_evict</primary>
  </indexterm>
 
@@ -63,6 +67,7 @@
   <structname>pg_buffercache_numa</structname> views), the
   <function>pg_buffercache_summary()</function> function, the
   <function>pg_buffercache_usage_counts()</function> function, the
+  <function>pg_buffercache_relation_stats()</function> function, the
   <function>pg_buffercache_evict()</function> function, the
   <function>pg_buffercache_evict_relation()</function> function, the
   <function>pg_buffercache_evict_all()</function> function, the
@@ -100,6 +105,12 @@
   The <function>pg_buffercache_usage_counts()</function> function returns a set
   of records, each row describing the number of buffers with a given usage
   count.
+ </para>
+
+ <para>
+  The <function>pg_buffercache_relation_stats()</function> function returns a
+  set of rows summarizing buffer cache usage aggregated by relation and fork
+  number.
  </para>
 
  <para>
@@ -559,6 +570,125 @@
   <para>
    Like the <structname>pg_buffercache</structname> view,
    <function>pg_buffercache_usage_counts()</function> does not acquire buffer
+   manager locks. Therefore concurrent activity can lead to minor inaccuracies
+   in the result.
+  </para>
+ </sect2>
+
+ <sect2 id="pgbuffercache-relation-stats">
+  <title>The <function>pg_buffercache_relation_stats()</function> Function</title>
+
+  <para>
+   The definitions of the columns exposed by the function are shown in
+   <xref linkend="pgbuffercache_relation_stats-columns"/>.
+  </para>
+
+  <table id="pgbuffercache_relation_stats-columns">
+   <title><function>pg_buffercache_relation_stats()</function> Output Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relfilenode</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-class"><structname>pg_class</structname></link>.<structfield>relfilenode</structfield>)
+      </para>
+      <para>
+       Filenode number of the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reltablespace</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-tablespace"><structname>pg_tablespace</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       Tablespace OID of the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>reldatabase</structfield> <type>oid</type>
+       (references <link linkend="catalog-pg-database"><structname>pg_database</structname></link>.<structfield>oid</structfield>)
+      </para>
+      <para>
+       Database OID of the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relforknumber</structfield> <type>smallint</type>
+      </para>
+      <para>
+       Fork number within the relation;  see
+       <filename>common/relpath.h</filename>
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>buffers</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of buffers for the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>buffers_dirty</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of dirty buffers for the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>buffers_pinned</structfield> <type>int4</type>
+      </para>
+      <para>
+       Number of pinned buffers for the relation
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>usagecount_avg</structfield> <type>float8</type>
+      </para>
+      <para>
+       Average usage count of the relation's buffers
+      </para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   The <function>pg_buffercache_relation_stats()</function> function returns a
+   set of rows summarizing the state of all shared buffers, aggregated by
+   relation and fork number.  Similar and more detailed information is
+   provided by the <structname>pg_buffercache</structname> view, but
+   <function>pg_buffercache_relation_stats()</function> is significantly
+   cheaper.
+  </para>
+
+  <para>
+   Like the <structname>pg_buffercache</structname> view,
+   <function>pg_buffercache_relation_stats()</function> does not acquire buffer
    manager locks. Therefore concurrent activity can lead to minor inaccuracies
    in the result.
   </para>
