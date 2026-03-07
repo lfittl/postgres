@@ -441,6 +441,63 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 		WalUsageAdd(&dst->instr.walusage, &add->instr.walusage);
 }
 
+/*
+ * Allocate an additional Instrumentation for a node, e.g. for tracking table
+ * buffer usage separately from index buffer usage. Allocated in
+ * TopTransactionContext so it survives long enough for abort recovery.
+ */
+Instrumentation *
+InstrAllocAdditionalNodeStack(NodeInstrumentation *instr)
+{
+	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+	{
+		Instrumentation *extra;
+
+		extra = MemoryContextAllocZero(TopTransactionContext, sizeof(Instrumentation));
+		extra->need_bufusage = instr->instr.need_bufusage;
+		extra->need_walusage = instr->instr.need_walusage;
+		return extra;
+	}
+
+	return NULL;
+}
+
+void
+InstrStartNodeStack(NodeInstrumentation *instr, Instrumentation *stack)
+{
+	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+	{
+		/* Ensure the executor set up a parent node below the top level stack */
+		Assert(instr_stack.stack_size > 0);
+
+		InstrPushStack(stack);
+	}
+}
+
+void
+InstrStopNodeStack(NodeInstrumentation *instr, Instrumentation *stack)
+{
+	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+	{
+		/* Adding to parent is handled by InstrFinalizeAdditionalNodeStack */
+		InstrPopStack(stack);
+	}
+}
+
+/* Add additional node stacks to the parent and move into per-query memory context */
+Instrumentation *
+InstrFinalizeAdditionalNodeStack(Instrumentation *stack, NodeInstrumentation *instr)
+{
+	Instrumentation *dst = palloc(sizeof(Instrumentation));
+
+	memcpy(dst, stack, sizeof(Instrumentation));
+	pfree(stack);
+
+	InstrAccum(&instr->instr, dst);
+
+	return dst;
+}
+
 /* Trigger instrumentation handling */
 TriggerInstrumentation *
 InstrAllocTrigger(int n, int instrument_options)

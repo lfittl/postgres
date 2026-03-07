@@ -250,6 +250,11 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
+extern Instrumentation *InstrAllocAdditionalNodeStack(NodeInstrumentation *instr);
+extern void InstrStartNodeStack(NodeInstrumentation *dst, Instrumentation *stack);
+extern void InstrStopNodeStack(NodeInstrumentation *dst, Instrumentation *stack);
+extern Instrumentation *InstrFinalizeAdditionalNodeStack(Instrumentation *stack, NodeInstrumentation *instr);
+
 extern TriggerInstrumentation *InstrAllocTrigger(int n, int instrument_options);
 extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int firings);
