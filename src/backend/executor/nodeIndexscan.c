@@ -83,7 +83,9 @@ IndexNext(IndexScanState *node)
 	ExprContext *econtext;
 	ScanDirection direction;
 	IndexScanDesc scandesc;
+	ItemPointer tid;
 	TupleTableSlot *slot;
+	bool		found;
 
 	/*
 	 * extract necessary information from index scan node
@@ -128,8 +130,22 @@ IndexNext(IndexScanState *node)
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
+		if (node->iss_InstrumentTable)
+			InstrPushStack(&node->iss_InstrumentTable->instr);
+
+		found = index_fetch_heap(scandesc, slot);
+
+		if (node->iss_InstrumentTable)
+			InstrPopStack(&node->iss_InstrumentTable->instr);
+
+		if (unlikely(!found))
+			continue;
+
+		if (scandesc->xs_heap_continue)
+			elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
+
 		CHECK_FOR_INTERRUPTS();
 
 		/*
@@ -812,6 +828,11 @@ ExecEndIndexScan(IndexScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->iss_Instrument.nsearches;
+		if (node->iss_InstrumentTable)
+		{
+			BufferUsageAdd(&winstrument->worker_table_bufusage, &node->iss_InstrumentTable->instr.bufusage);
+			WalUsageAdd(&winstrument->worker_table_walusage, &node->iss_InstrumentTable->instr.walusage);
+		}
 	}
 
 	/*
@@ -1819,4 +1840,14 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	if (node->iss_InstrumentTable)
+		for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
+		{
+			BufferUsageAdd(&node->iss_InstrumentTable->instr.bufusage,
+						   &node->iss_SharedInfo->winstrument[i].worker_table_bufusage);
+			WalUsageAdd(&node->iss_InstrumentTable->instr.walusage,
+						&node->iss_SharedInfo->winstrument[i].worker_table_walusage);
+		}
 }
