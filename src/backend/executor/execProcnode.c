@@ -418,6 +418,29 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 		result->instrument = InstrAllocNode(estate->es_instrument,
 											result->async_capable);
 
+	/*
+	 * IndexScan / IndexOnlyScan track table and index access separately.
+	 *
+	 * We intentionally don't collect timing for them (even if enabled), since
+	 * we don't need it, and executor nodes call InstrPushStack /
+	 * InstrPopStack (instead of the full InstrNode*) to reduce overhead.
+	 */
+	if (estate->es_instrument && (estate->es_instrument->instrument_options & INSTRUMENT_BUFFERS) != 0)
+	{
+		if (IsA(result, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, result);
+
+			InstrInitOptions(&iss->iss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+		}
+		else if (IsA(result, IndexOnlyScanState))
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, result);
+
+			InstrInitOptions(&ioss->ioss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+		}
+	}
+
 	return result;
 }
 
@@ -837,7 +860,23 @@ ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
 		return false;
 
 	if (node->instrument)
+	{
 		InstrQueryRememberChild(parent, &node->instrument->instr);
+
+		/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			InstrQueryRememberChild(parent, &iss->iss_Instrument->table_instr);
+		}
+		else if (IsA(node, IndexOnlyScanState))
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+			InstrQueryRememberChild(parent, &ioss->ioss_Instrument->table_instr);
+		}
+	}
 
 	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
 }
@@ -879,6 +918,20 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 
 	if (!node->instrument)
 		return false;
+
+	/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr, &node->instrument->instr);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr, &node->instrument->instr);
+	}
 
 	InstrFinalizeChild(&node->instrument->instr, parent);
 
