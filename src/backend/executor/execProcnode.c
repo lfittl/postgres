@@ -837,7 +837,23 @@ ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
 		return false;
 
 	if (node->instrument)
+	{
 		InstrQueryRememberChild(parent, &node->instrument->instr);
+
+		/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			InstrQueryRememberChild(parent, &iss->iss_Instrument->table_instr);
+		}
+		else if (IsA(node, IndexOnlyScanState))
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+			InstrQueryRememberChild(parent, &ioss->ioss_Instrument->table_instr);
+		}
+	}
 
 	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
 }
@@ -879,6 +895,20 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 
 	if (!node->instrument)
 		return false;
+
+	/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr, &node->instrument->instr);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr, &node->instrument->instr);
+	}
 
 	InstrFinalizeChild(&node->instrument->instr, parent);
 
