@@ -436,6 +436,7 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
+		InstrAccumStack(&winstrument->table_instr, &node->ioss_Instrument->table_instr);
 	}
 
 	/*
@@ -610,7 +611,21 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of index-only scans if requested */
 	if (estate->es_instrument)
-		indexstate->ioss_Instrument = palloc0_object(IndexScanInstrumentation);
+	{
+		indexstate->ioss_Instrument = MemoryContextAllocZero(estate->es_instrument->instr_cxt, sizeof(IndexScanInstrumentation));
+
+		/*
+		 * Track table and index access separately. We intentionally don't
+		 * collect timing (even if enabled), since we don't need it, and
+		 * IndexOnlyNext calls InstrPushStack / InstrPopStack (instead of the
+		 * full InstrNode*) to reduce overhead.
+		 */
+		if ((estate->es_instrument->instrument_options & INSTRUMENT_BUFFERS) != 0)
+		{
+			InstrInitOptions(&indexstate->ioss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			InstrQueryRememberChild(estate->es_instrument, &indexstate->ioss_Instrument->table_instr);
+		}
+	}
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -899,4 +914,11 @@ ExecIndexOnlyScanRetrieveInstrumentation(IndexOnlyScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->ioss_SharedInfo = palloc(size);
 	memcpy(node->ioss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	for (int i = 0; i < node->ioss_SharedInfo->num_workers; i++)
+	{
+		InstrAccumStack(&node->ioss_Instrument->table_instr,
+						&node->ioss_SharedInfo->winstrument[i].table_instr);
+	}
 }
