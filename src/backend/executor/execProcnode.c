@@ -122,6 +122,8 @@
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecRememberNodeInstrumentation_walker(PlanState *node, void *context);
+static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -413,8 +415,18 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAlloc(1, estate->es_instrument,
-										result->async_capable);
+	{
+		result->instrument = InstrAllocNode(estate->es_instrument,
+											result->async_capable);
+
+		/* IndexScan tracks table access separately from index access. */
+		if (IsA(result, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, result);
+
+			iss->iss_InstrumentTableStack = InstrAllocAdditionalNodeStack(result->instrument);
+		}
+	}
 
 	return result;
 }
@@ -787,10 +799,10 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * at least once already.  We don't expect much CPU consumption during
 	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
 	 * down workers at this stage.  If so, their buffer usage will get
-	 * propagated into pgBufferUsage at this point, and we want to make sure
-	 * that it gets associated with the Gather node.  We skip this if the node
-	 * has never been executed, so as to avoid incorrectly making it appear
-	 * that it has.
+	 * propagated into the current instrumentation stack entry at this point,
+	 * and we want to make sure that it gets associated with the Gather node.
+	 * We skip this if the node has never been executed, so as to avoid
+	 * incorrectly making it appear that it has.
 	 */
 	if (node->instrument && node->instrument->running)
 		InstrStartNode(node->instrument);
@@ -824,6 +836,101 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	/* Stop the node if we started it above, reporting 0 tuples. */
 	if (node->instrument && node->instrument->running)
 		InstrStopNode(node->instrument, 0);
+
+	return false;
+}
+
+/*
+ * ExecRememberNodeInstrumentation
+ *
+ * Register all per-node instrumentation entries as unfinalized children of
+ * the executor's instrumentation. This is needed for abort recovery: if the
+ * executor aborts, we need to walk each per-node entry to recover buffer/WAL
+ * data from nodes that never got finalized, that someone might be interested
+ * in as an aggregate.
+ */
+void
+ExecRememberNodeInstrumentation(PlanState *node, Instrumentation *parent)
+{
+	(void) ExecRememberNodeInstrumentation_walker(node, parent);
+}
+
+static bool
+ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	Instrumentation *parent = (Instrumentation *) context;
+
+	Assert(parent != NULL);
+
+	if (node == NULL)
+		return false;
+
+	if (node->instrument &&
+		(node->instrument->instr.need_bufusage || node->instrument->instr.need_walusage))
+	{
+		InstrRememberNode(parent, &node->instrument->instr);
+
+		/* IndexScan has a separate entry to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			if (iss->iss_InstrumentTableStack)
+				InstrRememberNode(parent, iss->iss_InstrumentTableStack);
+		}
+	}
+
+	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
+}
+
+/*
+ * ExecFinalizeNodeInstrumentation
+ *
+ * Accumulate instrumentation stats from all execution nodes to their respective
+ * parents (or the original parent instrumentation).
+ *
+ * This must run after the cleanup done by ExecShutdownNode, and not rely on any
+ * resources cleaned up by it. We also expect shutdown actions to have occurred,
+ * e.g. parallel worker instrumentation to have been added to the leader.
+ */
+void
+ExecFinalizeNodeInstrumentation(PlanState *node)
+{
+	(void) ExecFinalizeNodeInstrumentation_walker(node, instr_stack.current);
+}
+
+static bool
+ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	Instrumentation *parent = (Instrumentation *) context;
+
+	Assert(parent != NULL);
+
+	if (node == NULL)
+		return false;
+
+	/*
+	 * Recurse into children first (bottom-up accumulation), passing our
+	 * instrumentation as the parent context.  This ensures children can
+	 * accumulate to us even if they were never executed by the leader (e.g.
+	 * nodes beneath Gather that only workers ran).
+	 */
+	planstate_tree_walker(node, ExecFinalizeNodeInstrumentation_walker,
+						  node->instrument ? &node->instrument->instr : parent);
+
+	if (!node->instrument)
+		return false;
+
+	/* IndexScan has a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_InstrumentTableStack)
+			iss->iss_InstrumentTableStack = InstrFinalizeAdditionalNodeStack(iss->iss_InstrumentTableStack, node->instrument);
+	}
+
+	node->instrument = InstrFinalizeNode(node->instrument, parent);
 
 	return false;
 }

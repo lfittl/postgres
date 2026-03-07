@@ -300,6 +300,8 @@ extern void ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function);
 extern Node *MultiExecProcNode(PlanState *node);
 extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
+extern void ExecRememberNodeInstrumentation(PlanState *node, Instrumentation *parent);
+extern void ExecFinalizeNodeInstrumentation(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
 

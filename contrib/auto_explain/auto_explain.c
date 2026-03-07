@@ -305,19 +305,9 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 	if (auto_explain_enabled())
 	{
-		/*
-		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
-		 * space is allocated in the per-query context so it will go away at
-		 * ExecutorEnd.
-		 */
+		/* Set up to track total elapsed time in ExecutorRun. */
 		if (queryDesc->totaltime == NULL)
-		{
-			MemoryContext oldcxt;
-
-			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
-			MemoryContextSwitchTo(oldcxt);
-		}
+			queryDesc->totaltime = InstrAlloc(INSTRUMENT_ALL);
 	}
 }
 
@@ -380,12 +370,6 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
 		 * discarded later during ExecutorEnd.
 		 */
 		oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-
-		/*
-		 * Make sure stats accumulation is done.  (Note: it's okay if several
-		 * levels of hook all do this.)
-		 */
-		InstrEndLoop(queryDesc->totaltime);
 
 		/* Log plan if duration is exceeded. */
 		msec = INSTR_TIME_GET_MILLISEC(queryDesc->totaltime->total);
