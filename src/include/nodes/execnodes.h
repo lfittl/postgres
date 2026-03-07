@@ -1184,8 +1184,10 @@ typedef struct PlanState
 	ExecProcNodeMtd ExecProcNodeReal;	/* actual function, if above is a
 										 * wrapper */
 
-	Instrumentation *instrument;	/* Optional runtime stats for this node */
-	WorkerInstrumentation *worker_instrument;	/* per-worker instrumentation */
+	NodeInstrumentation *instrument;	/* Optional runtime stats for this
+										 * node */
+	WorkerNodeInstrumentation *worker_instrument;	/* per-worker
+													 * instrumentation */
 
 	/* Per-worker JIT instrumentation */
 	struct SharedJitInstrumentation *worker_jit_instrument;
