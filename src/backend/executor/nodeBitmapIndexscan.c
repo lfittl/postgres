@@ -276,7 +276,7 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of bitmap index scans if requested */
 	if (estate->es_instrument)
-		indexstate->biss_Instrument = palloc0_object(IndexScanInstrumentation);
+		indexstate->biss_Instrument = MemoryContextAllocZero(estate->es_instrument->instr_cxt, sizeof(IndexScanInstrumentation));
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;

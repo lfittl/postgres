@@ -85,7 +85,10 @@ IndexNext(IndexScanState *node)
 	ExprContext *econtext;
 	ScanDirection direction;
 	IndexScanDesc scandesc;
+	ItemPointer tid;
 	TupleTableSlot *slot;
+	bool		found;
+	Instrumentation *table_instr = NULL;
 
 	/*
 	 * extract necessary information from index scan node
@@ -101,6 +104,9 @@ IndexNext(IndexScanState *node)
 	scandesc = node->iss_ScanDesc;
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
+
+	if (node->iss_Instrument && node->iss_Instrument->table_instr.need_stack)
+		table_instr = &node->iss_Instrument->table_instr;
 
 	if (scandesc == NULL)
 	{
@@ -130,8 +136,24 @@ IndexNext(IndexScanState *node)
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
+		if (table_instr)
+			InstrPushStack(table_instr);
+
+		for (;;)
+		{
+			found = index_fetch_heap(scandesc, slot);
+			if (found || !scandesc->xs_heap_continue)
+				break;
+		}
+
+		if (table_instr)
+			InstrPopStack(table_instr);
+
+		if (unlikely(!found))
+			continue;
+
 		CHECK_FOR_INTERRUPTS();
 
 		/*
@@ -179,6 +201,7 @@ IndexNextWithReorder(IndexScanState *node)
 	Datum	   *lastfetched_vals;
 	bool	   *lastfetched_nulls;
 	int			cmp;
+	Instrumentation *table_instr = NULL;
 
 	estate = node->ss.ps.state;
 
@@ -197,6 +220,9 @@ IndexNextWithReorder(IndexScanState *node)
 	scandesc = node->iss_ScanDesc;
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
+
+	if (node->iss_Instrument && node->iss_Instrument->table_instr.need_stack)
+		table_instr = &node->iss_Instrument->table_instr;
 
 	if (scandesc == NULL)
 	{
@@ -259,35 +285,66 @@ IndexNextWithReorder(IndexScanState *node)
 		}
 
 		/*
-		 * Fetch next tuple from the index.
+		 * Fetch next valid tuple from the index.
 		 */
-next_indextuple:
-		if (!index_getnext_slot(scandesc, ForwardScanDirection, slot))
+		for (;;)
 		{
+			ItemPointer tid;
+			bool		found;
+
+			/* Time to fetch the next TID from the index */
+			tid = index_getnext_tid(scandesc, ForwardScanDirection);
+
+			/* If we're out of index entries, we're done */
+			if (tid == NULL)
+			{
+				/*
+				 * No more tuples from the index.  But we still need to drain
+				 * any remaining tuples from the queue before we're done.
+				 */
+				node->iss_ReachedEnd = true;
+				break;
+			}
+
+			Assert(ItemPointerEquals(tid, &scandesc->xs_heaptid));
+
+			if (table_instr)
+				InstrPushStack(table_instr);
+
+			for (;;)
+			{
+				found = index_fetch_heap(scandesc, slot);
+				if (found || !scandesc->xs_heap_continue)
+					break;
+			}
+
+			if (table_instr)
+				InstrPopStack(table_instr);
+
 			/*
-			 * No more tuples from the index.  But we still need to drain any
-			 * remaining tuples from the queue before we're done.
+			 * If the index was lossy, we have to recheck the index quals and
+			 * ORDER BY expressions using the fetched tuple.
 			 */
-			node->iss_ReachedEnd = true;
-			continue;
+			if (found && scandesc->xs_recheck)
+			{
+				econtext->ecxt_scantuple = slot;
+				if (!ExecQualAndReset(node->indexqualorig, econtext))
+				{
+					/* Fails recheck, so drop it and loop back for another */
+					InstrCountFiltered2(node, 1);
+					/* allow this loop to be cancellable */
+					CHECK_FOR_INTERRUPTS();
+					continue;
+				}
+			}
+
+			if (found)
+				break;
 		}
 
-		/*
-		 * If the index was lossy, we have to recheck the index quals and
-		 * ORDER BY expressions using the fetched tuple.
-		 */
-		if (scandesc->xs_recheck)
-		{
-			econtext->ecxt_scantuple = slot;
-			if (!ExecQualAndReset(node->indexqualorig, econtext))
-			{
-				/* Fails recheck, so drop it and loop back for another */
-				InstrCountFiltered2(node, 1);
-				/* allow this loop to be cancellable */
-				CHECK_FOR_INTERRUPTS();
-				goto next_indextuple;
-			}
-		}
+		/* No more index entries, re-run to clear the reorder queue */
+		if (node->iss_ReachedEnd)
+			continue;
 
 		if (scandesc->xs_recheckorderby)
 		{
@@ -814,6 +871,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
+		InstrAccumStack(&winstrument->table_instr, &node->iss_Instrument->table_instr);
 	}
 
 	/*
@@ -976,7 +1034,7 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of index scans if requested */
 	if (estate->es_instrument)
-		indexstate->iss_Instrument = palloc0_object(IndexScanInstrumentation);
+		indexstate->iss_Instrument = MemoryContextAllocZero(estate->es_instrument->instr_cxt, sizeof(IndexScanInstrumentation));
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -1826,4 +1884,11 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
+	{
+		InstrAccumStack(&node->iss_Instrument->table_instr,
+						&node->iss_SharedInfo->winstrument[i].table_instr);
+	}
 }
