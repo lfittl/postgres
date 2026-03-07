@@ -835,7 +835,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 		{
 			PinLocalBuffer(bufHdr, true);
 
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 
 			return true;
 		}
@@ -856,7 +856,7 @@ ReadRecentBuffer(RelFileLocator rlocator, ForkNumber forkNum, BlockNumber blockN
 		{
 			if (BufferTagsEqual(&tag, &bufHdr->tag))
 			{
-				pgBufferUsage.shared_blks_hit++;
+				INSTR_BUFUSAGE_INCR(shared_blks_hit);
 				return true;
 			}
 			UnpinBuffer(bufHdr);
@@ -1257,14 +1257,14 @@ PinBufferForBlock(Relation rel,
 	{
 		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr);
 		if (*foundPtr)
-			pgBufferUsage.local_blks_hit++;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 	}
 	else
 	{
 		bufHdr = BufferAlloc(smgr, persistence, forkNum, blockNum,
 							 strategy, foundPtr, io_context);
 		if (*foundPtr)
-			pgBufferUsage.shared_blks_hit++;
+			INSTR_BUFUSAGE_INCR(shared_blks_hit);
 	}
 	if (rel)
 	{
@@ -1998,9 +1998,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 										  true);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_hit += 1;
+			INSTR_BUFUSAGE_INCR(local_blks_hit);
 		else
-			pgBufferUsage.shared_blks_hit += 1;
+			INSTR_BUFUSAGE_INCR(shared_blks_hit);
 
 		if (operation->rel)
 			pgstat_count_buffer_hit(operation->rel);
@@ -2068,9 +2068,9 @@ AsyncReadBuffers(ReadBuffersOperation *operation, int *nblocks_progress)
 								io_start, 1, io_buffers_len * BLCKSZ);
 
 		if (persistence == RELPERSISTENCE_TEMP)
-			pgBufferUsage.local_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(local_blks_read, io_buffers_len);
 		else
-			pgBufferUsage.shared_blks_read += io_buffers_len;
+			INSTR_BUFUSAGE_ADD(shared_blks_read, io_buffers_len);
 
 		/*
 		 * Track vacuum cost when issuing IO, not after waiting for it.
@@ -2959,7 +2959,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 		TerminateBufferIO(buf_hdr, false, BM_VALID, true, false);
 	}
 
-	pgBufferUsage.shared_blks_written += extend_by;
+	INSTR_BUFUSAGE_ADD(shared_blks_written, extend_by);
 
 	*extended_by = extend_by;
 
@@ -3105,7 +3105,7 @@ MarkBufferDirty(Buffer buffer)
 	 */
 	if (!(old_buf_state & BM_DIRTY))
 	{
-		pgBufferUsage.shared_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
@@ -4520,7 +4520,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	pgstat_count_io_op_time(IOOBJECT_RELATION, io_context,
 							IOOP_WRITE, io_start, 1, BLCKSZ);
 
-	pgBufferUsage.shared_blks_written++;
+	INSTR_BUFUSAGE_INCR(shared_blks_written);
 
 	/*
 	 * Mark the buffer as clean and end the BM_IO_IN_PROGRESS state.
@@ -5663,7 +5663,7 @@ MarkSharedBufferDirtyHint(Buffer buffer, BufferDesc *bufHdr, uint64 lockstate,
 			UnlockBufHdr(bufHdr);
 		}
 
-		pgBufferUsage.shared_blks_dirtied++;
+		INSTR_BUFUSAGE_INCR(shared_blks_dirtied);
 		if (VacuumCostActive)
 			VacuumCostBalance += VacuumCostPageDirty;
 	}
