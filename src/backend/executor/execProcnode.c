@@ -414,8 +414,23 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
+	{
 		result->instrument = InstrAllocNode(estate->es_instrument,
 											result->async_capable);
+
+		/* IndexScan tracks table access separately from index access. */
+		if (IsA(result, IndexScanState) && (estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			IndexScanState *iss = castNode(IndexScanState, result);
+
+			/*
+			 * We intentionally don't collect timing here (even if enabled),
+			 * since we don't need it, and IndexNext calls InstrPushStack /
+			 * InstrPopStack (instead of InstrNode*) to reduce overhead.
+			 */
+			iss->iss_InstrumentTable = InstrAllocNode(INSTRUMENT_BUFFERS, false);
+		}
+	}
 
 	return result;
 }
@@ -836,7 +851,18 @@ ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
 		return false;
 
 	if (node->instrument)
+	{
 		InstrQueryRememberNode(parent, node->instrument);
+
+		/* IndexScan has a separate entry to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			if (iss->iss_InstrumentTable)
+				InstrQueryRememberNode(parent, iss->iss_InstrumentTable);
+		}
+	}
 
 	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
 }
@@ -878,6 +904,15 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 
 	if (!node->instrument)
 		return false;
+
+	/* IndexScan has a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_InstrumentTable)
+			iss->iss_InstrumentTable = InstrFinalizeNode(iss->iss_InstrumentTable, &node->instrument->instr);
+	}
 
 	node->instrument = InstrFinalizeNode(node->instrument, parent);
 
