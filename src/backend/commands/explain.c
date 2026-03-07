@@ -144,7 +144,7 @@ static void show_instrumentation_count(const char *qlabel, int which,
 static void show_foreignscan_info(ForeignScanState *fsstate, ExplainState *es);
 static const char *explain_get_index_name(Oid indexId);
 static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
-static void show_buffer_usage(ExplainState *es, const BufferUsage *usage);
+static void show_buffer_usage(ExplainState *es, const BufferUsage *usage, const char *title);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
@@ -610,7 +610,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		}
 
 		if (bufusage)
-			show_buffer_usage(es, bufusage);
+			show_buffer_usage(es, bufusage, NULL);
 
 		if (mem_counters)
 			show_memory_counters(es, mem_counters);
@@ -1027,7 +1027,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		if (es->buffers && peek_buffer_usage(es, &metrics->instr.bufusage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->instr.bufusage);
+			show_buffer_usage(es, &metrics->instr.bufusage, NULL);
 			es->indent--;
 		}
 	}
@@ -1041,7 +1041,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->instr.bufusage);
+			show_buffer_usage(es, &metrics->instr.bufusage, NULL);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
@@ -1969,6 +1969,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			show_indexsearches_info(planstate, es);
+
+			if (es->buffers && planstate->instrument)
+				show_buffer_usage(es, &((IndexScanState *) planstate)->iss_InstrumentTable->instr.bufusage, "Table");
 			break;
 		case T_IndexOnlyScan:
 			show_scan_qual(((IndexOnlyScan *) plan)->indexqual,
@@ -1986,6 +1989,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				ExplainPropertyFloat("Heap Fetches", NULL,
 									 planstate->instrument->ntuples2, 0, es);
 			show_indexsearches_info(planstate, es);
+
+			if (es->buffers && planstate->instrument)
+				show_buffer_usage(es, &((IndexOnlyScanState *) planstate)->ioss_InstrumentTable->instr.bufusage, "Table");
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -2287,7 +2293,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 	/* Show buffer/WAL usage */
 	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->instr.bufusage);
+		show_buffer_usage(es, &planstate->instrument->instr.bufusage, NULL);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instr.walusage);
 
@@ -2306,7 +2312,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 
 			ExplainOpenWorker(n, es);
 			if (es->buffers)
-				show_buffer_usage(es, &instrument->instr.bufusage);
+				show_buffer_usage(es, &instrument->instr.bufusage, NULL);
 			if (es->wal)
 				show_wal_usage(es, &instrument->instr.walusage);
 			ExplainCloseWorker(n, es);
@@ -4106,7 +4112,7 @@ peek_buffer_usage(ExplainState *es, const BufferUsage *usage)
  * Show buffer usage details.  This better be sync with peek_buffer_usage.
  */
 static void
-show_buffer_usage(ExplainState *es, const BufferUsage *usage)
+show_buffer_usage(ExplainState *es, const BufferUsage *usage, const char *title)
 {
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
@@ -4131,6 +4137,8 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 		if (has_shared || has_local || has_temp)
 		{
 			ExplainIndentText(es);
+			if (title)
+				appendStringInfo(es->str, "%s ", title);
 			appendStringInfoString(es->str, "Buffers:");
 
 			if (has_shared)
@@ -4186,6 +4194,8 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 		if (has_shared_timing || has_local_timing || has_temp_timing)
 		{
 			ExplainIndentText(es);
+			if (title)
+				appendStringInfo(es->str, "%s ", title);
 			appendStringInfoString(es->str, "I/O Timings:");
 
 			if (has_shared_timing)
@@ -4227,6 +4237,14 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 	}
 	else
 	{
+		char	   *buffers_title = NULL;
+
+		if (title)
+		{
+			buffers_title = psprintf("%s Buffers", title);
+			ExplainOpenGroup(buffers_title, buffers_title, true, es);
+		}
+
 		ExplainPropertyInteger("Shared Hit Blocks", NULL,
 							   usage->shared_blks_hit, es);
 		ExplainPropertyInteger("Shared Read Blocks", NULL,
@@ -4247,8 +4265,20 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 							   usage->temp_blks_read, es);
 		ExplainPropertyInteger("Temp Written Blocks", NULL,
 							   usage->temp_blks_written, es);
+
+		if (buffers_title)
+			ExplainCloseGroup(buffers_title, buffers_title, true, es);
+
 		if (track_io_timing)
 		{
+			char	   *timings_title = NULL;
+
+			if (title)
+			{
+				timings_title = psprintf("%s I/O Timings", title);
+				ExplainOpenGroup(timings_title, timings_title, true, es);
+			}
+
 			ExplainPropertyFloat("Shared I/O Read Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->shared_blk_read_time),
 								 3, es);
@@ -4267,6 +4297,9 @@ show_buffer_usage(ExplainState *es, const BufferUsage *usage)
 			ExplainPropertyFloat("Temp I/O Write Time", "ms",
 								 INSTR_TIME_GET_MILLISEC(usage->temp_blk_write_time),
 								 3, es);
+
+			if (timings_title)
+				ExplainCloseGroup(timings_title, timings_title, true, es);
 		}
 	}
 }

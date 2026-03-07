@@ -1739,6 +1739,13 @@ typedef struct IndexScanState
 	IndexScanInstrumentation iss_Instrument;
 	SharedIndexScanInstrumentation *iss_SharedInfo;
 
+	/*
+	 * Instrumentation utilized for tracking table access. This is separate
+	 * from iss_Instrument since it needs to be allocated in the right context
+	 * and IndexScanInstrumentation shouldn't contain pointers.
+	 */
+	NodeInstrumentation *iss_InstrumentTable;
+
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;
 	bool		iss_ReachedEnd;
@@ -1789,6 +1796,14 @@ typedef struct IndexOnlyScanState
 	struct IndexScanDescData *ioss_ScanDesc;
 	IndexScanInstrumentation ioss_Instrument;
 	SharedIndexScanInstrumentation *ioss_SharedInfo;
+
+	/*
+	 * Instrumentation utilized for tracking table access. This is separate
+	 * from ioss_Instrument since it needs to be allocated in the right
+	 * context and IndexScanInstrumentation shouldn't contain pointers.
+	 */
+	NodeInstrumentation *ioss_InstrumentTable;
+
 	TupleTableSlot *ioss_TableSlot;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
