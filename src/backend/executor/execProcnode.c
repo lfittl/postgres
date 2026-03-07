@@ -415,8 +415,31 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
+	{
 		result->instrument = InstrAllocNode(estate->es_instrument,
 											result->async_capable);
+
+		/*
+		 * IndexScan / IndexOnlyScan track table and index access separately.
+		 *
+		 * We intentionally don't collect timing for them (even if enabled),
+		 * since we don't need it, and the executor nodes call InstrPushStack
+		 * / InstrPopStack (instead of the full InstrNode*) to reduce
+		 * overhead.
+		 */
+		if (IsA(result, IndexScanState) && (estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			IndexScanState *iss = castNode(IndexScanState, result);
+
+			iss->iss_InstrumentTable = InstrAllocNode(INSTRUMENT_BUFFERS, false);
+		}
+		else if (IsA(result, IndexOnlyScanState) && (estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, result);
+
+			ioss->ioss_InstrumentTable = InstrAllocNode(INSTRUMENT_BUFFERS, false);
+		}
+	}
 
 	return result;
 }
@@ -837,7 +860,25 @@ ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
 		return false;
 
 	if (node->instrument)
+	{
 		InstrQueryRememberNode(parent, node->instrument);
+
+		/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			if (iss->iss_InstrumentTable)
+				InstrQueryRememberNode(parent, iss->iss_InstrumentTable);
+		}
+		else if (IsA(node, IndexOnlyScanState))
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+			if (ioss->ioss_InstrumentTable)
+				InstrQueryRememberNode(parent, ioss->ioss_InstrumentTable);
+		}
+	}
 
 	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
 }
@@ -879,6 +920,22 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 
 	if (!node->instrument)
 		return false;
+
+	/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_InstrumentTable)
+			iss->iss_InstrumentTable = InstrFinalizeNode(iss->iss_InstrumentTable, &node->instrument->instr);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		if (ioss->ioss_InstrumentTable)
+			ioss->ioss_InstrumentTable = InstrFinalizeNode(ioss->ioss_InstrumentTable, &node->instrument->instr);
+	}
 
 	node->instrument = InstrFinalizeNode(node->instrument, parent);
 
