@@ -54,7 +54,6 @@ InstrStart(Instrumentation *instr)
 			INSTR_TIME_SET_CURRENT(instr->starttime);
 	}
 
-	/* save buffer usage totals at node entry, if needed */
 	if (instr->need_bufusage)
 		instr->bufusage_start = pgBufferUsage;
 
