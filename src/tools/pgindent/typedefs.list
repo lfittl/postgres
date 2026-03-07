@@ -1785,6 +1785,7 @@ NextSampleBlock_function
 NextSampleTuple_function
 NextValueExpr
 Node
+NodeInstrumentation
 NodeTag
 NonEmptyRange
 NoneCompressorState
@@ -3377,9 +3378,9 @@ WorkTableScan
 WorkTableScanState
 WorkerInfo
 WorkerInfoData
-WorkerInstrumentation
 WorkerJobDumpPtrType
 WorkerJobRestorePtrType
+WorkerNodeInstrumentation
 Working_State
 WriteBufPtrType
 WriteBytePtrType
