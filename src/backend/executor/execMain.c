@@ -76,6 +76,7 @@ ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 /* decls for local routines only used within this module */
 static void InitPlan(QueryDesc *queryDesc, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
+static void ExecFinalizeTriggerInstrumentation(EState *estate);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
 static void ExecutePlan(QueryDesc *queryDesc,
@@ -329,9 +330,26 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
-	/* Allow instrumentation of Executor overall runtime */
+	/*
+	 * Start up required top-level instrumentation stack for WAL/buffer
+	 * tracking
+	 */
+	if (!queryDesc->totaltime && (estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)))
+		queryDesc->totaltime = InstrAlloc(estate->es_instrument);
+
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+	{
+		/* Allow instrumentation of Executor overall runtime */
+		InstrStart(queryDesc->totaltime);
+
+		/*
+		 * Remember all node stacks for abort recovery. We do this once here
+		 * after the first call to InstrStart has allocated the parent stack.
+		 */
+		if (queryDesc->totaltime->stack && !queryDesc->already_executed)
+			ExecRememberNodeInstrumentation(queryDesc->planstate,
+											queryDesc->totaltime->stack);
+	}
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -383,7 +401,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		dest->rShutdown(dest);
 
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, estate->es_processed);
+		InstrStop(queryDesc->totaltime, false);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -433,7 +451,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	/* Allow instrumentation of Executor overall runtime */
 	if (queryDesc->totaltime)
-		InstrStartNode(queryDesc->totaltime);
+		InstrStart(queryDesc->totaltime);
 
 	/* Run ModifyTable nodes to completion */
 	ExecPostprocessPlan(estate);
@@ -442,8 +460,26 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	if (!(estate->es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS))
 		AfterTriggerEndQuery(estate);
 
+	/*
+	 * Accumulate per-node and trigger statistics to their respective parent
+	 * instrumentation stacks.
+	 *
+	 * We skip this in parallel workers because their per-node stats are
+	 * reported individually via ExecParallelReportInstrumentation, and the
+	 * leader's own ExecFinalizeNodeInstrumentation handles propagation.  If
+	 * we accumulated here, the leader would double-count: worker parent nodes
+	 * would already include their children's stats, and then the leader's
+	 * accumulation would add the children again.
+	 */
+	if (queryDesc->totaltime && estate->es_instrument && !IsParallelWorker())
+	{
+		ExecFinalizeNodeInstrumentation(queryDesc->planstate);
+
+		ExecFinalizeTriggerInstrumentation(estate);
+	}
+
 	if (queryDesc->totaltime)
-		InstrStopNode(queryDesc->totaltime, 0);
+		InstrStop(queryDesc->totaltime, true);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1270,7 +1306,7 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0_array(ExprState *, n);
 		if (instrument_options)
-			resultRelInfo->ri_TrigInstrument = InstrAlloc(n, instrument_options, false);
+			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(n, instrument_options);
 	}
 	else
 	{
@@ -1482,6 +1518,24 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 	Assert(resultRelInfo->ri_ancestorResultRels != NIL);
 
 	return resultRelInfo->ri_ancestorResultRels;
+}
+
+static void
+ExecFinalizeTriggerInstrumentation(EState *estate)
+{
+	List	   *rels = NIL;
+
+	rels = list_concat(rels, estate->es_tuple_routing_result_relations);
+	rels = list_concat(rels, estate->es_opened_result_relations);
+	rels = list_concat(rels, estate->es_trig_target_relations);
+
+	foreach_node(ResultRelInfo, rInfo, rels)
+	{
+		TriggerInstrumentation *ti = rInfo->ri_TrigInstrument;
+
+		if (ti && ti->instr.stack)
+			InstrStackAdd(CurrentInstrStack, ti->instr.stack);
+	}
 }
 
 /* ----------------------------------------------------------------
