@@ -120,7 +120,6 @@
 #include "nodes/nodeFuncs.h"
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
-static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
 static bool ExecRememberNodeInstrumentation_walker(PlanState *node, void *context);
 static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
@@ -464,32 +463,13 @@ ExecProcNodeFirst(PlanState *node)
 	 * have ExecProcNode() directly call the relevant function from now on.
 	 */
 	if (node->instrument)
-		node->ExecProcNode = ExecProcNodeInstr;
+		node->ExecProcNode = InstrNodeSetupExecProcNode(node->instrument);
 	else
 		node->ExecProcNode = node->ExecProcNodeReal;
 
 	return node->ExecProcNode(node);
 }
 
-
-/*
- * ExecProcNode wrapper that performs instrumentation calls.  By keeping
- * this a separate function, we avoid overhead in the normal case where
- * no instrumentation is wanted.
- */
-static TupleTableSlot *
-ExecProcNodeInstr(PlanState *node)
-{
-	TupleTableSlot *result;
-
-	InstrStartNode(node->instrument);
-
-	result = node->ExecProcNodeReal(node);
-
-	InstrStopNode(node->instrument, TupIsNull(result) ? 0.0 : 1.0);
-
-	return result;
-}
 
 
 /* ----------------------------------------------------------------
