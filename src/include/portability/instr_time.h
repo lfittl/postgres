@@ -4,8 +4,9 @@
  *	  portable high-precision interval timing
  *
  * This file provides an abstraction layer to hide portability issues in
- * interval timing. On x86 we use the RDTSC/RDTSCP instruction directly in
- * certain cases, or alternatively clock_gettime() on Unix-like systems and
+ * interval timing. On x86 we use the RDTSC/RDTSCP instruction, and on
+ * AArch64 the CNTVCT_EL0 generic timer, directly in certain cases, or
+ * alternatively clock_gettime() on Unix-like systems and
  * QueryPerformanceCounter() on Windows. These macros also give some breathing
  * room to use other high-precision-timing APIs.
  *
@@ -136,6 +137,11 @@ extern bool pg_set_timing_clock_source(TimingClockSourceType source);
 #define PG_INSTR_TSC_CLOCK_NAME_FAST  "RDTSC"
 #define PG_INSTR_TSC_CLOCK_NAME "RDTSCP"
 #define PG_INSTR_TICKS_TO_NS 1
+#elif defined(__aarch64__) && !defined(WIN32)
+#define PG_INSTR_TSC_CLOCK 1
+#define PG_INSTR_TSC_CLOCK_NAME_FAST  "CNTVCT_EL0"
+#define PG_INSTR_TSC_CLOCK_NAME "CNTVCT_EL0 (ISB)"
+#define PG_INSTR_TICKS_TO_NS 1
 #elif defined(WIN32)
 #define PG_INSTR_TSC_CLOCK 0
 #define PG_INSTR_TICKS_TO_NS 1
@@ -143,7 +149,6 @@ extern bool pg_set_timing_clock_source(TimingClockSourceType source);
 #define PG_INSTR_TSC_CLOCK 0
 #define PG_INSTR_TICKS_TO_NS 0
 #endif
-
 
 #if PG_INSTR_TSC_CLOCK
 /* Whether to actually use TSC based on availability and GUC settings. */
@@ -324,6 +329,8 @@ pg_ns_to_ticks(int64 ns)
 
 #if PG_INSTR_TSC_CLOCK
 
+#if defined(__x86_64__) || defined(_M_X64)
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif							/* defined(_MSC_VER) */
@@ -366,7 +373,49 @@ pg_get_ticks(void)
 	return pg_get_ticks_system();
 }
 
-#else
+#elif defined(__aarch64__) && !defined(WIN32)
+
+/*
+ * Read the ARM generic timer counter (CNTVCT_EL0).
+ *
+ * The "fast" variant reads the counter without a barrier, analogous to RDTSC
+ * on x86. The regular variant issues an ISB (Instruction Synchronization
+ * Barrier) first, which acts as a serializing instruction analogous to RDTSCP,
+ * ensuring all preceding instructions have completed before reading the
+ * counter.
+ */
+static inline instr_time
+pg_get_ticks_fast(void)
+{
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+
+		now.ticks = __builtin_arm_rsr64("cntvct_el0");
+		return now;
+	}
+
+	return pg_get_ticks_system();
+}
+
+static inline instr_time
+pg_get_ticks(void)
+{
+	if (likely(use_tsc))
+	{
+		instr_time	now;
+
+		__builtin_arm_isb(0xf);
+		now.ticks = __builtin_arm_rsr64("cntvct_el0");
+		return now;
+	}
+
+	return pg_get_ticks_system();
+}
+
+#endif							/* defined(__aarch64__) */
+
+#else							/* !PG_INSTR_TSC_CLOCK */
 
 static inline instr_time
 pg_get_ticks_fast(void)
