@@ -55,6 +55,7 @@
 
 #ifdef EXEC_BACKEND
 #include "nodes/queryjumble.h"
+#include "portability/instr_time.h"
 #include "storage/pg_shmem.h"
 #include "storage/spin.h"
 #endif
@@ -131,6 +132,10 @@ typedef struct
 	char		pkglib_path[MAXPGPATH];
 
 	int			MyPMChildSlot;
+
+#if PG_INSTR_TSC_CLOCK
+	int32		tsc_frequency_khz;
+#endif
 
 	/*
 	 * These are only used by backend processes, but are here because passing
@@ -753,6 +758,10 @@ save_backend_variables(BackendParameters *param,
 	param->MaxBackends = MaxBackends;
 	param->num_pmchild_slots = num_pmchild_slots;
 
+#if PG_INSTR_TSC_CLOCK
+	param->tsc_frequency_khz = tsc_frequency_khz;
+#endif
+
 #ifdef WIN32
 	param->PostmasterHandle = PostmasterHandle;
 	if (!write_duplicated_handle(&param->initial_signal_pipe,
@@ -1011,6 +1020,10 @@ restore_backend_variables(BackendParameters *param)
 
 	MaxBackends = param->MaxBackends;
 	num_pmchild_slots = param->num_pmchild_slots;
+
+#if PG_INSTR_TSC_CLOCK
+	tsc_frequency_khz = param->tsc_frequency_khz;
+#endif
 
 #ifdef WIN32
 	PostmasterHandle = param->PostmasterHandle;
