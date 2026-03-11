@@ -329,7 +329,7 @@ main(int argc, char *argv[])
 	PQsetNoticeProcessor(pset.db, NoticeProcessor, NULL);
 
 	/* initialize timing infrastructure (required for INSTR_* calls) */
-	pg_initialize_timing();
+	pg_initialize_timing(false);
 
 	SyncVariables();
 

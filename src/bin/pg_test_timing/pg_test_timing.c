@@ -43,8 +43,18 @@ main(int argc, char *argv[])
 
 	handle_args(argc, argv);
 
-	/* initialize timing infrastructure (required for INSTR_* calls) */
-	pg_initialize_timing();
+	/*
+	 * Initialize timing infrastructure (required for INSTR_* calls)
+	 *
+	 * This initialization should match the one in main() so the user can
+	 * reason about what the backend will do.
+	 */
+#if defined(WIN32)
+	/* Skip TSC calibration on Windows, its too expensive per connection */
+	pg_initialize_timing(false);
+#else
+	pg_initialize_timing(true);
+#endif
 
 	loop_count = test_timing(test_duration);
 

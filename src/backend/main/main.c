@@ -93,7 +93,12 @@ main(int argc, char *argv[])
 	/*
 	 * Initialize timing infrastructure
 	 */
-	pg_initialize_timing();
+#if defined(WIN32)
+	/* Skip TSC calibration on Windows, its too expensive per connection */
+	pg_initialize_timing(false);
+#else
+	pg_initialize_timing(true);
+#endif
 
 	/*
 	 * Remember the physical location of the initially given argv[] array for

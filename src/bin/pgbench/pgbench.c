@@ -7335,7 +7335,7 @@ main(int argc, char **argv)
 	}
 
 	/* initialize timing infrastructure (required for INSTR_* calls) */
-	pg_initialize_timing();
+	pg_initialize_timing(false);
 
 	/* opening connection... */
 	con = doConnect();
