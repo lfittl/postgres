@@ -53,6 +53,64 @@ mask_available(uint32 value, uint32 mask)
 	return (value & mask) == mask;
 }
 
+/* General purpose registers used by CPUID */
+typedef struct CPUIDResult
+{
+	unsigned int eax;
+	unsigned int ebx;
+	unsigned int ecx;
+	unsigned int edx;
+} CPUIDResult;
+
+StaticAssertDecl(sizeof(CPUIDResult) == 4 * sizeof(unsigned int),
+				 "CPUIDResult must have no padding");
+
+/*
+ * Request CPUID information for the specified leaf.
+ */
+static inline void
+pg_cpuid(int leaf, CPUIDResult *r)
+{
+#if defined(HAVE__GET_CPUID)
+	__get_cpuid(leaf, &r->eax, &r->ebx, &r->ecx, &r->edx);
+#elif defined(HAVE__CPUID)
+	int			exx[4] = {0};
+
+	__cpuid(exx, leaf);
+	r->eax = exx[0];
+	r->ebx = exx[1];
+	r->ecx = exx[2];
+	r->edx = exx[3];
+#else
+#error cpuid instruction not available
+#endif
+}
+
+/*
+ * Request CPUID information for the specified leaf and subleaf.
+ *
+ * Returns false if the CPUID leaf/subleaf is not supported.
+ */
+static inline bool
+pg_cpuid_subleaf(int leaf, int subleaf, CPUIDResult *r)
+{
+#if defined(HAVE__GET_CPUID_COUNT)
+	return __get_cpuid_count(leaf, subleaf, &r->eax, &r->ebx, &r->ecx, &r->edx) == 1;
+#elif defined(HAVE__CPUIDEX)
+	int			exx[4] = {0};
+
+	__cpuidex(exx, leaf, subleaf);
+	r->eax = exx[0];
+	r->ebx = exx[1];
+	r->ecx = exx[2];
+	r->edx = exx[3];
+	return true;
+#else
+	memset(r, 0, sizeof(CPUIDResult));
+	return false;
+#endif
+}
+
 /*
  * Parse the CPU ID info for runtime checks.
  */
@@ -62,33 +120,21 @@ pg_attribute_target("xsave")
 void
 set_x86_features(void)
 {
-	unsigned int exx[4] = {0, 0, 0, 0};
+	CPUIDResult r = {0};
 
-#if defined(HAVE__GET_CPUID)
-	__get_cpuid(1, &exx[0], &exx[1], &exx[2], &exx[3]);
-#elif defined(HAVE__CPUID)
-	__cpuid(exx, 1);
-#else
-#error cpuid instruction not available
-#endif
+	pg_cpuid(0x01, &r);
 
-	X86Features[PG_SSE4_2] = exx[2] >> 20 & 1;
-	X86Features[PG_POPCNT] = exx[2] >> 23 & 1;
+	X86Features[PG_SSE4_2] = r.ecx >> 20 & 1;
+	X86Features[PG_POPCNT] = r.ecx >> 23 & 1;
 
 	/* All these features depend on OSXSAVE */
-	if (exx[2] & (1 << 27))
+	if (r.ecx & (1 << 27))
 	{
 		uint32		xcr0_val = 0;
 
 		/* second cpuid call on leaf 7 to check extended AVX-512 support */
 
-		memset(exx, 0, 4 * sizeof(exx[0]));
-
-#if defined(HAVE__GET_CPUID_COUNT)
-		__get_cpuid_count(7, 0, &exx[0], &exx[1], &exx[2], &exx[3]);
-#elif defined(HAVE__CPUIDEX)
-		__cpuidex(exx, 7, 0);
-#endif
+		pg_cpuid_subleaf(0x07, 0, &r);
 
 #ifdef HAVE_XSAVE_INTRINSICS
 		/* get value of Extended Control Register */
@@ -99,11 +145,11 @@ set_x86_features(void)
 		if (mask_available(xcr0_val, XMM | YMM |
 						   OPMASK | ZMM0_15 | ZMM16_31))
 		{
-			X86Features[PG_AVX512_BW] = exx[1] >> 30 & 1;
-			X86Features[PG_AVX512_VL] = exx[1] >> 31 & 1;
+			X86Features[PG_AVX512_BW] = r.ebx >> 30 & 1;
+			X86Features[PG_AVX512_VL] = r.ebx >> 31 & 1;
 
-			X86Features[PG_AVX512_VPCLMULQDQ] = exx[2] >> 10 & 1;
-			X86Features[PG_AVX512_VPOPCNTDQ] = exx[2] >> 14 & 1;
+			X86Features[PG_AVX512_VPCLMULQDQ] = r.ecx >> 10 & 1;
+			X86Features[PG_AVX512_VPOPCNTDQ] = r.ecx >> 14 & 1;
 		}
 	}
 
