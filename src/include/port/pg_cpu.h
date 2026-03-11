@@ -23,6 +23,12 @@ typedef enum X86FeatureId
 	/* scalar registers and 128-bit XMM registers */
 	PG_SSE4_2,
 	PG_POPCNT,
+	PG_HYPERVISOR,
+
+	/* TSC flags */
+	PG_RDTSCP,
+	PG_TSC_INVARIANT,
+	PG_TSC_ADJUST,
 
 	/* 512-bit ZMM registers */
 	PG_AVX512_BW,
@@ -44,6 +50,8 @@ x86_feature_available(X86FeatureId feature)
 
 	return X86Features[feature];
 }
+
+extern uint32 x86_tsc_frequency_khz(void);
 
 #endif							/* defined(USE_SSE2) || defined(__i386__) */
 
