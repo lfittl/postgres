@@ -549,6 +549,7 @@ CostSelector
 Counters
 CoverExt
 CoverPos
+CPUIDResult
 CreateAmStmt
 CreateCastStmt
 CreateConversionStmt
