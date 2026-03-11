@@ -549,6 +549,7 @@ CostSelector
 Counters
 CoverExt
 CoverPos
+CPUIDResult
 CreateAmStmt
 CreateCastStmt
 CreateConversionStmt
@@ -2581,6 +2582,8 @@ ReorderBufferTupleCidEnt
 ReorderBufferTupleCidKey
 ReorderBufferUpdateProgressTxnCB
 ReorderTuple
+RepackCommand
+RepackStmt
 ReparameterizeForeignPathByChild_function
 ReplOriginId
 ReplOriginXactState
@@ -2763,6 +2766,7 @@ SetConstraintStateData
 SetConstraintTriggerData
 SetExprState
 SetFunctionReturnMode
+SetHintBitsState
 SetOp
 SetOpCmd
 SetOpPath
@@ -3114,6 +3118,7 @@ TimeoutId
 TimeoutType
 Timestamp
 TimestampTz
+TimingClockSourceType
 TmFromChar
 TmToChar
 ToastAttrInfo

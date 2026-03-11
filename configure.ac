@@ -549,10 +549,10 @@ if test "$GCC" = yes -a "$ICC" = no; then
   AC_SUBST(PERMIT_DECLARATION_AFTER_STATEMENT)
   # Really don't want VLAs to be used in our dialect of C
   PGAC_PROG_CC_CFLAGS_OPT([-Werror=vla])
+  # -Wvla is not applicable for C++
   # On macOS, complain about usage of symbols newer than the deployment target
   PGAC_PROG_CC_CFLAGS_OPT([-Werror=unguarded-availability-new])
   PGAC_PROG_CXX_CFLAGS_OPT([-Werror=unguarded-availability-new])
-  # -Wvla is not applicable for C++
   PGAC_PROG_CC_CFLAGS_OPT([-Wendif-labels])
   PGAC_PROG_CXX_CFLAGS_OPT([-Wendif-labels])
   PGAC_PROG_CC_CFLAGS_OPT([-Wmissing-format-attribute])
@@ -2104,7 +2104,8 @@ else
   fi
 fi
 
-# Check for __get_cpuid_count() and __cpuidex() in a similar fashion.
+# Check for __get_cpuid_count() and __cpuidex() separately, since we sometimes
+# need __cpuidex() even if __get_cpuid_count() is available.
 AC_CACHE_CHECK([for __get_cpuid_count], [pgac_cv__get_cpuid_count],
 [AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <cpuid.h>],
   [[unsigned int exx[4] = {0, 0, 0, 0};
@@ -2114,18 +2115,21 @@ AC_CACHE_CHECK([for __get_cpuid_count], [pgac_cv__get_cpuid_count],
   [pgac_cv__get_cpuid_count="no"])])
 if test x"$pgac_cv__get_cpuid_count" = x"yes"; then
   AC_DEFINE(HAVE__GET_CPUID_COUNT, 1, [Define to 1 if you have __get_cpuid_count.])
-else
-  # __cpuidex()
-  AC_CACHE_CHECK([for __cpuidex], [pgac_cv__cpuidex],
-  [AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <intrin.h>],
-    [[unsigned int exx[4] = {0, 0, 0, 0};
-    __cpuidex(exx, 7, 0);
-    ]])],
-    [pgac_cv__cpuidex="yes"],
-    [pgac_cv__cpuidex="no"])])
-  if test x"$pgac_cv__cpuidex" = x"yes"; then
-    AC_DEFINE(HAVE__CPUIDEX, 1, [Define to 1 if you have __cpuidex.])
-  fi
+fi
+# __cpuidex()
+AC_CACHE_CHECK([for __cpuidex], [pgac_cv__cpuidex],
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([#ifdef _MSC_VER
+    #include <intrin.h>
+    #else
+    #include <cpuid.h>
+    #endif],
+  [[int exx[4] = {0, 0, 0, 0};
+  __cpuidex(exx, 7, 0);
+  ]])],
+  [pgac_cv__cpuidex="yes"],
+  [pgac_cv__cpuidex="no"])])
+if test x"$pgac_cv__cpuidex" = x"yes"; then
+  AC_DEFINE(HAVE__CPUIDEX, 1, [Define to 1 if you have __cpuidex.])
 fi
 
 # Check for XSAVE intrinsics

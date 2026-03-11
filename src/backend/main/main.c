@@ -91,6 +91,16 @@ main(int argc, char *argv[])
 	startup_hacks(progname);
 
 	/*
+	 * Initialize timing infrastructure
+	 */
+#if defined(WIN32)
+	/* Skip TSC calibration on Windows, its too expensive per connection */
+	pg_initialize_timing(false);
+#else
+	pg_initialize_timing(true);
+#endif
+
+	/*
 	 * Remember the physical location of the initially given argv[] array for
 	 * possible use by ps display.  On some platforms, the argv[] storage must
 	 * be overwritten in order to set the process title for ps. In such cases

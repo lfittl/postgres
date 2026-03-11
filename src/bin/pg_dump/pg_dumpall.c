@@ -421,7 +421,7 @@ main(int argc, char *argv[])
 		exit_nicely(1);
 	}
 
-	/* --exclude_database is incompatible with global *-only options */
+	/* --exclude-database is incompatible with global *-only options */
 	check_mut_excl_opts(database_exclude_patterns.head, "--exclude-database",
 						globals_only, "-g/--globals-only",
 						roles_only, "-r/--roles-only",
@@ -1833,7 +1833,6 @@ dropDBs(PGconn *conn)
 	for (i = 0; i < PQntuples(res); i++)
 	{
 		char	   *dbname = PQgetvalue(res, i, 0);
-		PQExpBuffer delQry = createPQExpBuffer();
 
 		/*
 		 * Skip "postgres" and "template1"; dumpDatabases() will deal with
@@ -1846,15 +1845,14 @@ dropDBs(PGconn *conn)
 		{
 			if (archDumpFormat == archNull)
 			{
-				appendPQExpBuffer(delQry, "DROP DATABASE %s%s;\n",
-								  if_exists ? "IF EXISTS " : "",
-								  fmtId(dbname));
-				fprintf(OPF, "%s", delQry->data);
+				fprintf(OPF, "DROP DATABASE %s%s;\n",
+						if_exists ? "IF EXISTS " : "",
+						fmtId(dbname));
 			}
 			else
 			{
-				appendPQExpBuffer(delQry, "DROP DATABASE IF EXISTS %s;\n",
-								  fmtId(dbname));
+				char	   *stmt = psprintf("DROP DATABASE IF EXISTS %s;\n",
+											fmtId(dbname));
 
 				ArchiveEntry(fout,
 							 nilCatalogId,	/* catalog ID */
@@ -1862,10 +1860,9 @@ dropDBs(PGconn *conn)
 							 ARCHIVE_OPTS(.tag = psprintf("DATABASE %s", fmtId(dbname)),
 										  .description = "DROP_GLOBAL",
 										  .section = SECTION_PRE_DATA,
-										  .createStmt = delQry->data));
+										  .createStmt = stmt));
+				pg_free(stmt);
 			}
-
-			destroyPQExpBuffer(delQry);
 		}
 	}
 
