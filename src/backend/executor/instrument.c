@@ -16,124 +16,419 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 
-BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
-static WalUsage save_pgWalUsage;
+Instrumentation instr_top;
+InstrStackState instr_stack = {0, 0, NULL, &instr_top};
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
-static void WalUsageAdd(WalUsage *dst, WalUsage *add);
-
-
-/* Allocate new instrumentation structure(s) */
-Instrumentation *
-InstrAlloc(int n, int instrument_options, bool async_mode)
+void
+InstrStackGrow(void)
 {
-	Instrumentation *instr;
-
-	/* initialize all fields to zeroes, then modify as needed */
-	instr = palloc0(n * sizeof(Instrumentation));
-	if (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_TIMER | INSTRUMENT_WAL))
+	if (instr_stack.entries == NULL)
 	{
-		bool		need_buffers = (instrument_options & INSTRUMENT_BUFFERS) != 0;
-		bool		need_wal = (instrument_options & INSTRUMENT_WAL) != 0;
-		bool		need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
-		int			i;
+		instr_stack.stack_space = 10;	/* Allocate sufficient initial space
+										 * for typical activity */
+		instr_stack.entries = MemoryContextAlloc(TopMemoryContext,
+												 sizeof(Instrumentation *) * instr_stack.stack_space);
+	}
+	else
+	{
+		instr_stack.stack_space *= 2;
+		instr_stack.entries = repalloc_array(instr_stack.entries, Instrumentation *, instr_stack.stack_space);
+	}
+}
 
-		for (i = 0; i < n; i++)
+/* General purpose instrumentation handling */
+void
+InstrInitOptions(Instrumentation *instr, int instrument_options)
+{
+	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
+	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
+	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+}
+
+static inline void
+InstrStartTimer(Instrumentation *instr)
+{
+	Assert(INSTR_TIME_IS_ZERO(instr->starttime));
+
+	INSTR_TIME_SET_CURRENT(instr->starttime);
+}
+
+static inline void
+InstrStopTimer(Instrumentation *instr)
+{
+	instr_time	endtime;
+
+	Assert(!INSTR_TIME_IS_ZERO(instr->starttime));
+
+	INSTR_TIME_SET_CURRENT(endtime);
+	INSTR_TIME_ACCUM_DIFF(instr->total, endtime, instr->starttime);
+
+	INSTR_TIME_SET_ZERO(instr->starttime);
+}
+
+void
+InstrStart(Instrumentation *instr)
+{
+	if (instr->need_timer)
+		InstrStartTimer(instr);
+
+	if (instr->need_bufusage || instr->need_walusage)
+		InstrPushStack(instr);
+}
+
+void
+InstrStop(Instrumentation *instr)
+{
+	if (instr->need_timer)
+		InstrStopTimer(instr);
+
+	if (instr->need_bufusage || instr->need_walusage)
+		InstrPopStack(instr);
+}
+
+/*
+ * Stops instrumentation, finalizes the stack entry and accumulates to its parent.
+ *
+ * Note that this intentionally allows passing a stack that is not the current
+ * top, as can happen with PG_FINALLY, or resource owners, which don't have a
+ * guaranteed cleanup order.
+ *
+ * We are careful here to achieve two goals:
+ *
+ * 1) Reset the stack to the parent of whichever of the released stack entries
+ *    has the lowest index
+ * 2) Accumulate all instrumentation to the currently active instrumentation,
+ *    so that callers get a complete picture of activity, even after an abort
+ */
+void
+InstrStopFinalize(Instrumentation *instr)
+{
+	int			idx = -1;
+
+	for (int i = instr_stack.stack_size - 1; i >= 0; i--)
+	{
+		if (instr_stack.entries[i] == instr)
 		{
-			instr[i].need_bufusage = need_buffers;
-			instr[i].need_walusage = need_wal;
-			instr[i].need_timer = need_timer;
-			instr[i].async_mode = async_mode;
+			idx = i;
+			break;
 		}
 	}
+
+	if (idx >= 0)
+	{
+		while (instr_stack.stack_size > idx + 1)
+			instr_stack.stack_size--;
+
+		InstrPopStack(instr);
+	}
+
+	if (instr->need_timer)
+		InstrStopTimer(instr);
+
+	InstrAccum(instr_stack.current, instr);
+}
+
+
+/* Query instrumentation handling */
+
+/*
+ * Use ResourceOwner mechanism to correctly reset instr_stack on abort.
+ */
+static void ResOwnerReleaseInstrumentation(Datum res);
+static const ResourceOwnerDesc instrumentation_resowner_desc =
+{
+	.name = "instrumentation",
+	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+	.release_priority = RELEASE_PRIO_INSTRUMENTATION,
+	.ReleaseResource = ResOwnerReleaseInstrumentation,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrumentation(ResourceOwner owner, QueryInstrumentation *qinstr)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(qinstr), &instrumentation_resowner_desc);
+}
+
+static inline void
+ResourceOwnerForgetInstrumentation(ResourceOwner owner, QueryInstrumentation *qinstr)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(qinstr), &instrumentation_resowner_desc);
+}
+
+static void
+ResOwnerReleaseInstrumentation(Datum res)
+{
+	QueryInstrumentation *qinstr = (QueryInstrumentation *) DatumGetPointer(res);
+	dlist_mutable_iter iter;
+
+	/* Accumulate data from all unfinalized child node entries. */
+	dlist_foreach_modify(iter, &qinstr->unfinalized_children)
+	{
+		NodeInstrumentation *child = dlist_container(NodeInstrumentation, unfinalized_node, iter.cur);
+
+		InstrAccum(&qinstr->instr, &child->instr);
+
+		/*
+		 * Free NodeInstrumentation now, since InstrFinalizeNode won't be
+		 * called
+		 */
+		pfree(child);
+	}
+
+	/* Ensure the stack is reset as expected, and we accumulate to the parent */
+	InstrStopFinalize(&qinstr->instr);
+
+	/* Free QueryInstrumentation now, since InstrStop won't be called */
+	pfree(qinstr);
+}
+
+QueryInstrumentation *
+InstrQueryAlloc(int instrument_options)
+{
+	QueryInstrumentation *instr;
+
+	/*
+	 * If needed, allocate in TopMemoryContext so that the Instrumentation
+	 * survives transaction abort — ResourceOwner release needs to access
+	 * it.
+	 */
+	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 || (instrument_options & INSTRUMENT_WAL) != 0)
+		instr = MemoryContextAllocZero(TopMemoryContext, sizeof(QueryInstrumentation));
+	else
+		instr = palloc0(sizeof(QueryInstrumentation));
+
+	InstrInitOptions(&instr->instr, instrument_options);
+	dlist_init(&instr->unfinalized_children);
+
+	return instr;
+}
+
+void
+InstrQueryStart(QueryInstrumentation *qinstr)
+{
+	InstrStart(&qinstr->instr);
+
+	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage)
+	{
+		Assert(CurrentResourceOwner != NULL);
+		qinstr->owner = CurrentResourceOwner;
+
+		ResourceOwnerEnlarge(qinstr->owner);
+		ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+	}
+}
+
+void
+InstrQueryStop(QueryInstrumentation *qinstr)
+{
+	InstrStop(&qinstr->instr);
+
+	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage)
+	{
+		Assert(qinstr->owner != NULL);
+		ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
+		qinstr->owner = NULL;
+	}
+}
+
+QueryInstrumentation *
+InstrQueryStopFinalize(QueryInstrumentation *qinstr)
+{
+	QueryInstrumentation *copy;
+
+	InstrStopFinalize(&qinstr->instr);
+
+	if (!qinstr->instr.need_bufusage && !qinstr->instr.need_walusage)
+		return qinstr;
+
+	Assert(qinstr->owner != NULL);
+	ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
+	qinstr->owner = NULL;
+
+	/*
+	 * Copy to the current memory context so the caller doesn't need to
+	 * explicitly free the TopMemoryContext allocation.
+	 */
+	copy = palloc(sizeof(QueryInstrumentation));
+	memcpy(copy, qinstr, sizeof(QueryInstrumentation));
+	pfree(qinstr);
+	return copy;
+}
+
+/*
+ * Register a child NodeInstrumentation entry for abort processing.
+ *
+ * On abort, ResOwnerReleaseInstrumentation will walk the parent's list to
+ * recover buffer/WAL data from entries that were never finalized, in order for
+ * aggregate totals to be accurate despite the query erroring out.
+ */
+void
+InstrQueryRememberNode(QueryInstrumentation *parent, NodeInstrumentation *child)
+{
+	if (child->instr.need_bufusage || child->instr.need_walusage)
+		dlist_push_head(&parent->unfinalized_children, &child->unfinalized_node);
+}
+
+/* start instrumentation during parallel executor startup */
+QueryInstrumentation *
+InstrStartParallelQuery(void)
+{
+	QueryInstrumentation *qinstr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+
+	InstrQueryStart(qinstr);
+	return qinstr;
+}
+
+/* report usage after parallel executor shutdown */
+void
+InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
+{
+	qinstr = InstrQueryStopFinalize(qinstr);
+	memcpy(bufusage, &qinstr->instr.bufusage, sizeof(BufferUsage));
+	memcpy(walusage, &qinstr->instr.walusage, sizeof(WalUsage));
+}
+
+/*
+ * Accumulate work done by parallel workers in the leader's stats.
+ *
+ * Note that what gets added here effectively depends on whether per-node
+ * instrumentation is active. If it's active the parallel worker intentionally
+ * skips ExecFinalizeNodeInstrumentation on executor shutdown, because it would
+ * cause double counting. Instead, this only accumulates any extra activity
+ * outside of nodes.
+ *
+ * Otherwise this is responsible for making sure that the complete query
+ * activity is accumulated.
+ */
+void
+InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+{
+	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
+	WalUsageAdd(&instr_stack.current->walusage, walusage);
+
+	WalUsageAdd(&pgWalUsage, walusage);
+}
+
+/* Node instrumentation handling */
+
+/* Allocate new node instrumentation structure */
+NodeInstrumentation *
+InstrAllocNode(int instrument_options, bool async_mode)
+{
+	NodeInstrumentation *instr;
+
+	/*
+	 * If needed, allocate in a context that supports stack-based
+	 * instrumentation abort handling. We can utilize TopTransactionContext
+	 * instead of TopMemoryContext here because nodes don't get used for
+	 * utility commands that restart transactions, which would require a
+	 * context that survives longer (EXPLAIN ANALYZE is fine).
+	 */
+	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 || (instrument_options & INSTRUMENT_WAL) != 0)
+		instr = MemoryContextAlloc(TopTransactionContext, sizeof(NodeInstrumentation));
+	else
+		instr = palloc(sizeof(NodeInstrumentation));
+
+	InstrInitNode(instr, instrument_options);
+	instr->async_mode = async_mode;
 
 	return instr;
 }
 
 /* Initialize a pre-allocated instrumentation structure. */
 void
-InstrInit(Instrumentation *instr, int instrument_options)
+InstrInitNode(NodeInstrumentation *instr, int instrument_options)
 {
-	memset(instr, 0, sizeof(Instrumentation));
-	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
-	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
-	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+	memset(instr, 0, sizeof(NodeInstrumentation));
+	InstrInitOptions(&instr->instr, instrument_options);
 }
 
-/* Entry to a plan node */
+/* Entry to a plan node. If you modify this, check InstrNodeSetupExecProcNode. */
 void
-InstrStartNode(Instrumentation *instr)
+InstrStartNode(NodeInstrumentation *instr)
 {
-	if (instr->need_timer)
-	{
-		if (!INSTR_TIME_IS_ZERO(instr->starttime))
-			elog(ERROR, "InstrStartNode called twice in a row");
-		else
-			INSTR_TIME_SET_CURRENT(instr->starttime);
-	}
-
-	/* save buffer usage totals at node entry, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
-
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+	InstrStart(&instr->instr);
 }
 
-/* Exit from a plan node */
-void
-InstrStopNode(Instrumentation *instr, double nTuples)
+/*
+ * Updates the node instrumentation time counter.
+ *
+ * Note this is different from InstrStop because total is only updated in
+ * InstrEndLoop. We need the separate counter variable because we need to
+ * calculate start-up time for the first tuple in each cycle, and then
+ * accumulate it together.
+ */
+static inline void
+InstrStopNodeTimer(NodeInstrumentation *instr)
 {
-	double		save_tuplecount = instr->tuplecount;
 	instr_time	endtime;
+
+	Assert(!INSTR_TIME_IS_ZERO(instr->instr.starttime));
+
+	INSTR_TIME_SET_CURRENT(endtime);
+	INSTR_TIME_ACCUM_DIFF(instr->counter, endtime, instr->instr.starttime);
+	INSTR_TIME_SET_ZERO(instr->instr.starttime);
+
+	/*
+	 * Is this the first tuple of this cycle?
+	 *
+	 * In async mode, if the plan node hadn't emitted any tuples before, this
+	 * might be the first tuple
+	 */
+	if (!instr->running || (instr->async_mode && instr->tuplecount < 1.0))
+		instr->firsttuple = instr->counter;
+}
+
+/* Exit from a plan node. If you modify this, check InstrNodeSetupExecProcNode. */
+void
+InstrStopNode(NodeInstrumentation *instr, double nTuples)
+{
+	if (instr->instr.need_timer)
+		InstrStopNodeTimer(instr);
+
+	/* Only pop the stack, accumulation runs in InstrFinalizeNode */
+	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+		InstrPopStack(&instr->instr);
+
+	instr->running = true;
 
 	/* count the returned tuples */
 	instr->tuplecount += nTuples;
+}
 
-	/* let's update the time only if the timer was requested */
-	if (instr->need_timer)
-	{
-		if (INSTR_TIME_IS_ZERO(instr->starttime))
-			elog(ERROR, "InstrStopNode called without start");
+NodeInstrumentation *
+InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
+{
+	NodeInstrumentation *dst;
 
-		INSTR_TIME_SET_CURRENT(endtime);
-		INSTR_TIME_ACCUM_DIFF(instr->counter, endtime, instr->starttime);
+	/* If we didn't use stack based instrumentation, nothing to be done */
+	if (!instr->instr.need_bufusage && !instr->instr.need_walusage)
+		return instr;
 
-		INSTR_TIME_SET_ZERO(instr->starttime);
-	}
+	/* Copy into per-query memory context */
+	dst = palloc(sizeof(NodeInstrumentation));
+	memcpy(dst, instr, sizeof(NodeInstrumentation));
 
-	/* Add delta of buffer usage since entry to node's totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
+	/* Accumulate node's buffer/WAL usage to the parent */
+	InstrAccum(parent, &dst->instr);
 
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	/* Unregister from query's unfinalized list before freeing */
+	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+		dlist_delete(&instr->unfinalized_node);
 
-	/* Is this the first tuple of this cycle? */
-	if (!instr->running)
-	{
-		instr->running = true;
-		instr->firsttuple = instr->counter;
-	}
-	else
-	{
-		/*
-		 * In async mode, if the plan node hadn't emitted any tuples before,
-		 * this might be the first tuple
-		 */
-		if (instr->async_mode && save_tuplecount < 1.0)
-			instr->firsttuple = instr->counter;
-	}
+	pfree(instr);
+
+	return dst;
 }
 
 /* Update tuple count */
 void
-InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
+InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples)
 {
 	/* count the returned tuples */
 	instr->tuplecount += nTuples;
@@ -141,24 +436,24 @@ InstrUpdateTupleCount(Instrumentation *instr, double nTuples)
 
 /* Finish a run cycle for a plan node */
 void
-InstrEndLoop(Instrumentation *instr)
+InstrEndLoop(NodeInstrumentation *instr)
 {
 	/* Skip if nothing has happened, or already shut down */
 	if (!instr->running)
 		return;
 
-	if (!INSTR_TIME_IS_ZERO(instr->starttime))
-		elog(ERROR, "InstrEndLoop called on running node");
+	/* Ensure InstrNodeStop was called */
+	Assert(INSTR_TIME_IS_ZERO(instr->instr.starttime));
 
 	/* Accumulate per-cycle statistics into totals */
 	INSTR_TIME_ADD(instr->startup, instr->firsttuple);
-	INSTR_TIME_ADD(instr->total, instr->counter);
+	INSTR_TIME_ADD(instr->instr.total, instr->counter);
 	instr->ntuples += instr->tuplecount;
 	instr->nloops += 1;
 
 	/* Reset for next cycle (if any) */
 	instr->running = false;
-	INSTR_TIME_SET_ZERO(instr->starttime);
+	INSTR_TIME_SET_ZERO(instr->instr.starttime);
 	INSTR_TIME_SET_ZERO(instr->counter);
 	INSTR_TIME_SET_ZERO(instr->firsttuple);
 	instr->tuplecount = 0;
@@ -166,7 +461,7 @@ InstrEndLoop(Instrumentation *instr)
 
 /* aggregate instrumentation information */
 void
-InstrAggNode(Instrumentation *dst, Instrumentation *add)
+InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 {
 	if (!dst->running && add->running)
 	{
@@ -181,7 +476,7 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 
 	dst->tuplecount += add->tuplecount;
 	INSTR_TIME_ADD(dst->startup, add->startup);
-	INSTR_TIME_ADD(dst->total, add->total);
+	INSTR_TIME_ADD(dst->instr.total, add->instr.total);
 	dst->ntuples += add->ntuples;
 	dst->ntuples2 += add->ntuples2;
 	dst->nloops += add->nloops;
@@ -189,41 +484,175 @@ InstrAggNode(Instrumentation *dst, Instrumentation *add)
 	dst->nfiltered2 += add->nfiltered2;
 
 	/* Add delta of buffer usage since entry to node's totals */
-	if (dst->need_bufusage)
-		BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	if (dst->instr.need_bufusage)
+		BufferUsageAdd(&dst->instr.bufusage, &add->instr.bufusage);
 
-	if (dst->need_walusage)
-		WalUsageAdd(&dst->walusage, &add->walusage);
+	if (dst->instr.need_walusage)
+		WalUsageAdd(&dst->instr.walusage, &add->instr.walusage);
 }
 
-/* note current values during parallel executor startup */
-void
-InstrStartParallelQuery(void)
+/*
+ * Specialized handling of instrumented ExecProcNode
+ *
+ * These functions are equivalent to running ExecProcNodeReal wrapped in
+ * InstrStartNode and InstrStopNode, but avoid the conditionals in the hot path
+ * by checking the instrumentation options when the ExecProcNode pointer gets
+ * first set, and then using a special-purpose function for each. This results
+ * in a more optimized set of compiled instructions.
+ */
+
+#include "executor/tuptable.h"
+#include "nodes/execnodes.h"
+
+/* Simplified pop: restore saved state instead of re-deriving from array */
+static inline void
+InstrPopStackTo(Instrumentation *prev)
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
+	Assert(instr_stack.stack_size > 0);
+	instr_stack.stack_size--;
+	instr_stack.current = prev;
 }
 
-/* report usage after parallel executor shutdown */
-void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+static TupleTableSlot *
+ExecProcNodeInstrFull(PlanState *node)
 {
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
+	NodeInstrumentation *instr = node->instrument;
+	Instrumentation *prev = instr_stack.current;
+	TupleTableSlot *result;
+
+	InstrPushStack(&instr->instr);
+	InstrStartTimer(&instr->instr);
+
+	result = node->ExecProcNodeReal(node);
+
+	InstrStopNodeTimer(instr);
+	InstrPopStackTo(prev);
+
+	instr->running = true;
+	if (!TupIsNull(result))
+		instr->tuplecount += 1.0;
+
+	return result;
 }
 
-/* accumulate work done by workers in leader's stats */
-void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+static TupleTableSlot *
+ExecProcNodeInstrRowsBuffersWalOnly(PlanState *node)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
-	WalUsageAdd(&pgWalUsage, walusage);
+	NodeInstrumentation *instr = node->instrument;
+	Instrumentation *prev = instr_stack.current;
+	TupleTableSlot *result;
+
+	InstrPushStack(&instr->instr);
+
+	result = node->ExecProcNodeReal(node);
+
+	InstrPopStackTo(prev);
+
+	instr->running = true;
+	if (!TupIsNull(result))
+		instr->tuplecount += 1.0;
+
+	return result;
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrRowsTimerOnly(PlanState *node)
+{
+	NodeInstrumentation *instr = node->instrument;
+	TupleTableSlot *result;
+
+	InstrStartTimer(&instr->instr);
+
+	result = node->ExecProcNodeReal(node);
+
+	InstrStopNodeTimer(instr);
+
+	instr->running = true;
+	if (!TupIsNull(result))
+		instr->tuplecount += 1.0;
+
+	return result;
+}
+
+static TupleTableSlot *
+ExecProcNodeInstrRowsOnly(PlanState *node)
+{
+	NodeInstrumentation *instr = node->instrument;
+	TupleTableSlot *result;
+
+	result = node->ExecProcNodeReal(node);
+
+	instr->running = true;
+	if (!TupIsNull(result))
+		instr->tuplecount += 1.0;
+
+	return result;
+}
+
+/*
+ * Returns an ExecProcNode wrapper that performs instrumentation calls,
+ * tailored to the instrumentation options enabled for the node.
+ */
+ExecProcNodeMtd
+InstrNodeSetupExecProcNode(NodeInstrumentation *instr)
+{
+	bool		need_timer = instr->instr.need_timer;
+	bool		need_buf = (instr->instr.need_bufusage ||
+							instr->instr.need_walusage);
+
+	if (need_timer && need_buf)
+		return ExecProcNodeInstrFull;
+	else if (need_buf)
+		return ExecProcNodeInstrRowsBuffersWalOnly;
+	else if (need_timer)
+		return ExecProcNodeInstrRowsTimerOnly;
+	else
+		return ExecProcNodeInstrRowsOnly;
+}
+
+/* Trigger instrumentation handling */
+TriggerInstrumentation *
+InstrAllocTrigger(int n, int instrument_options)
+{
+	TriggerInstrumentation *tginstr = palloc0(n * sizeof(TriggerInstrumentation));
+	int			i;
+
+	for (i = 0; i < n; i++)
+		InstrInitOptions(&tginstr[i].instr, instrument_options);
+
+	return tginstr;
+}
+
+void
+InstrStartTrigger(TriggerInstrumentation *tginstr)
+{
+	InstrStart(&tginstr->instr);
+}
+
+void
+InstrStopTrigger(TriggerInstrumentation *tginstr, int firings)
+{
+	/*
+	 * This trigger may be called again, so we don't finalize instrumentation
+	 * here. Accumulation to the parent happens at ExecutorFinish through
+	 * ExecFinalizeTriggerInstrumentation.
+	 */
+	InstrStop(&tginstr->instr);
+	tginstr->firings += firings;
+}
+
+void
+InstrAccum(Instrumentation *dst, Instrumentation *add)
+{
+	Assert(dst != NULL);
+	Assert(add != NULL);
+
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -244,39 +673,9 @@ BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 	INSTR_TIME_ADD(dst->temp_blk_write_time, add->temp_blk_write_time);
 }
 
-/* dst += add - sub */
+/* dst += add */
 void
-BufferUsageAccumDiff(BufferUsage *dst,
-					 const BufferUsage *add,
-					 const BufferUsage *sub)
-{
-	dst->shared_blks_hit += add->shared_blks_hit - sub->shared_blks_hit;
-	dst->shared_blks_read += add->shared_blks_read - sub->shared_blks_read;
-	dst->shared_blks_dirtied += add->shared_blks_dirtied - sub->shared_blks_dirtied;
-	dst->shared_blks_written += add->shared_blks_written - sub->shared_blks_written;
-	dst->local_blks_hit += add->local_blks_hit - sub->local_blks_hit;
-	dst->local_blks_read += add->local_blks_read - sub->local_blks_read;
-	dst->local_blks_dirtied += add->local_blks_dirtied - sub->local_blks_dirtied;
-	dst->local_blks_written += add->local_blks_written - sub->local_blks_written;
-	dst->temp_blks_read += add->temp_blks_read - sub->temp_blks_read;
-	dst->temp_blks_written += add->temp_blks_written - sub->temp_blks_written;
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_read_time,
-						  add->shared_blk_read_time, sub->shared_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->shared_blk_write_time,
-						  add->shared_blk_write_time, sub->shared_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_read_time,
-						  add->local_blk_read_time, sub->local_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->local_blk_write_time,
-						  add->local_blk_write_time, sub->local_blk_write_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_read_time,
-						  add->temp_blk_read_time, sub->temp_blk_read_time);
-	INSTR_TIME_ACCUM_DIFF(dst->temp_blk_write_time,
-						  add->temp_blk_write_time, sub->temp_blk_write_time);
-}
-
-/* helper functions for WAL usage accumulation */
-static void
-WalUsageAdd(WalUsage *dst, WalUsage *add)
+WalUsageAdd(WalUsage *dst, const WalUsage *add)
 {
 	dst->wal_bytes += add->wal_bytes;
 	dst->wal_records += add->wal_records;
