@@ -36,6 +36,7 @@
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "commands/async.h"
+#include "commands/dynamic_explain.h"
 #include "commands/event_trigger.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
@@ -3608,6 +3609,9 @@ ProcessInterrupts(void)
 
 	if (LogMemoryContextPending)
 		ProcessLogMemoryContextInterrupt();
+
+	if (LogQueryPlanPending)
+		ProcessLogQueryPlanInterrupt();
 
 	if (ParallelApplyMessagePending)
 		ProcessParallelApplyMessages();
