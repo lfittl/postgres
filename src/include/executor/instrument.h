@@ -283,8 +283,8 @@ extern void InstrQueryStopFinalize(QueryInstrumentation *instr);
 extern void InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentation *instr);
 
 pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
-extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
+extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, Instrumentation *dst);
+extern void InstrAccumParallelQuery(Instrumentation *instr);
 
 extern NodeInstrumentation *InstrAllocNode(QueryInstrumentation *qinstr, bool async_mode);
 extern void InstrInitNode(NodeInstrumentation *instr, int instrument_options);
