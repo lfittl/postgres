@@ -60,13 +60,12 @@
 #define PARALLEL_KEY_EXECUTOR_FIXED		UINT64CONST(0xE000000000000001)
 #define PARALLEL_KEY_PLANNEDSTMT		UINT64CONST(0xE000000000000002)
 #define PARALLEL_KEY_PARAMLISTINFO		UINT64CONST(0xE000000000000003)
-#define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xE000000000000004)
+#define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000004)
 #define PARALLEL_KEY_TUPLE_QUEUE		UINT64CONST(0xE000000000000005)
-#define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000006)
+#define PARALLEL_KEY_NODE_INSTRUMENTATION UINT64CONST(0xE000000000000006)
 #define PARALLEL_KEY_DSA				UINT64CONST(0xE000000000000007)
 #define PARALLEL_KEY_QUERY_TEXT		UINT64CONST(0xE000000000000008)
 #define PARALLEL_KEY_JIT_INSTRUMENTATION UINT64CONST(0xE000000000000009)
-#define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xE00000000000000A)
 
 #define PARALLEL_TUPLE_QUEUE_SIZE		65536
 
@@ -631,8 +630,6 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	char	   *pstmt_data;
 	char	   *pstmt_space;
 	char	   *paramlistinfo_space;
-	BufferUsage *bufusage_space;
-	WalUsage   *walusage_space;
 	SharedExecutorInstrumentation *instrumentation = NULL;
 	SharedJitInstrumentation *jit_instrumentation = NULL;
 	int			pstmt_len;
@@ -696,21 +693,14 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/*
-	 * Estimate space for BufferUsage.
+	 * Estimate space for Instrumentation.
 	 *
 	 * If EXPLAIN is not in use and there are no extensions loaded that care,
 	 * we could skip this.  But we have no way of knowing whether anyone's
 	 * looking at instrumentation, so do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-
-	/*
-	 * Same thing for WalUsage.
-	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
+						   mul_size(sizeof(Instrumentation), pcxt->nworkers));
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Estimate space for tuple queues. */
@@ -796,17 +786,18 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_space);
 	SerializeParamList(estate->es_param_list_info, &paramlistinfo_space);
 
-	/* Allocate space for each worker's BufferUsage; no need to initialize. */
-	bufusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufusage_space);
-	pei->buffer_usage = bufusage_space;
+	/*
+	 * Allocate space for each worker's Instrumentation; no need to
+	 * initialize.
+	 */
+	{
+		Instrumentation *instr;
 
-	/* Same for WalUsage. */
-	walusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage_space);
-	pei->wal_usage = walusage_space;
+		instr = shm_toc_allocate(pcxt->toc,
+								 mul_size(sizeof(Instrumentation), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION, instr);
+		pei->instrumentation = instr;
+	}
 
 	/* Set up the tuple queues that the workers will write into. */
 	pei->tqueue = ExecParallelSetupTupleQueues(pcxt, false);
@@ -832,9 +823,9 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrument = GetInstrumentationArray(instrumentation);
 		for (i = 0; i < nworkers * e.nnodes; ++i)
 			InstrInitNode(&instrument[i], estate->es_instrument->instrument_options);
-		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION,
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_NODE_INSTRUMENTATION,
 					   instrumentation);
-		pei->instrumentation = instrumentation;
+		pei->node_instrumentation = instrumentation;
 
 		if (estate->es_jit_flags != PGJIT_NONE)
 		{
@@ -1236,7 +1227,7 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	 * finish, or we might get incomplete data.)
 	 */
 	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+		InstrAccumParallelQuery(&pei->instrumentation[i]);
 
 	pei->finished = true;
 }
@@ -1250,10 +1241,10 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 void
 ExecParallelCleanup(ParallelExecutorInfo *pei)
 {
-	/* Accumulate instrumentation, if any. */
-	if (pei->instrumentation)
+	/* Accumulate node instrumentation, if any. */
+	if (pei->node_instrumentation)
 		ExecParallelRetrieveInstrumentation(pei->planstate,
-											pei->instrumentation);
+											pei->node_instrumentation);
 
 	/* Accumulate JIT instrumentation, if any. */
 	if (pei->jit_instrumentation)
@@ -1477,8 +1468,6 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
 	QueryInstrumentation *instr;
-	BufferUsage *buffer_usage;
-	WalUsage   *wal_usage;
 	DestReceiver *receiver;
 	QueryDesc  *queryDesc;
 	SharedExecutorInstrumentation *instrumentation;
@@ -1493,7 +1482,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 
 	/* Set up DestReceiver, SharedExecutorInstrumentation, and QueryDesc. */
 	receiver = ExecParallelGetReceiver(seg, toc);
-	instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_INSTRUMENTATION, true);
+	instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_NODE_INSTRUMENTATION, true);
 	if (instrumentation != NULL)
 		instrument_options = instrumentation->instrument_options;
 	jit_instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_JIT_INSTRUMENTATION,
@@ -1551,11 +1540,12 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	ExecutorFinish(queryDesc);
 
 	/* Report buffer/WAL usage during parallel execution. */
-	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
-	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(instr,
-						  &buffer_usage[ParallelWorkerNumber],
-						  &wal_usage[ParallelWorkerNumber]);
+	{
+		Instrumentation *worker_instr;
+
+		worker_instr = shm_toc_lookup(toc, PARALLEL_KEY_INSTRUMENTATION, false);
+		InstrEndParallelQuery(instr, &worker_instr[ParallelWorkerNumber]);
+	}
 
 	/* Report instrumentation data if any instrumentation options are set. */
 	if (instrumentation != NULL)
