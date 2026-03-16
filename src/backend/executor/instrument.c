@@ -293,11 +293,11 @@ InstrStartParallelQuery(void)
 
 /* report usage after parallel executor shutdown */
 void
-InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
+InstrEndParallelQuery(QueryInstrumentation *qinstr, Instrumentation *dst)
 {
 	qinstr = InstrQueryStopFinalize(qinstr);
-	memcpy(bufusage, &qinstr->instr.bufusage, sizeof(BufferUsage));
-	memcpy(walusage, &qinstr->instr.walusage, sizeof(WalUsage));
+	memcpy(&dst->bufusage, &qinstr->instr.bufusage, sizeof(BufferUsage));
+	memcpy(&dst->walusage, &qinstr->instr.walusage, sizeof(WalUsage));
 }
 
 /*
@@ -313,12 +313,11 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
  * activity is accumulated.
  */
 void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrAccumParallelQuery(Instrumentation *instr)
 {
-	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
-	WalUsageAdd(&instr_stack.current->walusage, walusage);
+	InstrAccumStack(instr_stack.current, instr);
 
-	WalUsageAdd(&pgWalUsage, walusage);
+	WalUsageAdd(&pgWalUsage, &instr->walusage);
 }
 
 /* Node instrumentation handling */
