@@ -115,6 +115,8 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 		}
 		else if (strcmp(opt->defname, "memory") == 0)
 			es->memory = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "io") == 0)
+			es->io = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "serialize") == 0)
 		{
 			if (opt->arg)
@@ -184,6 +186,12 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("EXPLAIN option %s requires ANALYZE", "TIMING")));
+
+	/* check that IO is used with EXPLAIN ANALYZE */
+	if (es->io && !es->analyze)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("EXPLAIN option %s requires ANALYZE", "IO")));
 
 	/* check that serialize is used with EXPLAIN ANALYZE */
 	if (es->serialize != EXPLAIN_SERIALIZE_NONE && !es->analyze)

@@ -1336,6 +1336,7 @@ InvalMessageArray
 InvalidationInfo
 InvalidationMsgsGroup
 IoMethodOps
+IOUsage
 IpcMemoryId
 IpcMemoryKey
 IpcMemoryState

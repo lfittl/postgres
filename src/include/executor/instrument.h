@@ -58,6 +58,22 @@ typedef struct WalUsage
 	int64		wal_buffers_full;	/* # of times the WAL buffers became full */
 } WalUsage;
 
+/*
+ * IOUsage tracks I/O prefetch activity that can be measured per executor
+ * node and displayed by EXPLAIN (ANALYZE, IO).
+ */
+typedef struct IOUsage
+{
+	int64		count;			/* # of buffers returned */
+	int64		distance_sum;	/* sum of look-ahead distances */
+	int64		distance_max;	/* max look-ahead distance observed */
+	int64		distance_capacity;	/* max possible look-ahead */
+	int64		stall_count;	/* # of I/O stalls */
+	int64		io_count;		/* # of I/O operations */
+	int64		io_blocks;		/* total blocks across I/Os */
+	int64		ios_in_progress;	/* sum of in-progress I/Os */
+} IOUsage;
+
 /* Flag bits included in InstrAlloc's instrument_options bitmask */
 typedef enum InstrumentOption
 {
@@ -65,6 +81,7 @@ typedef enum InstrumentOption
 	INSTRUMENT_BUFFERS = 1 << 1,	/* needs buffer usage */
 	INSTRUMENT_ROWS = 1 << 2,	/* needs row count */
 	INSTRUMENT_WAL = 1 << 3,	/* needs WAL usage */
+	INSTRUMENT_IO = 1 << 4,		/* needs I/O prefetch usage */
 	INSTRUMENT_ALL = PG_INT32_MAX
 } InstrumentOption;
 
@@ -92,12 +109,14 @@ typedef struct Instrumentation
 	bool		need_timer;		/* true if we need timer data */
 	bool		need_bufusage;	/* true if we need buffer usage data */
 	bool		need_walusage;	/* true if we need WAL usage data */
+	bool		need_iousage;	/* true if we need I/O prefetch data */
 	/* Internal state keeping: */
 	instr_time	starttime;		/* start time of last InstrStart */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
 	BufferUsage bufusage;		/* total buffer usage */
 	WalUsage	walusage;		/* total WAL usage */
+	IOUsage		iousage;		/* total I/O prefetch usage */
 } Instrumentation;
 
 /*
@@ -301,6 +320,7 @@ extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
 extern void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
+extern void IOUsageAdd(IOUsage *dst, const IOUsage *add);
 
 #define INSTR_BUFUSAGE_INCR(fld) do { \
 		instr_stack.current->bufusage.fld++; \
@@ -322,6 +342,17 @@ extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 #define INSTR_WALUSAGE_ADD(fld,val) do { \
 		pgWalUsage.fld += val; \
 		instr_stack.current->walusage.fld += val; \
+	} while(0)
+
+#define INSTR_IOUSAGE_INCR(fld) do { \
+		instr_stack.current->iousage.fld++; \
+	} while(0)
+#define INSTR_IOUSAGE_ADD(fld,val) do { \
+		instr_stack.current->iousage.fld += val; \
+	} while(0)
+#define INSTR_IOUSAGE_MAX(fld,val) do { \
+		if ((val) > instr_stack.current->iousage.fld) \
+			instr_stack.current->iousage.fld = (val); \
 	} while(0)
 
 #endif							/* INSTRUMENT_H */

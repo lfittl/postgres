@@ -46,6 +46,7 @@ InstrInitOptions(Instrumentation *instr, int instrument_options)
 {
 	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
 	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
+	instr->need_iousage = (instrument_options & INSTRUMENT_IO) != 0;
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 }
 
@@ -76,7 +77,7 @@ InstrStart(Instrumentation *instr)
 	if (instr->need_timer)
 		InstrStartTimer(instr);
 
-	if (instr->need_bufusage || instr->need_walusage)
+	if (instr->need_bufusage || instr->need_walusage || instr->need_iousage)
 		InstrPushStack(instr);
 }
 
@@ -86,7 +87,7 @@ InstrStop(Instrumentation *instr)
 	if (instr->need_timer)
 		InstrStopTimer(instr);
 
-	if (instr->need_bufusage || instr->need_walusage)
+	if (instr->need_bufusage || instr->need_walusage || instr->need_iousage)
 		InstrPopStack(instr);
 }
 
@@ -197,7 +198,9 @@ InstrQueryAlloc(int instrument_options)
 	 * survives transaction abort — ResourceOwner release needs to access
 	 * it.
 	 */
-	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 || (instrument_options & INSTRUMENT_WAL) != 0)
+	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 ||
+		(instrument_options & INSTRUMENT_WAL) != 0 ||
+		(instrument_options & INSTRUMENT_IO) != 0)
 		instr = MemoryContextAllocZero(TopMemoryContext, sizeof(QueryInstrumentation));
 	else
 		instr = palloc0(sizeof(QueryInstrumentation));
@@ -213,7 +216,7 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 {
 	InstrStart(&qinstr->instr);
 
-	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage)
+	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage || qinstr->instr.need_iousage)
 	{
 		Assert(CurrentResourceOwner != NULL);
 		qinstr->owner = CurrentResourceOwner;
@@ -228,7 +231,7 @@ InstrQueryStop(QueryInstrumentation *qinstr)
 {
 	InstrStop(&qinstr->instr);
 
-	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage)
+	if (qinstr->instr.need_bufusage || qinstr->instr.need_walusage || qinstr->instr.need_iousage)
 	{
 		Assert(qinstr->owner != NULL);
 		ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
@@ -243,7 +246,7 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 
 	InstrStopFinalize(&qinstr->instr);
 
-	if (!qinstr->instr.need_bufusage && !qinstr->instr.need_walusage)
+	if (!qinstr->instr.need_bufusage && !qinstr->instr.need_walusage && !qinstr->instr.need_iousage)
 		return qinstr;
 
 	Assert(qinstr->owner != NULL);
@@ -270,7 +273,7 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 void
 InstrQueryRememberNode(QueryInstrumentation *parent, NodeInstrumentation *child)
 {
-	if (child->instr.need_bufusage || child->instr.need_walusage)
+	if (child->instr.need_bufusage || child->instr.need_walusage || child->instr.need_iousage)
 		dlist_push_head(&parent->unfinalized_children, &child->unfinalized_node);
 }
 
@@ -278,7 +281,7 @@ InstrQueryRememberNode(QueryInstrumentation *parent, NodeInstrumentation *child)
 QueryInstrumentation *
 InstrStartParallelQuery(void)
 {
-	QueryInstrumentation *qinstr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+	QueryInstrumentation *qinstr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL | INSTRUMENT_IO);
 
 	InstrQueryStart(qinstr);
 	return qinstr;
@@ -291,6 +294,7 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, Instrumentation *dst)
 	qinstr = InstrQueryStopFinalize(qinstr);
 	memcpy(&dst->bufusage, &qinstr->instr.bufusage, sizeof(BufferUsage));
 	memcpy(&dst->walusage, &qinstr->instr.walusage, sizeof(WalUsage));
+	memcpy(&dst->iousage, &qinstr->instr.iousage, sizeof(IOUsage));
 }
 
 /*
@@ -310,6 +314,7 @@ InstrAccumParallelQuery(Instrumentation *instr)
 {
 	BufferUsageAdd(&instr_stack.current->bufusage, &instr->bufusage);
 	WalUsageAdd(&instr_stack.current->walusage, &instr->walusage);
+	IOUsageAdd(&instr_stack.current->iousage, &instr->iousage);
 
 	WalUsageAdd(&pgWalUsage, &instr->walusage);
 }
@@ -329,7 +334,9 @@ InstrAllocNode(int instrument_options, bool async_mode)
 	 * utility commands that restart transactions, which would require a
 	 * context that survives longer (EXPLAIN ANALYZE is fine).
 	 */
-	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 || (instrument_options & INSTRUMENT_WAL) != 0)
+	if ((instrument_options & INSTRUMENT_BUFFERS) != 0 ||
+		(instrument_options & INSTRUMENT_WAL) != 0 ||
+		(instrument_options & INSTRUMENT_IO) != 0)
 		instr = MemoryContextAlloc(TopTransactionContext, sizeof(NodeInstrumentation));
 	else
 		instr = palloc(sizeof(NodeInstrumentation));
@@ -392,7 +399,7 @@ InstrStopNode(NodeInstrumentation *instr, double nTuples)
 		InstrStopNodeTimer(instr);
 
 	/* Only pop the stack, accumulation runs in InstrFinalizeNode */
-	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+	if (instr->instr.need_bufusage || instr->instr.need_walusage || instr->instr.need_iousage)
 		InstrPopStack(&instr->instr);
 
 	instr->running = true;
@@ -407,7 +414,7 @@ InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
 	NodeInstrumentation *dst;
 
 	/* If we didn't use stack based instrumentation, nothing to be done */
-	if (!instr->instr.need_bufusage && !instr->instr.need_walusage)
+	if (!instr->instr.need_bufusage && !instr->instr.need_walusage && !instr->instr.need_iousage)
 		return instr;
 
 	/* Copy into per-query memory context */
@@ -418,7 +425,7 @@ InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
 	InstrAccum(parent, &dst->instr);
 
 	/* Unregister from query's unfinalized list before freeing */
-	if (instr->instr.need_bufusage || instr->instr.need_walusage)
+	if (instr->instr.need_bufusage || instr->instr.need_walusage || instr->instr.need_iousage)
 		dlist_delete(&instr->unfinalized_node);
 
 	pfree(instr);
@@ -489,6 +496,9 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 
 	if (dst->instr.need_walusage)
 		WalUsageAdd(&dst->instr.walusage, &add->instr.walusage);
+
+	if (dst->instr.need_iousage)
+		IOUsageAdd(&dst->instr.iousage, &add->instr.iousage);
 }
 
 /*
@@ -598,7 +608,8 @@ InstrNodeSetupExecProcNode(NodeInstrumentation *instr)
 {
 	bool		need_timer = instr->instr.need_timer;
 	bool		need_buf = (instr->instr.need_bufusage ||
-							instr->instr.need_walusage);
+							instr->instr.need_walusage ||
+							instr->instr.need_iousage);
 
 	if (need_timer && need_buf)
 		return ExecProcNodeInstrFull;
@@ -649,6 +660,7 @@ InstrAccum(Instrumentation *dst, Instrumentation *add)
 
 	BufferUsageAdd(&dst->bufusage, &add->bufusage);
 	WalUsageAdd(&dst->walusage, &add->walusage);
+	IOUsageAdd(&dst->iousage, &add->iousage);
 }
 
 /* dst += add */
@@ -682,6 +694,22 @@ WalUsageAdd(WalUsage *dst, const WalUsage *add)
 	dst->wal_fpi += add->wal_fpi;
 	dst->wal_fpi_bytes += add->wal_fpi_bytes;
 	dst->wal_buffers_full += add->wal_buffers_full;
+}
+
+/* dst += add (using max semantics for distance_max and distance_capacity) */
+void
+IOUsageAdd(IOUsage *dst, const IOUsage *add)
+{
+	dst->count += add->count;
+	dst->distance_sum += add->distance_sum;
+	if (add->distance_max > dst->distance_max)
+		dst->distance_max = add->distance_max;
+	if (add->distance_capacity > dst->distance_capacity)
+		dst->distance_capacity = add->distance_capacity;
+	dst->stall_count += add->stall_count;
+	dst->io_count += add->io_count;
+	dst->io_blocks += add->io_blocks;
+	dst->ios_in_progress += add->ios_in_progress;
 }
 
 void

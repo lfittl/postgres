@@ -334,7 +334,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 * Start up required top-level instrumentation stack for WAL/buffer
 	 * tracking
 	 */
-	if (!queryDesc->totaltime && (estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)))
+	if (!queryDesc->totaltime && (estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL | INSTRUMENT_IO)))
 		queryDesc->totaltime = InstrQueryAlloc(estate->es_instrument);
 
 	if (queryDesc->totaltime)
@@ -347,7 +347,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		 * after the first call to InstrQueryStart has pushed the parent
 		 * entry.
 		 */
-		if ((estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) &&
+		if ((estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL | INSTRUMENT_IO)) &&
 			!queryDesc->already_executed)
 			ExecRememberNodeInstrumentation(queryDesc->planstate,
 											queryDesc->totaltime);
@@ -1535,7 +1535,7 @@ ExecFinalizeTriggerInstrumentation(EState *estate)
 	{
 		TriggerInstrumentation *ti = rInfo->ri_TrigInstrument;
 
-		if (ti && (ti->instr.need_bufusage || ti->instr.need_walusage))
+		if (ti && (ti->instr.need_bufusage || ti->instr.need_walusage || ti->instr.need_iousage))
 			InstrAccum(instr_stack.current, &ti->instr);
 	}
 }

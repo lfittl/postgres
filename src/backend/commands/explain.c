@@ -145,6 +145,7 @@ static const char *explain_get_index_name(Oid indexId);
 static bool peek_buffer_usage(ExplainState *es, const BufferUsage *usage);
 static void show_buffer_usage(ExplainState *es, const BufferUsage *usage, const char *title);
 static void show_wal_usage(ExplainState *es, const WalUsage *usage);
+static void show_io_usage(ExplainState *es, const IOUsage *usage);
 static void show_memory_counters(ExplainState *es,
 								 const MemoryContextCounters *mem_counters);
 static void show_result_replacement_info(Result *result, ExplainState *es);
@@ -509,6 +510,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		instrument_option |= INSTRUMENT_BUFFERS;
 	if (es->wal)
 		instrument_option |= INSTRUMENT_WAL;
+	if (es->io)
+		instrument_option |= INSTRUMENT_IO;
 
 	/*
 	 * We always collect timing for the entire statement, even when node-level
@@ -2281,14 +2284,16 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
-	/* Show buffer/WAL usage */
+	/* Show buffer/WAL/IO usage */
 	if (es->buffers && planstate->instrument)
 		show_buffer_usage(es, &planstate->instrument->instr.bufusage, NULL);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instr.walusage);
+	if (es->io && planstate->instrument)
+		show_io_usage(es, &planstate->instrument->instr.iousage);
 
-	/* Prepare per-worker buffer/WAL usage */
-	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
+	/* Prepare per-worker buffer/WAL/IO usage */
+	if (es->workers_state && (es->buffers || es->wal || es->io) && es->verbose)
 	{
 		WorkerNodeInstrumentation *w = planstate->worker_instrument;
 
@@ -2305,6 +2310,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_buffer_usage(es, &instrument->instr.bufusage, NULL);
 			if (es->wal)
 				show_wal_usage(es, &instrument->instr.walusage);
+			if (es->io)
+				show_io_usage(es, &instrument->instr.iousage);
 			ExplainCloseWorker(n, es);
 		}
 	}
@@ -4340,6 +4347,68 @@ show_wal_usage(ExplainState *es, const WalUsage *usage)
 								usage->wal_fpi_bytes, es);
 		ExplainPropertyInteger("WAL Buffers Full", NULL,
 							   usage->wal_buffers_full, es);
+	}
+}
+
+/*
+ * Show I/O prefetch usage details.
+ */
+static void
+show_io_usage(ExplainState *es, const IOUsage *usage)
+{
+	/* Nothing to show if no buffers were returned */
+	if (usage->count <= 0)
+		return;
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		/* prefetch distance info */
+		ExplainIndentText(es);
+		appendStringInfo(es->str, "Prefetch: avg=%.3f max=%" PRId64 " capacity=%" PRId64,
+						 (usage->distance_sum * 1.0 / usage->count),
+						 usage->distance_max,
+						 usage->distance_capacity);
+		appendStringInfoChar(es->str, '\n');
+
+		/* prefetch I/O info (only if there were actual I/Os) */
+		if (usage->stall_count > 0 || usage->io_count > 0)
+		{
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "I/O: stalls=%" PRId64,
+							 usage->stall_count);
+
+			if (usage->io_count > 0)
+			{
+				appendStringInfo(es->str, " size=%.3f inprogress=%.3f",
+								 (usage->io_blocks * 1.0 / usage->io_count),
+								 (usage->ios_in_progress * 1.0 / usage->io_count));
+			}
+
+			appendStringInfoChar(es->str, '\n');
+		}
+	}
+	else
+	{
+		ExplainOpenGroup("Prefetch", "I/O", true, es);
+
+		ExplainPropertyFloat("Average Distance", NULL,
+							 (usage->distance_sum * 1.0 / usage->count), 3, es);
+		ExplainPropertyInteger("Max Distance", NULL,
+							   usage->distance_max, es);
+		ExplainPropertyInteger("Capacity", NULL,
+							   usage->distance_capacity, es);
+		ExplainPropertyInteger("Stalls", NULL,
+							   usage->stall_count, es);
+
+		if (usage->io_count > 0)
+		{
+			ExplainPropertyFloat("Average IO Size", NULL,
+								 (usage->io_blocks * 1.0 / usage->io_count), 3, es);
+			ExplainPropertyFloat("Average IOs In Progress", NULL,
+								 (usage->ios_in_progress * 1.0 / usage->io_count), 3, es);
+		}
+
+		ExplainCloseGroup("Prefetch", "I/O", true, es);
 	}
 }
 
