@@ -1335,6 +1335,7 @@ InjectionPointSharedState
 InjectionPointsCtl
 InlineCodeBlock
 InsertStmt
+InstrStackState
 Instrumentation
 Int128AggState
 Int8TransTypeData
@@ -1350,6 +1351,7 @@ InvalMessageArray
 InvalidationInfo
 InvalidationMsgsGroup
 IoMethodOps
+IOUsage
 IpcMemoryId
 IpcMemoryKey
 IpcMemoryState
@@ -1801,6 +1803,7 @@ NextSampleBlock_function
 NextSampleTuple_function
 NextValueExpr
 Node
+NodeInstrumentation
 NodeTag
 NonEmptyRange
 NoneCompressorState
@@ -2449,6 +2452,7 @@ QueryCompletion
 QueryDesc
 QueryEnvironment
 QueryInfo
+QueryInstrumentation
 QueryItem
 QueryItemType
 QueryMode
@@ -3183,6 +3187,7 @@ TriggerDesc
 TriggerEvent
 TriggerFlags
 TriggerInfo
+TriggerInstrumentation
 TriggerTransition
 TruncateStmt
 TsmRoutine
@@ -3403,9 +3408,9 @@ WorkTableScan
 WorkTableScanState
 WorkerInfo
 WorkerInfoData
-WorkerInstrumentation
 WorkerJobDumpPtrType
 WorkerJobRestorePtrType
+WorkerNodeInstrumentation
 Working_State
 WriteBufPtrType
 WriteBytePtrType

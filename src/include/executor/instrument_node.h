@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "executor/instrument.h"
+
 
 /* ---------------------
  *	Instrumentation information for aggregate function execution
@@ -48,6 +50,10 @@ typedef struct IndexScanInstrumentation
 {
 	/* Index search count (incremented with pgstat_count_index_scan call) */
 	uint64		nsearches;
+
+	/* Used for passing iss_InstrumentTableStack data from parallel workers */
+	BufferUsage worker_table_bufusage;
+	WalUsage	worker_table_walusage;
 } IndexScanInstrumentation;
 
 /*

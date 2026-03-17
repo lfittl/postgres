@@ -71,6 +71,7 @@
  */
 #include "postgres.h"
 
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "storage/aio.h"
 #include "storage/fd.h"
@@ -170,6 +171,19 @@ block_range_read_stream_cb(ReadStream *stream,
 		return p->current_blocknum++;
 
 	return InvalidBlockNumber;
+}
+
+/*
+ * Update IO instrumentation when returning a buffer to the consumer.
+ * Records the current look-ahead depth for averaging.
+ */
+static inline void
+read_stream_instr_update(ReadStream *stream)
+{
+	INSTR_IOUSAGE_INCR(count);
+	INSTR_IOUSAGE_ADD(distance_sum, stream->pinned_buffers);
+	INSTR_IOUSAGE_MAX(distance_max, stream->pinned_buffers);
+	INSTR_IOUSAGE_MAX(distance_capacity, stream->max_pinned_buffers);
 }
 
 /*
@@ -380,6 +394,11 @@ read_stream_start_pending_read(ReadStream *stream)
 		Assert(stream->ios_in_progress < stream->max_ios);
 		stream->ios_in_progress++;
 		stream->seq_blocknum = stream->pending_read_blocknum + nblocks;
+
+		/* Update I/O stats */
+		INSTR_IOUSAGE_INCR(io_count);
+		INSTR_IOUSAGE_ADD(io_blocks, nblocks);
+		INSTR_IOUSAGE_ADD(ios_in_progress, stream->ios_in_progress);
 	}
 
 	/*
@@ -851,6 +870,7 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 										flags)))
 			{
 				/* Fast return. */
+				read_stream_instr_update(stream);
 				return buffer;
 			}
 
@@ -860,6 +880,9 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 			stream->ios_in_progress = 1;
 			stream->ios[0].buffer_index = oldest_buffer_index;
 			stream->seq_blocknum = next_blocknum + 1;
+
+			/* Since we executed IO synchronously, count it as a stall */
+			INSTR_IOUSAGE_INCR(stall_count);
 		}
 		else
 		{
@@ -871,6 +894,7 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 		}
 
 		stream->fast_path = false;
+		read_stream_instr_update(stream);
 		return buffer;
 	}
 #endif
@@ -916,12 +940,17 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 	{
 		int16		io_index = stream->oldest_io_index;
 		int32		distance;	/* wider temporary value, clamped below */
+		bool		needed_wait;
 
 		/* Sanity check that we still agree on the buffers. */
 		Assert(stream->ios[io_index].op.buffers ==
 			   &stream->buffers[oldest_buffer_index]);
 
-		WaitReadBuffers(&stream->ios[io_index].op);
+		needed_wait = WaitReadBuffers(&stream->ios[io_index].op);
+
+		/* Count it as a stall if we needed to wait for I/O */
+		if (needed_wait)
+			INSTR_IOUSAGE_INCR(stall_count);
 
 		Assert(stream->ios_in_progress > 0);
 		stream->ios_in_progress--;
@@ -980,6 +1009,8 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 #endif
 	}
 #endif
+
+	read_stream_instr_update(stream);
 
 	/* Pin transferred to caller. */
 	Assert(stream->pinned_buffers > 0);
