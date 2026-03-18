@@ -126,10 +126,11 @@ typedef struct QueryInstrumentation
 	struct ResourceOwnerData *owner;
 
 	/*
-	 * NodeInstrumentation child entries that need to be cleaned up on abort,
-	 * since they are not registered as a resource owner themselves.
+	 * Child entries that need to be cleaned up on abort, since they are not
+	 * registered as a resource owner themselves.
 	 */
-	dlist_head	unfinalized_children;	/* head of unfinalized children list */
+	dlist_head	unfinalized_children;	/* unfinalized node entries */
+	dlist_head	unfinalized_triggers;	/* unfinalized trigger entries */
 } QueryInstrumentation;
 
 /*
@@ -177,6 +178,9 @@ typedef struct TriggerInstrumentation
 	Instrumentation instr;
 	int			firings;		/* number of times the instrumented trigger
 								 * was fired */
+
+	/* Abort handling */
+	dlist_node	unfinalized_trigger;	/* link in parent's unfinalized list */
 } TriggerInstrumentation;
 
 /*
@@ -289,7 +293,8 @@ typedef TupleTableSlot *(*ExecProcNodeMtd) (PlanState *pstate);
 extern ExecProcNodeMtd InstrNodeSetupExecProcNode(NodeInstrumentation *instr);
 
 extern TriggerInstrumentation *InstrAllocTrigger(int n, int instrument_options);
-extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
+extern void InstrStartTrigger(QueryInstrumentation *qinstr,
+							  TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int firings);
 
 extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);

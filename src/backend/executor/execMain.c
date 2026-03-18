@@ -345,6 +345,12 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		InstrQueryStart(queryDesc->totaltime);
 
 		/*
+		 * Make query instrumentation available to trigger code via estate,
+		 * so triggers can register for abort recovery.
+		 */
+		estate->es_query_instr = queryDesc->totaltime;
+
+		/*
 		 * Remember all node entries for abort recovery. We do this once here
 		 * after the first call to InstrQueryStart has pushed the parent
 		 * entry.

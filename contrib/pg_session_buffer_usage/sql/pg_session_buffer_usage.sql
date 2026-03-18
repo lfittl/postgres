@@ -151,6 +151,47 @@ FROM pg_session_buffer_usage();
 DROP FUNCTION cursor_exc_func;
 DROP TABLE cursor_tab;
 
+-- Trigger abort under EXPLAIN ANALYZE: verify that buffer activity from a
+-- trigger that throws an error is still properly propagated.
+CREATE TEMP TABLE trig_err_tab (a int);
+CREATE TEMP TABLE trig_work_tab (a int, b char(200));
+INSERT INTO trig_work_tab SELECT i, repeat('x', 200) FROM generate_series(1, 500) AS i;
+
+-- Warm local buffers so trig_work_tab reads become hits
+SELECT count(*) FROM trig_work_tab;
+
+CREATE FUNCTION trig_err_func() RETURNS trigger AS $$
+BEGIN
+    PERFORM count(*) FROM trig_work_tab;
+    RAISE EXCEPTION 'trigger error';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trig_err BEFORE INSERT ON trig_err_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_err_func();
+
+-- Measure how many local buffer hits a scan of trig_work_tab produces
+SELECT pg_session_buffer_usage_reset();
+SELECT count(*) FROM trig_work_tab;
+
+CREATE TEMP TABLE trig_serial_result AS
+SELECT local_blks_hit AS serial_hits FROM pg_session_buffer_usage();
+
+-- Now trigger the same scan via a trigger that errors
+SELECT pg_session_buffer_usage_reset();
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+    INSERT INTO trig_err_tab VALUES (1);
+
+-- The trigger scanned trig_work_tab but errored before InstrStopTrigger ran.
+-- InstrStopFinalize in the PG_CATCH ensures buffer data is still propagated.
+SELECT local_blks_hit >= s.serial_hits / 2
+       AS trigger_abort_buffers_propagated
+FROM pg_session_buffer_usage(), trig_serial_result s;
+
+DROP TABLE trig_err_tab, trig_work_tab, trig_serial_result;
+DROP FUNCTION trig_err_func;
+
 -- Parallel worker abort: worker buffer activity is currently NOT propagated on abort.
 --
 -- When a parallel worker aborts, InstrEndParallelQuery and

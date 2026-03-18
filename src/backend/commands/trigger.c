@@ -93,6 +93,7 @@ static HeapTuple ExecCallTriggerFunc(TriggerData *trigdata,
 									 int tgindx,
 									 FmgrInfo *finfo,
 									 TriggerInstrumentation *instr,
+									 QueryInstrumentation *qinstr,
 									 MemoryContext per_tuple_context);
 static void AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 								  ResultRelInfo *src_partinfo,
@@ -2312,6 +2313,7 @@ ExecCallTriggerFunc(TriggerData *trigdata,
 					int tgindx,
 					FmgrInfo *finfo,
 					TriggerInstrumentation *instr,
+					QueryInstrumentation *qinstr,
 					MemoryContext per_tuple_context)
 {
 	LOCAL_FCINFO(fcinfo, 0);
@@ -2346,7 +2348,7 @@ ExecCallTriggerFunc(TriggerData *trigdata,
 	 * If doing EXPLAIN ANALYZE, start charging time to this trigger.
 	 */
 	if (instr)
-		InstrStartTrigger(instr + tgindx);
+		InstrStartTrigger(qinstr, instr + tgindx);
 
 	/*
 	 * Do the function evaluation in the per-tuple memory context, so that
@@ -2441,6 +2443,7 @@ ExecBSInsertTriggers(EState *estate, ResultRelInfo *relinfo)
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 
 		if (newtuple)
@@ -2502,6 +2505,7 @@ ExecBRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
@@ -2606,6 +2610,7 @@ ExecIRInsertTriggers(EState *estate, ResultRelInfo *relinfo,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
@@ -2670,6 +2675,7 @@ ExecBSDeleteTriggers(EState *estate, ResultRelInfo *relinfo)
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 
 		if (newtuple)
@@ -2780,6 +2786,7 @@ ExecBRDeleteTriggers(EState *estate, EPQState *epqstate,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
@@ -2884,6 +2891,7 @@ ExecIRDeleteTriggers(EState *estate, ResultRelInfo *relinfo,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 		if (rettuple == NULL)
 			return false;		/* Delete was suppressed */
@@ -2942,6 +2950,7 @@ ExecBSUpdateTriggers(EState *estate, ResultRelInfo *relinfo)
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 
 		if (newtuple)
@@ -3094,6 +3103,7 @@ ExecBRUpdateTriggers(EState *estate, EPQState *epqstate,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 
 		if (newtuple == NULL)
@@ -3258,6 +3268,7 @@ ExecIRUpdateTriggers(EState *estate, ResultRelInfo *relinfo,
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 		if (newtuple == NULL)
 		{
@@ -3316,6 +3327,7 @@ ExecBSTruncateTriggers(EState *estate, ResultRelInfo *relinfo)
 									   i,
 									   relinfo->ri_TrigFunctions,
 									   relinfo->ri_TrigInstrument,
+									   estate->es_query_instr,
 									   GetPerTupleMemoryContext(estate));
 
 		if (newtuple)
@@ -4373,7 +4385,7 @@ AfterTriggerExecute(EState *estate,
 	 * to include time spent re-fetching tuples in the trigger cost.
 	 */
 	if (instr)
-		InstrStartTrigger(instr + tgindx);
+		InstrStartTrigger(estate->es_query_instr, instr + tgindx);
 
 	/*
 	 * Fetch the required tuple(s).
@@ -4560,6 +4572,7 @@ AfterTriggerExecute(EState *estate,
 	rettuple = ExecCallTriggerFunc(&LocTriggerData,
 								   tgindx,
 								   finfo,
+								   NULL,
 								   NULL,
 								   per_tuple_context);
 	if (rettuple != NULL &&

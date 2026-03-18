@@ -26,18 +26,23 @@ InstrStackState instr_stack = {0, 0, NULL, &instr_top};
 void
 InstrStackGrow(void)
 {
+	int			space = instr_stack.stack_space;
+
 	if (instr_stack.entries == NULL)
 	{
-		instr_stack.stack_space = 10;	/* Allocate sufficient initial space
-										 * for typical activity */
+		space = 10;				/* Allocate sufficient initial space for
+								 * typical activity */
 		instr_stack.entries = MemoryContextAlloc(TopMemoryContext,
-												 sizeof(Instrumentation *) * instr_stack.stack_space);
+												 sizeof(Instrumentation *) * space);
 	}
 	else
 	{
-		instr_stack.stack_space *= 2;
-		instr_stack.entries = repalloc_array(instr_stack.entries, Instrumentation *, instr_stack.stack_space);
+		space *= 2;
+		instr_stack.entries = repalloc_array(instr_stack.entries, Instrumentation *, space);
 	}
+
+	/* Update stack space after allocation succeeded to protect against OOMs */
+	instr_stack.stack_space = space;
 }
 
 /* General purpose instrumentation handling */
@@ -179,6 +184,20 @@ ResOwnerReleaseInstrumentation(Datum res)
 		pfree(child);
 	}
 
+	/* Accumulate data from any active trigger instrumentation entries. */
+	dlist_foreach_modify(iter, &qinstr->unfinalized_triggers)
+	{
+		TriggerInstrumentation *tginstr = dlist_container(TriggerInstrumentation, unfinalized_trigger, iter.cur);
+
+		InstrAccumStack(&qinstr->instr, &tginstr->instr);
+
+		/*
+		 * We can't pfree tginstr here, since its part of a bigger allocation - we'll instead
+		 * let transaction end deal with clean up, and instead just remove the list entry.
+		 */
+		dlist_delete(&tginstr->unfinalized_trigger);
+	}
+
 	/* Ensure the stack is reset as expected, and we accumulate to the parent */
 	InstrStopFinalize(&qinstr->instr);
 
@@ -203,6 +222,7 @@ InstrQueryAlloc(int instrument_options)
 
 	InstrInitOptions(&instr->instr, instrument_options);
 	dlist_init(&instr->unfinalized_children);
+	dlist_init(&instr->unfinalized_triggers);
 
 	return instr;
 }
@@ -609,7 +629,17 @@ InstrNodeSetupExecProcNode(NodeInstrumentation *instr)
 TriggerInstrumentation *
 InstrAllocTrigger(int n, int instrument_options)
 {
-	TriggerInstrumentation *tginstr = palloc0(n * sizeof(TriggerInstrumentation));
+	TriggerInstrumentation *tginstr;
+
+	/*
+	 * If needed, allocate in TopTransactionContext so the memory survives
+	 * transaction abort — ResOwnerReleaseInstrumentation needs to access it.
+	 */
+	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0)
+		tginstr = MemoryContextAllocZero(TopTransactionContext,
+										 n * sizeof(TriggerInstrumentation));
+	else
+		tginstr = palloc0(n * sizeof(TriggerInstrumentation));
 	int			i;
 
 	for (i = 0; i < n; i++)
@@ -619,9 +649,23 @@ InstrAllocTrigger(int n, int instrument_options)
 }
 
 void
-InstrStartTrigger(TriggerInstrumentation *tginstr)
+InstrStartTrigger(QueryInstrumentation *qinstr, TriggerInstrumentation *tginstr)
 {
 	InstrStart(&tginstr->instr);
+
+	/*
+	 * On first call, register with the parent QueryInstrumentation for abort
+	 * recovery. The trigger stays on the list for the query lifetime -- on
+	 * normal completion ExecFinalizeTriggerInstrumentation handles it, on
+	 * abort ResOwnerReleaseInstrumentation does.
+	 *
+	 * We detect first call by checking if the dlist_node is still in its
+	 * palloc0-zeroed state (prev == NULL).
+	 */
+	if (qinstr && tginstr->instr.need_stack &&
+		tginstr->unfinalized_trigger.prev == NULL)
+		dlist_push_head(&qinstr->unfinalized_triggers,
+						&tginstr->unfinalized_trigger);
 }
 
 void
