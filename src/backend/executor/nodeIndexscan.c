@@ -85,7 +85,9 @@ IndexNext(IndexScanState *node)
 	ExprContext *econtext;
 	ScanDirection direction;
 	IndexScanDesc scandesc;
+	ItemPointer tid;
 	TupleTableSlot *slot;
+	bool		found;
 
 	/*
 	 * extract necessary information from index scan node
@@ -130,8 +132,24 @@ IndexNext(IndexScanState *node)
 	/*
 	 * ok, now that we have what we need, fetch the next tuple.
 	 */
-	while (index_getnext_slot(scandesc, direction, slot))
+	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
+		if (node->iss_InstrumentTable)
+			InstrPushStack(&node->iss_InstrumentTable->instr);
+
+		for (;;)
+		{
+			found = index_fetch_heap(scandesc, slot);
+			if (found || !scandesc->xs_heap_continue)
+				break;
+		}
+
+		if (node->iss_InstrumentTable)
+			InstrPopStack(&node->iss_InstrumentTable->instr);
+
+		if (unlikely(!found))
+			continue;
+
 		CHECK_FOR_INTERRUPTS();
 
 		/*
@@ -259,35 +277,66 @@ IndexNextWithReorder(IndexScanState *node)
 		}
 
 		/*
-		 * Fetch next tuple from the index.
+		 * Fetch next valid tuple from the index.
 		 */
-next_indextuple:
-		if (!index_getnext_slot(scandesc, ForwardScanDirection, slot))
+		for (;;)
 		{
+			ItemPointer tid;
+			bool		found;
+
+			/* Time to fetch the next TID from the index */
+			tid = index_getnext_tid(scandesc, ForwardScanDirection);
+
+			/* If we're out of index entries, we're done */
+			if (tid == NULL)
+			{
+				/*
+				 * No more tuples from the index.  But we still need to drain
+				 * any remaining tuples from the queue before we're done.
+				 */
+				node->iss_ReachedEnd = true;
+				break;
+			}
+
+			Assert(ItemPointerEquals(tid, &scandesc->xs_heaptid));
+
+			if (node->iss_InstrumentTable)
+				InstrPushStack(&node->iss_InstrumentTable->instr);
+
+			for (;;)
+			{
+				found = index_fetch_heap(scandesc, slot);
+				if (found || !scandesc->xs_heap_continue)
+					break;
+			}
+
+			if (node->iss_InstrumentTable)
+				InstrPopStack(&node->iss_InstrumentTable->instr);
+
 			/*
-			 * No more tuples from the index.  But we still need to drain any
-			 * remaining tuples from the queue before we're done.
+			 * If the index was lossy, we have to recheck the index quals and
+			 * ORDER BY expressions using the fetched tuple.
 			 */
-			node->iss_ReachedEnd = true;
-			continue;
+			if (found && scandesc->xs_recheck)
+			{
+				econtext->ecxt_scantuple = slot;
+				if (!ExecQualAndReset(node->indexqualorig, econtext))
+				{
+					/* Fails recheck, so drop it and loop back for another */
+					InstrCountFiltered2(node, 1);
+					/* allow this loop to be cancellable */
+					CHECK_FOR_INTERRUPTS();
+					continue;
+				}
+			}
+
+			if (found)
+				break;
 		}
 
-		/*
-		 * If the index was lossy, we have to recheck the index quals and
-		 * ORDER BY expressions using the fetched tuple.
-		 */
-		if (scandesc->xs_recheck)
-		{
-			econtext->ecxt_scantuple = slot;
-			if (!ExecQualAndReset(node->indexqualorig, econtext))
-			{
-				/* Fails recheck, so drop it and loop back for another */
-				InstrCountFiltered2(node, 1);
-				/* allow this loop to be cancellable */
-				CHECK_FOR_INTERRUPTS();
-				goto next_indextuple;
-			}
-		}
+		/* No more index entries, re-run to clear the reorder queue */
+		if (node->iss_ReachedEnd)
+			continue;
 
 		if (scandesc->xs_recheckorderby)
 		{
@@ -814,6 +863,10 @@ ExecEndIndexScan(IndexScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->iss_Instrument.nsearches;
+		if (node->iss_InstrumentTable)
+		{
+			InstrAccumStack(&winstrument->worker_table_instr, &node->iss_InstrumentTable->instr);
+		}
 	}
 
 	/*
@@ -1822,4 +1875,12 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	if (node->iss_InstrumentTable)
+		for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
+		{
+			InstrAccumStack(&node->iss_InstrumentTable->instr,
+							&node->iss_SharedInfo->winstrument[i].worker_table_instr);
+		}
 }
