@@ -136,6 +136,19 @@ InstrStopFinalize(Instrumentation *instr)
 	InstrAccumStack(instr_stack.current, instr);
 }
 
+/*
+ * Finalize a standalone Instrumentation entry by accumulating its
+ * buffer/WAL data to the current stack entry. Use this for Instrumentation
+ * structs that are not managed via QueryInstrumentation (e.g. the
+ * EXPLAIN SERIALIZE dest receiver).
+ */
+void
+InstrFinalize(Instrumentation *instr)
+{
+	if (instr->need_stack)
+		InstrAccumStack(instr_stack.current, instr);
+}
+
 
 /* Query instrumentation handling */
 
@@ -170,26 +183,13 @@ ResOwnerReleaseInstrumentation(Datum res)
 	QueryInstrumentation *qinstr = (QueryInstrumentation *) DatumGetPointer(res);
 	dlist_mutable_iter iter;
 
-	/* Accumulate data from all unfinalized child node entries. */
-	dlist_foreach_modify(iter, &qinstr->unfinalized_children)
+	/* Accumulate data from all unfinalized child entries. */
+	dlist_foreach_modify(iter, &qinstr->unfinalized_entries)
 	{
-		NodeInstrumentation *child = dlist_container(NodeInstrumentation, unfinalized_node, iter.cur);
+		Instrumentation *child = dlist_container(Instrumentation, unfinalized_node, iter.cur);
 
-		InstrAccumStack(&qinstr->instr, &child->instr);
-	}
-
-	/* Accumulate data from any active trigger instrumentation entries. */
-	dlist_foreach_modify(iter, &qinstr->unfinalized_triggers)
-	{
-		TriggerInstrumentation *tginstr = dlist_container(TriggerInstrumentation, unfinalized_trigger, iter.cur);
-
-		InstrAccumStack(&qinstr->instr, &tginstr->instr);
-
-		/*
-		 * We can't pfree tginstr here, since its part of a bigger allocation - we'll instead
-		 * let transaction end deal with clean up, and instead just remove the list entry.
-		 */
-		dlist_delete(&tginstr->unfinalized_trigger);
+		InstrAccumStack(&qinstr->instr, child);
+		dlist_delete(&child->unfinalized_node);
 	}
 
 	/* Ensure the stack is reset as expected, and we accumulate to the parent */
@@ -215,8 +215,7 @@ InstrQueryAlloc(int instrument_options)
 		instr = palloc0(sizeof(QueryInstrumentation));
 
 	InstrInitOptions(&instr->instr, instrument_options);
-	dlist_init(&instr->unfinalized_children);
-	dlist_init(&instr->unfinalized_triggers);
+	dlist_init(&instr->unfinalized_entries);
 
 	return instr;
 }
@@ -285,7 +284,7 @@ void
 InstrQueryRememberNode(QueryInstrumentation *parent, NodeInstrumentation *child)
 {
 	if (child->instr.need_stack)
-		dlist_push_head(&parent->unfinalized_children, &child->unfinalized_node);
+		dlist_push_head(&parent->unfinalized_entries, &child->instr.unfinalized_node);
 }
 
 /* start instrumentation during parallel executor startup */
@@ -432,7 +431,7 @@ InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
 
 	/* Unregister from query's unfinalized list before freeing */
 	if (instr->instr.need_stack)
-		dlist_delete(&instr->unfinalized_node);
+		dlist_delete(&instr->instr.unfinalized_node);
 
 	//pfree(instr);
 
@@ -658,9 +657,9 @@ InstrStartTrigger(QueryInstrumentation *qinstr, TriggerInstrumentation *tginstr)
 	 * palloc0-zeroed state (prev == NULL).
 	 */
 	if (qinstr && tginstr->instr.need_stack &&
-		tginstr->unfinalized_trigger.prev == NULL)
-		dlist_push_head(&qinstr->unfinalized_triggers,
-						&tginstr->unfinalized_trigger);
+		tginstr->instr.unfinalized_node.prev == NULL)
+		dlist_push_head(&qinstr->unfinalized_entries,
+						&tginstr->instr.unfinalized_node);
 }
 
 void

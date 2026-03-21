@@ -97,6 +97,9 @@ typedef struct Instrumentation
 	instr_time	total;			/* total runtime */
 	BufferUsage bufusage;		/* total buffer usage */
 	WalUsage	walusage;		/* total WAL usage */
+
+	/* Abort handling: link in parent QueryInstrumentation's unfinalized list */
+	dlist_node	unfinalized_node;
 } Instrumentation;
 
 /*
@@ -129,8 +132,7 @@ typedef struct QueryInstrumentation
 	 * Child entries that need to be cleaned up on abort, since they are not
 	 * registered as a resource owner themselves.
 	 */
-	dlist_head	unfinalized_children;	/* unfinalized node entries */
-	dlist_head	unfinalized_triggers;	/* unfinalized trigger entries */
+	dlist_head	unfinalized_entries;	/* unfinalized child instrumentation */
 } QueryInstrumentation;
 
 /*
@@ -159,8 +161,6 @@ typedef struct NodeInstrumentation
 	double		nfiltered1;		/* # of tuples removed by scanqual or joinqual */
 	double		nfiltered2;		/* # of tuples removed by "other" quals */
 
-	/* Abort handling */
-	dlist_node	unfinalized_node;	/* node in parent's unfinalized list */
 } NodeInstrumentation;
 
 /*
@@ -179,8 +179,6 @@ typedef struct TriggerInstrumentation
 	int			firings;		/* number of times the instrumented trigger
 								 * was fired */
 
-	/* Abort handling */
-	dlist_node	unfinalized_trigger;	/* link in parent's unfinalized list */
 } TriggerInstrumentation;
 
 /*
@@ -265,6 +263,7 @@ extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr);
 extern void InstrStopFinalize(Instrumentation *instr);
+extern void InstrFinalize(Instrumentation *instr);
 extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 
 extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);

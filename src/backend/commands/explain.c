@@ -582,7 +582,12 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 
 	/* grab serialization metrics before we destroy the DestReceiver */
 	if (es->serialize != EXPLAIN_SERIALIZE_NONE)
-		serializeMetrics = GetSerializationMetrics(dest);
+	{
+		SerializeMetrics *metrics = GetSerializationMetrics(dest);
+
+		if (metrics)
+			memcpy(&serializeMetrics, metrics, sizeof(SerializeMetrics));
+	}
 
 	/* call the DestReceiver's destroy method even during explain */
 	dest->rDestroy(dest);
@@ -1011,7 +1016,7 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 		ExplainIndentText(es);
 		if (es->timing)
 			appendStringInfo(es->str, "Serialization: time=%.3f ms  output=" UINT64_FORMAT "kB  format=%s\n",
-							 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->timeSpent),
+							 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->instr.total),
 							 BYTES_TO_KILOBYTES(metrics->bytesSent),
 							 format);
 		else
@@ -1019,10 +1024,10 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 							 BYTES_TO_KILOBYTES(metrics->bytesSent),
 							 format);
 
-		if (es->buffers && peek_buffer_usage(es, &metrics->bufferUsage))
+		if (es->buffers && peek_buffer_usage(es, &metrics->instr.bufusage))
 		{
 			es->indent++;
-			show_buffer_usage(es, &metrics->bufferUsage, NULL);
+			show_buffer_usage(es, &metrics->instr.bufusage, NULL);
 			es->indent--;
 		}
 	}
@@ -1030,13 +1035,13 @@ ExplainPrintSerialize(ExplainState *es, SerializeMetrics *metrics)
 	{
 		if (es->timing)
 			ExplainPropertyFloat("Time", "ms",
-								 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->timeSpent),
+								 1000.0 * INSTR_TIME_GET_DOUBLE(metrics->instr.total),
 								 3, es);
 		ExplainPropertyUInteger("Output Volume", "kB",
 								BYTES_TO_KILOBYTES(metrics->bytesSent), es);
 		ExplainPropertyText("Format", format, es);
 		if (es->buffers)
-			show_buffer_usage(es, &metrics->bufferUsage, NULL);
+			show_buffer_usage(es, &metrics->instr.bufusage, NULL);
 	}
 
 	ExplainCloseGroup("Serialization", "Serialization", true, es);
