@@ -176,12 +176,6 @@ ResOwnerReleaseInstrumentation(Datum res)
 		NodeInstrumentation *child = dlist_container(NodeInstrumentation, unfinalized_node, iter.cur);
 
 		InstrAccumStack(&qinstr->instr, &child->instr);
-
-		/*
-		 * Free NodeInstrumentation now, since InstrFinalizeNode won't be
-		 * called
-		 */
-		pfree(child);
 	}
 
 	/* Accumulate data from any active trigger instrumentation entries. */
@@ -215,8 +209,8 @@ InstrQueryAlloc(int instrument_options)
 	 * survives transaction abort — ResourceOwner release needs to access
 	 * it.
 	 */
-	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0)
-		instr = MemoryContextAllocZero(TopMemoryContext, sizeof(QueryInstrumentation));
+	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0 && MemoryContextIsValid(PortalContext))
+		instr = MemoryContextAllocZero(PortalContext, sizeof(QueryInstrumentation));
 	else
 		instr = palloc0(sizeof(QueryInstrumentation));
 
@@ -273,9 +267,10 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 	 * Copy to the current memory context so the caller doesn't need to
 	 * explicitly free the TopMemoryContext allocation.
 	 */
-	copy = palloc(sizeof(QueryInstrumentation));
-	memcpy(copy, qinstr, sizeof(QueryInstrumentation));
-	pfree(qinstr);
+	copy = qinstr;
+	//copy = palloc(sizeof(QueryInstrumentation));
+	//memcpy(copy, qinstr, sizeof(QueryInstrumentation));
+	//pfree(qinstr);
 	return copy;
 }
 
@@ -342,13 +337,12 @@ InstrAllocNode(int instrument_options, bool async_mode)
 
 	/*
 	 * If needed, allocate in a context that supports stack-based
-	 * instrumentation abort handling. We can utilize TopTransactionContext
-	 * instead of TopMemoryContext here because nodes don't get used for
-	 * utility commands that restart transactions, which would require a
-	 * context that survives longer (EXPLAIN ANALYZE is fine).
+	 * instrumentation abort handling. We use PortalContext because it
+	 * survives transaction abort (needed for abort recovery) and gets
+	 * cleaned up when the portal is destroyed.
 	 */
-	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0)
-		instr = MemoryContextAlloc(TopTransactionContext, sizeof(NodeInstrumentation));
+	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0 && MemoryContextIsValid(PortalContext))
+		instr = MemoryContextAlloc(PortalContext, sizeof(NodeInstrumentation));
 	else
 		instr = palloc(sizeof(NodeInstrumentation));
 
@@ -429,8 +423,9 @@ InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
 		return instr;
 
 	/* Copy into per-query memory context */
-	dst = palloc(sizeof(NodeInstrumentation));
-	memcpy(dst, instr, sizeof(NodeInstrumentation));
+	dst = instr;
+	//dst = palloc(sizeof(NodeInstrumentation));
+	//memcpy(dst, instr, sizeof(NodeInstrumentation));
 
 	/* Accumulate node's buffer/WAL usage to the parent */
 	InstrAccumStack(parent, &dst->instr);
@@ -439,7 +434,7 @@ InstrFinalizeNode(NodeInstrumentation *instr, Instrumentation *parent)
 	if (instr->instr.need_stack)
 		dlist_delete(&instr->unfinalized_node);
 
-	pfree(instr);
+	//pfree(instr);
 
 	return dst;
 }
@@ -630,17 +625,17 @@ TriggerInstrumentation *
 InstrAllocTrigger(int n, int instrument_options)
 {
 	TriggerInstrumentation *tginstr;
+	int			i;
 
 	/*
-	 * If needed, allocate in TopTransactionContext so the memory survives
+	 * If needed, allocate in PortalContext so the memory survives
 	 * transaction abort — ResOwnerReleaseInstrumentation needs to access it.
 	 */
-	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0)
-		tginstr = MemoryContextAllocZero(TopTransactionContext,
+	if ((instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0 && MemoryContextIsValid(PortalContext))
+		tginstr = MemoryContextAllocZero(PortalContext,
 										 n * sizeof(TriggerInstrumentation));
 	else
 		tginstr = palloc0(n * sizeof(TriggerInstrumentation));
-	int			i;
 
 	for (i = 0; i < n; i++)
 		InstrInitOptions(&tginstr[i].instr, instrument_options);
