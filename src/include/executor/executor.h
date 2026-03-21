@@ -303,6 +303,7 @@ extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecRememberNodeInstrumentation(PlanState *node, QueryInstrumentation *parent);
 extern void ExecFinalizeNodeInstrumentation(PlanState *node);
+extern void ExecFreeNodeInstrumentation(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
 

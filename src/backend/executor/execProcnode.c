@@ -124,6 +124,7 @@ static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
 static bool ExecRememberNodeInstrumentation_walker(PlanState *node, void *context);
 static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
+static bool ExecFreeNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -938,6 +939,58 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 	}
 
 	node->instrument = InstrFinalizeNode(node->instrument, parent);
+
+	return false;
+}
+
+/*
+ * ExecFreeNodeInstrumentation
+ *
+ * Free PortalContext-allocated instrumentation from all plan nodes.
+ * Called during ExecutorEnd to avoid leaking memory in long-lived portals
+ * (e.g. holdable cursors when auto_explain enables buffer tracking).
+ */
+void
+ExecFreeNodeInstrumentation(PlanState *node)
+{
+	(void) ExecFreeNodeInstrumentation_walker(node, NULL);
+}
+
+static bool
+ExecFreeNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	planstate_tree_walker(node, ExecFreeNodeInstrumentation_walker, NULL);
+
+	if (node->instrument && node->instrument->instr.need_stack)
+	{
+		/* Free separate table-access instrumentation for index scans */
+		if (IsA(node, IndexScanState))
+		{
+			IndexScanState *iss = castNode(IndexScanState, node);
+
+			if (iss->iss_InstrumentTable)
+			{
+				pfree(iss->iss_InstrumentTable);
+				iss->iss_InstrumentTable = NULL;
+			}
+		}
+		else if (IsA(node, IndexOnlyScanState))
+		{
+			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+			if (ioss->ioss_InstrumentTable)
+			{
+				pfree(ioss->ioss_InstrumentTable);
+				ioss->ioss_InstrumentTable = NULL;
+			}
+		}
+
+		pfree(node->instrument);
+		node->instrument = NULL;
+	}
 
 	return false;
 }

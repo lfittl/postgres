@@ -79,6 +79,7 @@ ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 static void InitPlan(QueryDesc *queryDesc, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecFinalizeTriggerInstrumentation(EState *estate);
+static void ExecFreeTriggerInstrumentation(EState *estate);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
 static void ExecutePlan(QueryDesc *queryDesc,
@@ -548,6 +549,28 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
 	ExecEndPlan(queryDesc->planstate, estate);
+
+	/*
+	 * Free instrumentation allocated in PortalContext.  This prevents
+	 * leaking memory in long-lived portals (e.g. holdable cursors when
+	 * auto_explain enables buffer tracking).  We must do this before
+	 * FreeExecutorState, which destroys the plan state tree and the
+	 * pointers to these allocations.
+	 */
+	if (queryDesc->totaltime &&
+		(estate->es_instrument & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)))
+	{
+		/* Free per-node instrumentation */
+		ExecFreeNodeInstrumentation(queryDesc->planstate);
+
+		/* Free per-trigger instrumentation */
+		ExecFreeTriggerInstrumentation(estate);
+
+		/* Free the QueryInstrumentation itself */
+		pfree(queryDesc->totaltime);
+		queryDesc->totaltime = NULL;
+		estate->es_query_instr = NULL;
+	}
 
 	/* do away with our snapshots */
 	UnregisterSnapshot(estate->es_snapshot);
@@ -1563,6 +1586,36 @@ ExecFinalizeTriggerInstrumentation(EState *estate)
 		{
 			if (ti[nt].instr.need_stack)
 				InstrAccumStack(instr_stack.current, &ti[nt].instr);
+		}
+	}
+}
+
+/*
+ * ExecFreeTriggerInstrumentation
+ *
+ * Free PortalContext-allocated trigger instrumentation from all result
+ * relations.  Called during ExecutorEnd cleanup.
+ */
+static void
+ExecFreeTriggerInstrumentation(EState *estate)
+{
+	List	   *rels = NIL;
+
+	rels = list_concat(rels, estate->es_tuple_routing_result_relations);
+	rels = list_concat(rels, estate->es_opened_result_relations);
+	rels = list_concat(rels, estate->es_trig_target_relations);
+
+	foreach_node(ResultRelInfo, rInfo, rels)
+	{
+		TriggerInstrumentation *ti = rInfo->ri_TrigInstrument;
+
+		if (ti == NULL || rInfo->ri_TrigDesc == NULL)
+			continue;
+
+		if (ti[0].instr.need_stack)
+		{
+			pfree(ti);
+			rInfo->ri_TrigInstrument = NULL;
 		}
 	}
 }
