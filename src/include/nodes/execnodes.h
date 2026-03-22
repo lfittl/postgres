@@ -533,7 +533,7 @@ typedef struct ResultRelInfo
 	ExprState **ri_TrigWhenExprs;
 
 	/* optional runtime measurements for triggers */
-	Instrumentation *ri_TrigInstrument;
+	TriggerInstrumentation *ri_TrigInstrument;
 
 	/* On-demand created slots for triggers / returning processing */
 	TupleTableSlot *ri_ReturningSlot;	/* for trigger output tuples */
@@ -730,6 +730,8 @@ typedef struct EState
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
+	struct QueryInstrumentation *es_query_instr;	/* query-level
+													 * instrumentation */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */
@@ -1184,8 +1186,10 @@ typedef struct PlanState
 	ExecProcNodeMtd ExecProcNodeReal;	/* actual function, if above is a
 										 * wrapper */
 
-	Instrumentation *instrument;	/* Optional runtime stats for this node */
-	WorkerInstrumentation *worker_instrument;	/* per-worker instrumentation */
+	NodeInstrumentation *instrument;	/* Optional runtime stats for this
+										 * node */
+	WorkerNodeInstrumentation *worker_instrument;	/* per-worker
+													 * instrumentation */
 
 	/* Per-worker JIT instrumentation */
 	struct SharedJitInstrumentation *worker_jit_instrument;
@@ -1735,6 +1739,13 @@ typedef struct IndexScanState
 	IndexScanInstrumentation iss_Instrument;
 	SharedIndexScanInstrumentation *iss_SharedInfo;
 
+	/*
+	 * Instrumentation utilized for tracking table access. This is separate
+	 * from iss_Instrument since it needs to be allocated in the right context
+	 * and IndexScanInstrumentation shouldn't contain pointers.
+	 */
+	NodeInstrumentation *iss_InstrumentTable;
+
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;
 	bool		iss_ReachedEnd;
@@ -1785,6 +1796,14 @@ typedef struct IndexOnlyScanState
 	struct IndexScanDescData *ioss_ScanDesc;
 	IndexScanInstrumentation ioss_Instrument;
 	SharedIndexScanInstrumentation *ioss_SharedInfo;
+
+	/*
+	 * Instrumentation utilized for tracking table access. This is separate
+	 * from ioss_Instrument since it needs to be allocated in the right
+	 * context and IndexScanInstrumentation shouldn't contain pointers.
+	 */
+	NodeInstrumentation *ioss_InstrumentTable;
+
 	TupleTableSlot *ioss_TableSlot;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;

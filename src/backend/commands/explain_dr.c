@@ -110,15 +110,11 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext oldcontext;
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
-	instr_time	start,
-				end;
-	BufferUsage instr_start;
+	Instrumentation *instr = &myState->metrics.instr;
 
 	/* only measure time, buffers if requested */
-	if (myState->es->timing)
-		INSTR_TIME_SET_CURRENT(start);
-	if (myState->es->buffers)
-		instr_start = pgBufferUsage;
+	if (instr->need_timer || instr->need_stack)
+		InstrStart(instr);
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -186,18 +182,9 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextReset(myState->tmpcontext);
 
-	/* Update timing data */
-	if (myState->es->timing)
-	{
-		INSTR_TIME_SET_CURRENT(end);
-		INSTR_TIME_ACCUM_DIFF(myState->metrics.timeSpent, end, start);
-	}
-
-	/* Update buffer metrics */
-	if (myState->es->buffers)
-		BufferUsageAccumDiff(&myState->metrics.bufferUsage,
-							 &pgBufferUsage,
-							 &instr_start);
+	/* Stop per-tuple measurement */
+	if (instr->need_timer || instr->need_stack)
+		InstrStop(instr);
 
 	return true;
 }
@@ -233,9 +220,17 @@ serializeAnalyzeStartup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	/* The output buffer is re-used across rows, as in printtup.c */
 	initStringInfo(&receiver->buf);
 
-	/* Initialize results counters */
+	/* Initialize metrics and per-tuple instrumentation */
 	memset(&receiver->metrics, 0, sizeof(SerializeMetrics));
-	INSTR_TIME_SET_ZERO(receiver->metrics.timeSpent);
+	{
+		InstrumentOption instrument_options = 0;
+
+		if (receiver->es->timing)
+			instrument_options |= INSTRUMENT_TIMER;
+		if (receiver->es->buffers)
+			instrument_options |= INSTRUMENT_BUFFERS;
+		InstrInitOptions(&receiver->metrics.instr, instrument_options);
+	}
 }
 
 /*
@@ -245,6 +240,8 @@ static void
 serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	InstrFinalize(&receiver->metrics.instr);
 
 	if (receiver->finfos)
 		pfree(receiver->finfos);
@@ -290,22 +287,21 @@ CreateExplainSerializeDestReceiver(ExplainState *es)
 }
 
 /*
- * GetSerializationMetrics - collect metrics
+ * GetSerializationMetrics - get serialization metrics
  *
- * We have to be careful here since the receiver could be an IntoRel
- * receiver if the subject statement is CREATE TABLE AS.  In that
- * case, return all-zeroes stats.
+ * Returns a pointer to the SerializeMetrics inside the dest receiver,
+ * or NULL if the receiver is not a SerializeDestReceiver (e.g. an IntoRel
+ * receiver for CREATE TABLE AS).
  */
-SerializeMetrics
+SerializeMetrics *
 GetSerializationMetrics(DestReceiver *dest)
 {
-	SerializeMetrics empty;
-
 	if (dest->mydest == DestExplainSerialize)
-		return ((SerializeDestReceiver *) dest)->metrics;
+	{
+		SerializeDestReceiver *receiver = (SerializeDestReceiver *) dest;
 
-	memset(&empty, 0, sizeof(SerializeMetrics));
-	INSTR_TIME_SET_ZERO(empty.timeSpent);
+		return &receiver->metrics;
+	}
 
-	return empty;
+	return NULL;
 }
