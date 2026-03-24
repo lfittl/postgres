@@ -163,11 +163,22 @@ IndexOnlyNext(IndexOnlyScanState *node)
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{
+			bool		found;
+
 			/*
 			 * Rats, we have to visit the heap to check visibility.
 			 */
 			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
+
+			if (node->ioss_InstrumentTable)
+				InstrPushStack(&node->ioss_InstrumentTable->instr);
+
+			found = index_fetch_heap(scandesc, node->ioss_TableSlot);
+
+			if (node->ioss_InstrumentTable)
+				InstrPopStack(&node->ioss_InstrumentTable->instr);
+
+			if (!found)
 				continue;		/* no visible tuple, try next index entry */
 
 			ExecClearTuple(node->ioss_TableSlot);
@@ -434,6 +445,10 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
+		if (node->ioss_InstrumentTable)
+		{
+			InstrAccumStack(&winstrument->worker_table_instr, &node->ioss_InstrumentTable->instr);
+		}
 	}
 
 	/*
@@ -893,4 +908,12 @@ ExecIndexOnlyScanRetrieveInstrumentation(IndexOnlyScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->ioss_SharedInfo = palloc(size);
 	memcpy(node->ioss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	if (node->ioss_InstrumentTable)
+		for (int i = 0; i < node->ioss_SharedInfo->num_workers; i++)
+		{
+			InstrAccumStack(&node->ioss_InstrumentTable->instr,
+							&node->ioss_SharedInfo->winstrument[i].worker_table_instr);
+		}
 }
