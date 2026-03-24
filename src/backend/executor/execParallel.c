@@ -60,13 +60,12 @@
 #define PARALLEL_KEY_EXECUTOR_FIXED		UINT64CONST(0xE000000000000001)
 #define PARALLEL_KEY_PLANNEDSTMT		UINT64CONST(0xE000000000000002)
 #define PARALLEL_KEY_PARAMLISTINFO		UINT64CONST(0xE000000000000003)
-#define PARALLEL_KEY_BUFFER_USAGE		UINT64CONST(0xE000000000000004)
+#define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000004)
 #define PARALLEL_KEY_TUPLE_QUEUE		UINT64CONST(0xE000000000000005)
-#define PARALLEL_KEY_INSTRUMENTATION	UINT64CONST(0xE000000000000006)
+#define PARALLEL_KEY_NODE_INSTRUMENTATION UINT64CONST(0xE000000000000006)
 #define PARALLEL_KEY_DSA				UINT64CONST(0xE000000000000007)
 #define PARALLEL_KEY_QUERY_TEXT		UINT64CONST(0xE000000000000008)
 #define PARALLEL_KEY_JIT_INSTRUMENTATION UINT64CONST(0xE000000000000009)
-#define PARALLEL_KEY_WAL_USAGE			UINT64CONST(0xE00000000000000A)
 
 #define PARALLEL_TUPLE_QUEUE_SIZE		65536
 
@@ -87,7 +86,7 @@ typedef struct FixedParallelExecutorState
  * instrument_options: Same meaning here as in instrument.c.
  *
  * instrument_offset: Offset, relative to the start of this structure,
- * of the first Instrumentation object.  This will depend on the length of
+ * of the first NodeInstrumentation object.  This will depend on the length of
  * the plan_node_id array.
  *
  * num_workers: Number of workers.
@@ -104,11 +103,15 @@ struct SharedExecutorInstrumentation
 	int			num_workers;
 	int			num_plan_nodes;
 	int			plan_node_id[FLEXIBLE_ARRAY_MEMBER];
-	/* array of num_plan_nodes * num_workers Instrumentation objects follows */
+
+	/*
+	 * array of num_plan_nodes * num_workers NodeInstrumentation objects
+	 * follows
+	 */
 };
 #define GetInstrumentationArray(sei) \
 	(StaticAssertVariableIsOfTypeMacro(sei, SharedExecutorInstrumentation *), \
-	 (Instrumentation *) (((char *) sei) + sei->instrument_offset))
+	 (NodeInstrumentation *) (((char *) sei) + sei->instrument_offset))
 
 /* Context object for ExecParallelEstimate. */
 typedef struct ExecParallelEstimateContext
@@ -621,8 +624,6 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	char	   *pstmt_data;
 	char	   *pstmt_space;
 	char	   *paramlistinfo_space;
-	BufferUsage *bufusage_space;
-	WalUsage   *walusage_space;
 	SharedExecutorInstrumentation *instrumentation = NULL;
 	SharedJitInstrumentation *jit_instrumentation = NULL;
 	int			pstmt_len;
@@ -686,21 +687,14 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/*
-	 * Estimate space for BufferUsage.
+	 * Estimate space for Instrumentation.
 	 *
 	 * If EXPLAIN is not in use and there are no extensions loaded that care,
 	 * we could skip this.  But we have no way of knowing whether anyone's
-	 * looking at pgBufferUsage, so do it unconditionally.
+	 * looking at instrumentation, so do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-
-	/*
-	 * Same thing for WalUsage.
-	 */
-	shm_toc_estimate_chunk(&pcxt->estimator,
-						   mul_size(sizeof(WalUsage), pcxt->nworkers));
+						   mul_size(sizeof(Instrumentation), pcxt->nworkers));
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 
 	/* Estimate space for tuple queues. */
@@ -725,7 +719,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation_len = MAXALIGN(instrumentation_len);
 		instrument_offset = instrumentation_len;
 		instrumentation_len +=
-			mul_size(sizeof(Instrumentation),
+			mul_size(sizeof(NodeInstrumentation),
 					 mul_size(e.nnodes, nworkers));
 		shm_toc_estimate_chunk(&pcxt->estimator, instrumentation_len);
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
@@ -786,17 +780,18 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	shm_toc_insert(pcxt->toc, PARALLEL_KEY_PARAMLISTINFO, paramlistinfo_space);
 	SerializeParamList(estate->es_param_list_info, &paramlistinfo_space);
 
-	/* Allocate space for each worker's BufferUsage; no need to initialize. */
-	bufusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(BufferUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_BUFFER_USAGE, bufusage_space);
-	pei->buffer_usage = bufusage_space;
+	/*
+	 * Allocate space for each worker's Instrumentation; no need to
+	 * initialize.
+	 */
+	{
+		Instrumentation *instr;
 
-	/* Same for WalUsage. */
-	walusage_space = shm_toc_allocate(pcxt->toc,
-									  mul_size(sizeof(WalUsage), pcxt->nworkers));
-	shm_toc_insert(pcxt->toc, PARALLEL_KEY_WAL_USAGE, walusage_space);
-	pei->wal_usage = walusage_space;
+		instr = shm_toc_allocate(pcxt->toc,
+								 mul_size(sizeof(Instrumentation), pcxt->nworkers));
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION, instr);
+		pei->instrumentation = instr;
+	}
 
 	/* Set up the tuple queues that the workers will write into. */
 	pei->tqueue = ExecParallelSetupTupleQueues(pcxt, false);
@@ -811,7 +806,7 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 */
 	if (estate->es_instrument)
 	{
-		Instrumentation *instrument;
+		NodeInstrumentation *instrument;
 		int			i;
 
 		instrumentation = shm_toc_allocate(pcxt->toc, instrumentation_len);
@@ -821,10 +816,10 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation->num_plan_nodes = e.nnodes;
 		instrument = GetInstrumentationArray(instrumentation);
 		for (i = 0; i < nworkers * e.nnodes; ++i)
-			InstrInit(&instrument[i], estate->es_instrument);
-		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION,
+			InstrInitNode(&instrument[i], estate->es_instrument);
+		shm_toc_insert(pcxt->toc, PARALLEL_KEY_NODE_INSTRUMENTATION,
 					   instrumentation);
-		pei->instrumentation = instrumentation;
+		pei->node_instrumentation = instrumentation;
 
 		if (estate->es_jit_flags != PGJIT_NONE)
 		{
@@ -1053,7 +1048,7 @@ static bool
 ExecParallelRetrieveInstrumentation(PlanState *planstate,
 									SharedExecutorInstrumentation *instrumentation)
 {
-	Instrumentation *instrument;
+	NodeInstrumentation *instrument;
 	int			i;
 	int			n;
 	int			ibytes;
@@ -1071,7 +1066,21 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	instrument = GetInstrumentationArray(instrumentation);
 	instrument += i * instrumentation->num_workers;
 	for (n = 0; n < instrumentation->num_workers; ++n)
+	{
 		InstrAggNode(planstate->instrument, &instrument[n]);
+
+		/*
+		 * Also add worker WAL usage to the global pgWalUsage counter.
+		 *
+		 * When per-node instrumentation is active, parallel workers skip
+		 * ExecFinalizeNodeInstrumentation (to avoid double-counting in
+		 * EXPLAIN), so per-node WAL activity is not rolled up into the
+		 * query-level stats that InstrAccumParallelQuery receives. Without
+		 * this, pgWalUsage would under-report WAL generated by parallel
+		 * workers when instrumentation is active.
+		 */
+		WalUsageAdd(&pgWalUsage, &instrument[n].instr.walusage);
+	}
 
 	/*
 	 * Also store the per-worker detail.
@@ -1081,9 +1090,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	 * Switch into per-query memory context.
 	 */
 	oldcontext = MemoryContextSwitchTo(planstate->state->es_query_cxt);
-	ibytes = mul_size(instrumentation->num_workers, sizeof(Instrumentation));
+	ibytes = mul_size(instrumentation->num_workers, sizeof(NodeInstrumentation));
 	planstate->worker_instrument =
-		palloc(ibytes + offsetof(WorkerInstrumentation, instrument));
+		palloc(ibytes + offsetof(WorkerNodeInstrumentation, instrument));
 	MemoryContextSwitchTo(oldcontext);
 
 	planstate->worker_instrument->num_workers = instrumentation->num_workers;
@@ -1212,7 +1221,7 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	 * finish, or we might get incomplete data.)
 	 */
 	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+		InstrAccumParallelQuery(&pei->instrumentation[i]);
 
 	pei->finished = true;
 }
@@ -1226,10 +1235,10 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 void
 ExecParallelCleanup(ParallelExecutorInfo *pei)
 {
-	/* Accumulate instrumentation, if any. */
-	if (pei->instrumentation)
+	/* Accumulate node instrumentation, if any. */
+	if (pei->node_instrumentation)
 		ExecParallelRetrieveInstrumentation(pei->planstate,
-											pei->instrumentation);
+											pei->node_instrumentation);
 
 	/* Accumulate JIT instrumentation, if any. */
 	if (pei->jit_instrumentation)
@@ -1313,7 +1322,7 @@ ExecParallelReportInstrumentation(PlanState *planstate,
 {
 	int			i;
 	int			plan_node_id = planstate->plan->plan_node_id;
-	Instrumentation *instrument;
+	NodeInstrumentation *instrument;
 
 	InstrEndLoop(planstate->instrument);
 
@@ -1452,8 +1461,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
-	BufferUsage *buffer_usage;
-	WalUsage   *wal_usage;
+	QueryInstrumentation *instr;
 	DestReceiver *receiver;
 	QueryDesc  *queryDesc;
 	SharedExecutorInstrumentation *instrumentation;
@@ -1468,7 +1476,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 
 	/* Set up DestReceiver, SharedExecutorInstrumentation, and QueryDesc. */
 	receiver = ExecParallelGetReceiver(seg, toc);
-	instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_INSTRUMENTATION, true);
+	instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_NODE_INSTRUMENTATION, true);
 	if (instrumentation != NULL)
 		instrument_options = instrumentation->instrument_options;
 	jit_instrumentation = shm_toc_lookup(toc, PARALLEL_KEY_JIT_INSTRUMENTATION,
@@ -1512,7 +1520,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1526,10 +1534,12 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	ExecutorFinish(queryDesc);
 
 	/* Report buffer/WAL usage during parallel execution. */
-	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
-	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
-						  &wal_usage[ParallelWorkerNumber]);
+	{
+		Instrumentation *worker_instr;
+
+		worker_instr = shm_toc_lookup(toc, PARALLEL_KEY_INSTRUMENTATION, false);
+		InstrEndParallelQuery(instr, &worker_instr[ParallelWorkerNumber]);
+	}
 
 	/* Report instrumentation data if any instrumentation options are set. */
 	if (instrumentation != NULL)
