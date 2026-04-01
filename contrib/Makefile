@@ -36,6 +36,7 @@ SUBDIRS = \
 		pg_overexplain \
 		pg_plan_advice \
 		pg_prewarm	\
+		pg_stat_plans \
 		pg_stat_statements \
 		pg_surgery	\
 		pg_trgm		\
