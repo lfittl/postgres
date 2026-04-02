@@ -364,6 +364,8 @@ BufferHeapTupleTableSlot
 BufferLockMode
 BufferLookupEnt
 BufferManagerRelation
+BufferRelStatsEntry
+BufferRelStatsKey
 BufferStrategyControl
 BufferTag
 BufferUsage
