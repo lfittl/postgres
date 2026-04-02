@@ -72,7 +72,7 @@ InstrStartNode(Instrumentation *instr)
 		if (!INSTR_TIME_IS_ZERO(instr->starttime))
 			elog(ERROR, "InstrStartNode called twice in a row");
 		else
-			INSTR_TIME_SET_CURRENT(instr->starttime);
+			INSTR_TIME_SET_CURRENT_FAST(instr->starttime);
 	}
 
 	/* save buffer usage totals at node entry, if needed */
@@ -99,7 +99,7 @@ InstrStopNode(Instrumentation *instr, double nTuples)
 		if (INSTR_TIME_IS_ZERO(instr->starttime))
 			elog(ERROR, "InstrStopNode called without start");
 
-		INSTR_TIME_SET_CURRENT(endtime);
+		INSTR_TIME_SET_CURRENT_FAST(endtime);
 		INSTR_TIME_ACCUM_DIFF(instr->counter, endtime, instr->starttime);
 
 		INSTR_TIME_SET_ZERO(instr->starttime);
@@ -293,4 +293,79 @@ WalUsageAccumDiff(WalUsage *dst, const WalUsage *add, const WalUsage *sub)
 	dst->wal_fpi += add->wal_fpi - sub->wal_fpi;
 	dst->wal_fpi_bytes += add->wal_fpi_bytes - sub->wal_fpi_bytes;
 	dst->wal_buffers_full += add->wal_buffers_full - sub->wal_buffers_full;
+}
+
+/* GUC hooks for timing_clock_source */
+
+#include "portability/instr_time.h"
+#include "utils/guc_hooks.h"
+
+bool
+check_timing_clock_source(int *newval, void **extra, GucSource source)
+{
+	/*
+	 * Do nothing if timing is not initialized. This is only expected on child
+	 * processes in EXEC_BACKEND builds, as GUC hooks can be called during
+	 * InitializeGUCOptions() before InitProcessGlobals() has had a chance to
+	 * run pg_initialize_timing(). Instead, TSC will be initialized via
+	 * restore_backend_variables.
+	 */
+#ifdef EXEC_BACKEND
+	if (!timing_initialized)
+		return true;
+#else
+	Assert(timing_initialized);
+#endif
+
+#if PG_INSTR_TSC_CLOCK
+	pg_initialize_timing_tsc();
+
+	if (*newval == TIMING_CLOCK_SOURCE_TSC && timing_tsc_frequency_khz <= 0)
+	{
+		GUC_check_errdetail("TSC is not supported as timing clock source");
+		return false;
+	}
+#endif
+
+	return true;
+}
+
+void
+assign_timing_clock_source(int newval, void *extra)
+{
+#ifdef EXEC_BACKEND
+	if (!timing_initialized)
+		return;
+#else
+	Assert(timing_initialized);
+#endif
+
+	/*
+	 * Ignore the return code since the check hook already verified TSC is
+	 * usable if its explicitly requested.
+	 */
+	pg_set_timing_clock_source(newval);
+}
+
+const char *
+show_timing_clock_source(void)
+{
+	switch (timing_clock_source)
+	{
+		case TIMING_CLOCK_SOURCE_AUTO:
+#if PG_INSTR_TSC_CLOCK
+			if (pg_current_timing_clock_source() == TIMING_CLOCK_SOURCE_TSC)
+				return "auto (tsc)";
+#endif
+			return "auto (system)";
+		case TIMING_CLOCK_SOURCE_SYSTEM:
+			return "system";
+#if PG_INSTR_TSC_CLOCK
+		case TIMING_CLOCK_SOURCE_TSC:
+			return "tsc";
+#endif
+	}
+
+	/* unreachable */
+	return "?";
 }
