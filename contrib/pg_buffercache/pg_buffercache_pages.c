@@ -15,6 +15,7 @@
 #include "port/pg_numa.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "common/hashfn.h"
 #include "utils/rel.h"
 #include "utils/tuplestore.h"
 
@@ -23,6 +24,7 @@
 #define NUM_BUFFERCACHE_PAGES_ELEM	9
 #define NUM_BUFFERCACHE_SUMMARY_ELEM 5
 #define NUM_BUFFERCACHE_USAGE_COUNTS_ELEM 4
+#define NUM_BUFFERCACHE_RELATIONS_ELEM 8
 #define NUM_BUFFERCACHE_EVICT_ELEM 2
 #define NUM_BUFFERCACHE_EVICT_RELATION_ELEM 3
 #define NUM_BUFFERCACHE_EVICT_ALL_ELEM 3
@@ -92,6 +94,29 @@ typedef struct
 	BufferCacheOsPagesRec *record;
 } BufferCacheOsPagesContext;
 
+/*
+ * Hash key for pg_buffercache_relations — groups by relation file.
+ */
+typedef struct
+{
+	RelFileLocator locator;
+	ForkNumber	forknum;
+} BufferRelStatsKey;
+
+/*
+ * Hash entry for pg_buffercache_relations — accumulates per-relation
+ * buffer statistics.
+ */
+typedef struct
+{
+	BufferRelStatsKey key;
+	uint32		status;			/* for simplehash */
+	int32		buffers;
+	int32		buffers_dirty;
+	int32		buffers_pinned;
+	int64		usagecount_total;
+} BufferRelStatsEntry;
+
 
 /*
  * Function returning data from the shared buffer cache - buffer number,
@@ -108,7 +133,20 @@ PG_FUNCTION_INFO_V1(pg_buffercache_evict_all);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_relation);
 PG_FUNCTION_INFO_V1(pg_buffercache_mark_dirty_all);
+PG_FUNCTION_INFO_V1(pg_buffercache_relations);
 
+#define SH_PREFIX		relstats
+#define SH_ELEMENT_TYPE	BufferRelStatsEntry
+#define SH_KEY_TYPE		BufferRelStatsKey
+#define SH_KEY			key
+#define SH_HASH_KEY(tb, key) \
+	hash_bytes((const unsigned char *) &(key), sizeof(BufferRelStatsKey))
+#define SH_EQUAL(tb, a, b) \
+	(memcmp(&(a), &(b), sizeof(BufferRelStatsKey)) == 0)
+#define SH_SCOPE		static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
 
 /* Only need to touch memory once per backend process lifetime */
 static bool firstNumaTouch = true;
@@ -960,4 +998,100 @@ pg_buffercache_mark_dirty_all(PG_FUNCTION_ARGS)
 	result = HeapTupleGetDatum(tuple);
 
 	PG_RETURN_DATUM(result);
+}
+
+/*
+ * pg_buffercache_relations
+ *
+ * Produces a set of rows that summarize buffer cache usage per relation-fork
+ * combination. This enables monitoring scripts to only get the summary stats,
+ * instead of accumulating in a query with the full buffer information.
+ */
+Datum
+pg_buffercache_relations(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	relstats_hash *relstats;
+	relstats_iterator iter;
+	BufferRelStatsEntry *entry;
+	Datum		values[NUM_BUFFERCACHE_RELATIONS_ELEM];
+	bool		nulls[NUM_BUFFERCACHE_RELATIONS_ELEM] = {0};
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	/* Create a hash table to aggregate stats by relation-fork */
+	relstats = relstats_create(CurrentMemoryContext, 128, NULL);
+
+	/* Single pass over all buffers */
+	for (int i = 0; i < NBuffers; i++)
+	{
+		BufferDesc *bufHdr;
+		uint64		buf_state;
+		BufferRelStatsKey key = {0};
+		bool		found;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Read buffer state without locking, same as pg_buffercache_summary
+		 * and pg_buffercache_usage_counts.  Locking wouldn't provide a
+		 * meaningfully more consistent result since buffers can change state
+		 * immediately after we release the lock.
+		 */
+		bufHdr = GetBufferDescriptor(i);
+		buf_state = pg_atomic_read_u64(&bufHdr->state);
+
+		/* Skip unused/invalid buffers */
+		if (!(buf_state & BM_VALID))
+			continue;
+
+		key.locator = BufTagGetRelFileLocator(&bufHdr->tag);
+		key.forknum = BufTagGetForkNum(&bufHdr->tag);
+
+		entry = relstats_insert(relstats, key, &found);
+
+		if (!found)
+		{
+			entry->buffers = 0;
+			entry->buffers_dirty = 0;
+			entry->buffers_pinned = 0;
+			entry->usagecount_total = 0;
+		}
+
+		entry->buffers++;
+		entry->usagecount_total += BUF_STATE_GET_USAGECOUNT(buf_state);
+
+		if (buf_state & BM_DIRTY)
+			entry->buffers_dirty++;
+
+		if (BUF_STATE_GET_REFCOUNT(buf_state) > 0)
+			entry->buffers_pinned++;
+	}
+
+	/* Emit one row per hash entry */
+	relstats_start_iterate(relstats, &iter);
+	while ((entry = relstats_iterate(relstats, &iter)) != NULL)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		if (entry->buffers == 0)
+			continue;
+
+		values[0] = ObjectIdGetDatum(entry->key.locator.relNumber);
+		values[1] = ObjectIdGetDatum(entry->key.locator.spcOid);
+		values[2] = ObjectIdGetDatum(entry->key.locator.dbOid);
+		values[3] = Int16GetDatum(entry->key.forknum);
+		values[4] = Int32GetDatum(entry->buffers);
+		values[5] = Int32GetDatum(entry->buffers_dirty);
+		values[6] = Int32GetDatum(entry->buffers_pinned);
+		values[7] = Float8GetDatum((double) entry->usagecount_total /
+								   entry->buffers);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	relstats_destroy(relstats);
+
+	return (Datum) 0;
 }

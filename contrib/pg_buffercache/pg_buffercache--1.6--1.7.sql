@@ -54,3 +54,19 @@ CREATE FUNCTION pg_buffercache_mark_dirty_all(
     OUT buffers_skipped int4)
 AS 'MODULE_PATHNAME', 'pg_buffercache_mark_dirty_all'
 LANGUAGE C PARALLEL SAFE VOLATILE;
+
+CREATE FUNCTION pg_buffercache_relations(
+    OUT relfilenode oid,
+    OUT reltablespace oid,
+    OUT reldatabase oid,
+    OUT relforknumber int2,
+    OUT buffers int4,
+    OUT buffers_dirty int4,
+    OUT buffers_pinned int4,
+    OUT usagecount_avg float8)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_buffercache_relations'
+LANGUAGE C PARALLEL SAFE;
+
+REVOKE ALL ON FUNCTION pg_buffercache_relations() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_buffercache_relations() TO pg_monitor;
