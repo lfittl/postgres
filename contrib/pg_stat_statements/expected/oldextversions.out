@@ -474,4 +474,17 @@ SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
  t
 (1 row)
 
+-- New functions and views for pg_stat_statements_info in 1.14
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.14';
+SELECT pg_get_functiondef('pg_stat_statements_info'::regproc);
+                                                                            pg_get_functiondef                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ CREATE OR REPLACE FUNCTION public.pg_stat_statements_info(OUT dealloc bigint, OUT gc_count bigint, OUT query_file_size bigint, OUT stats_reset timestamp with time zone)+
+  RETURNS record                                                                                                                                                         +
+  LANGUAGE c                                                                                                                                                             +
+  PARALLEL SAFE STRICT                                                                                                                                                   +
+ AS '$libdir/pg_stat_statements', $function$pg_stat_statements_info$function$                                                                                            +
+ 
+(1 row)
+
 DROP EXTENSION pg_stat_statements;
