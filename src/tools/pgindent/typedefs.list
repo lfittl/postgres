@@ -3153,6 +3153,7 @@ TimeoutId
 TimeoutType
 Timestamp
 TimestampTz
+TimingClockSourceType
 TmFromChar
 TmToChar
 ToastAttrInfo
