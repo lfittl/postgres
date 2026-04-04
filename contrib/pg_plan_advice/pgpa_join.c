@@ -373,16 +373,6 @@ pgpa_decompose_join(pgpa_plan_walker_context *walker, Plan *plan,
 			else
 				strategy = JSTRAT_MERGE_JOIN_PLAIN;
 
-			/*
-			 * For a MergeJoin, either the outer or the inner subplan, or
-			 * both, may have needed to be sorted; we must disregard any Sort
-			 * or IncrementalSort node to find the real inner or outer
-			 * subplan.
-			 */
-			if (elidedouter == NULL && is_sorting_plan(outerplan))
-				elidedouter = pgpa_descend_node(pstmt, &outerplan);
-			if (elidedinner == NULL && is_sorting_plan(innerplan))
-				elidedinner = pgpa_descend_node(pstmt, &innerplan);
 			break;
 
 		case T_NestLoop:
@@ -421,6 +411,18 @@ pgpa_decompose_join(pgpa_plan_walker_context *walker, Plan *plan,
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(plan));
 	}
+
+	/*
+	 * For any join type, the planner may have inserted a Sort or
+	 * IncrementalSort node on either side; we must disregard it to find the
+	 * real inner or outer subplan. In practice this only happens with Merge
+	 * Join in core today, but extensions can cause this for other join types
+	 * to happen as well.
+	 */
+	if (elidedouter == NULL && is_sorting_plan(outerplan))
+		elidedouter = pgpa_descend_node(pstmt, &outerplan);
+	if (elidedinner == NULL && is_sorting_plan(innerplan))
+		elidedinner = pgpa_descend_node(pstmt, &innerplan);
 
 	/*
 	 * The planner may have decided to implement a semijoin by first making
