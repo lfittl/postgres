@@ -67,6 +67,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	IndexScanDesc scandesc;
 	TupleTableSlot *slot;
 	ItemPointer tid;
+	Instrumentation *table_instr = NULL;
 
 	/*
 	 * extract necessary information from index scan node
@@ -82,6 +83,9 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	scandesc = node->ioss_ScanDesc;
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
+
+	if (node->ioss_Instrument && node->ioss_Instrument->table_instr.need_stack)
+		table_instr = &node->ioss_Instrument->table_instr;
 
 	if (scandesc == NULL)
 	{
@@ -165,11 +169,22 @@ IndexOnlyNext(IndexOnlyScanState *node)
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{
+			bool		found;
+
 			/*
 			 * Rats, we have to visit the heap to check visibility.
 			 */
 			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
+
+			if (table_instr)
+				InstrPushStack(table_instr);
+
+			found = index_fetch_heap(scandesc, node->ioss_TableSlot);
+
+			if (table_instr)
+				InstrPopStack(table_instr);
+
+			if (!found)
 				continue;		/* no visible tuple, try next index entry */
 
 			ExecClearTuple(node->ioss_TableSlot);
@@ -436,6 +451,7 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 * which will have a new IndexOnlyScanState and zeroed stats.
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
+		InstrAccumStack(&winstrument->table_instr, &node->ioss_Instrument->table_instr);
 	}
 
 	/*
@@ -610,7 +626,7 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of index-only scans if requested */
 	if (estate->es_instrument)
-		indexstate->ioss_Instrument = palloc0_object(IndexScanInstrumentation);
+		indexstate->ioss_Instrument = MemoryContextAllocZero(estate->es_instrument->instr_cxt, sizeof(IndexScanInstrumentation));
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -899,4 +915,11 @@ ExecIndexOnlyScanRetrieveInstrumentation(IndexOnlyScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->ioss_SharedInfo = palloc(size);
 	memcpy(node->ioss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	for (int i = 0; i < node->ioss_SharedInfo->num_workers; i++)
+	{
+		InstrAccumStack(&node->ioss_Instrument->table_instr,
+						&node->ioss_SharedInfo->winstrument[i].table_instr);
+	}
 }
