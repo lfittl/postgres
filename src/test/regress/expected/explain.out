@@ -855,3 +855,37 @@ SELECT check_parallel_bitmap_heap_scan() AS parallel_bitmap_instrumentation;
 (1 row)
 
 DROP FUNCTION check_parallel_bitmap_heap_scan;
+-- Test parallel index-only scan reports per-worker index search stats.
+CREATE FUNCTION check_parallel_indexonly_scan() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+BEGIN
+    SET LOCAL enable_seqscan = off;
+    SET LOCAL enable_bitmapscan = off;
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_index_scan_size = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(*) FROM tenk1 WHERE thousand > 95' INTO plan_json;
+
+    -- Drill down to the Index Only Scan node
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL AND node->>'Node Type' != 'Index Only Scan' LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+
+    RETURN COALESCE((node->>'Index Searches')::int, 0) > 0;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_parallel_indexonly_scan() AS parallel_indexonly_instrumentation;
+ parallel_indexonly_instrumentation 
+------------------------------------
+ t
+(1 row)
+
+DROP FUNCTION check_parallel_indexonly_scan;
