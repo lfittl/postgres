@@ -93,3 +93,118 @@ SELECT
 FROM pg_stat_statements;
 
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+-- Buffer usage of an AFTER trigger should be counted towards the statement
+-- that fired it.  AFTER triggers run once the plan has finished executing, so
+-- this usage is not part of any plan node.  The trigger scans a multi-page
+-- temporary table, so the statement must show at least one local block access
+-- per page of it.
+CREATE TEMP TABLE pgss_trig_tab (a int);
+CREATE TEMP TABLE pgss_trig_work_tab (a int);
+INSERT INTO pgss_trig_work_tab SELECT generate_series(1, 10000);
+CREATE FUNCTION pgss_trig_func() RETURNS trigger AS $$
+BEGIN
+    PERFORM count(*) FROM pgss_trig_work_tab;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER pgss_trig AFTER INSERT ON pgss_trig_tab
+    FOR EACH ROW EXECUTE FUNCTION pgss_trig_func();
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+INSERT INTO pgss_trig_tab VALUES (1);
+
+SELECT query, calls,
+  local_blks_hit + local_blks_read >=
+    pg_relation_size('pgss_trig_work_tab') / current_setting('block_size')::int
+    AS has_trigger_block_accesses
+  FROM pg_stat_statements
+  WHERE query LIKE 'INSERT INTO pgss_trig_tab%'
+  ORDER BY query COLLATE "C";
+
+-- Buffer usage of a cursor's query should be counted towards the statement
+-- that fetched from the cursor, also when the cursor's query is tracked
+-- itself (track = all), and different statements fetch from the same cursor.
+-- Each of the two statements moves through half of the table's rows, so each
+-- must show between a quarter and three quarters of its pages, and both
+-- together at least all of them.  (Bounds rather than exact counts, to stay
+-- clear of effects such as read-ahead.)
+SET pg_stat_statements.track = 'all';
+CREATE FUNCTION pgss_cursor_open_half() RETURNS void AS $$
+DECLARE
+    cur refcursor := 'pgss_split_cursor';
+BEGIN
+    OPEN cur NO SCROLL FOR SELECT * FROM pgss_trig_work_tab;
+    MOVE FORWARD 5000 IN cur;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION pgss_cursor_move_rest() RETURNS void AS $$
+DECLARE
+    cur refcursor := 'pgss_split_cursor';
+BEGIN
+    MOVE FORWARD ALL IN cur;
+    CLOSE cur;
+END;
+$$ LANGUAGE plpgsql;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+BEGIN;
+SELECT pgss_cursor_open_half();
+SELECT pgss_cursor_move_rest();
+COMMIT;
+
+SELECT query, calls,
+  local_blks_hit + local_blks_read BETWEEN pages / 4 AND pages * 3 / 4
+    AS has_half_block_accesses
+  FROM pg_stat_statements,
+    (SELECT pg_relation_size('pgss_trig_work_tab') /
+       current_setting('block_size')::int AS pages) s
+  WHERE query LIKE 'SELECT pgss_cursor_%'
+  ORDER BY query COLLATE "C";
+SELECT sum(local_blks_hit + local_blks_read) >=
+    pg_relation_size('pgss_trig_work_tab') / current_setting('block_size')::int
+    AS has_all_block_accesses
+  FROM pg_stat_statements
+  WHERE query LIKE 'SELECT pgss_cursor_%';
+DROP FUNCTION pgss_cursor_open_half;
+DROP FUNCTION pgss_cursor_move_rest;
+
+-- Likewise when the cursor's query fails after an earlier fetch has
+-- completed.  The first fetch moves through half of the table and passes on
+-- its buffer usage when it is done.  The second one moves through the rest
+-- and fails at the last row, so the usage of that half only reaches the
+-- statement through the abort handling.  The statement must therefore show
+-- clearly more than half of the table's pages (none lost) and clearly less
+-- than one and a half times them (none counted twice).
+CREATE FUNCTION pgss_cursor_fail_func() RETURNS void AS $$
+DECLARE
+    cur CURSOR FOR SELECT a, 1 / (a - 10000) FROM pgss_trig_work_tab;
+BEGIN
+    OPEN cur;
+    MOVE FORWARD 5000 IN cur;
+    BEGIN
+        MOVE FORWARD ALL IN cur;
+    EXCEPTION WHEN division_by_zero THEN
+        NULL;
+    END;
+END;
+$$ LANGUAGE plpgsql;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+SELECT pgss_cursor_fail_func();
+
+SELECT query, calls,
+  local_blks_hit + local_blks_read BETWEEN pages * 3 / 4 AND pages * 5 / 4
+    AS has_cursor_block_accesses
+  FROM pg_stat_statements,
+    (SELECT pg_relation_size('pgss_trig_work_tab') /
+       current_setting('block_size')::int AS pages) s
+  WHERE query LIKE 'SELECT pgss_cursor_fail_func%'
+  ORDER BY query COLLATE "C";
+RESET pg_stat_statements.track;
+DROP FUNCTION pgss_cursor_fail_func;
+
+DROP TABLE pgss_trig_tab;
+DROP TABLE pgss_trig_work_tab;
+DROP FUNCTION pgss_trig_func;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
