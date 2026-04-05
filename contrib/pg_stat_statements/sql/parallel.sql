@@ -23,4 +23,31 @@ SELECT query,
   WHERE query ~ 'SELECT count'
   ORDER BY query COLLATE "C";
 
+-- Buffer usage of parallel workers launched by a nested statement should be
+-- counted towards the top-level statement.  With the leader not
+-- participating, the workers read the whole table, so the top-level entry
+-- must show at least one block access per page.
+INSERT INTO pgss_parallel_tab SELECT generate_series(1, 10000);
+CREATE FUNCTION pgss_parallel_nested_count() RETURNS bigint
+  LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN (SELECT count(*) FROM pgss_parallel_tab);
+END $$;
+SET parallel_leader_participation = off;
+
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+SELECT pgss_parallel_nested_count();
+
+SELECT query, toplevel,
+  shared_blks_hit + shared_blks_read >=
+    pg_relation_size('pgss_parallel_tab') / current_setting('block_size')::int
+    AS has_worker_block_accesses
+  FROM pg_stat_statements
+  WHERE query ~ 'pgss_parallel_nested_count'
+  ORDER BY query COLLATE "C";
+
+RESET parallel_leader_participation;
+DROP FUNCTION pgss_parallel_nested_count();
+
 DROP TABLE pgss_parallel_tab;
