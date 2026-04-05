@@ -344,19 +344,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 
 	/* Start up instrumentation for this execution run */
 	if (queryDesc->totaltime)
-	{
 		InstrQueryStart(queryDesc->totaltime);
-
-		/*
-		 * Remember all node entries for abort recovery. We do this once here
-		 * after InstrQueryStart has pushed the parent stack entry.
-		 */
-		if (estate->es_instrument &&
-			estate->es_instrument->instr.need_stack &&
-			!queryDesc->already_executed)
-			ExecRememberNodeInstrumentation(queryDesc->planstate,
-											queryDesc->totaltime);
-	}
 
 	/*
 	 * extract information from the query descriptor and the query feature.

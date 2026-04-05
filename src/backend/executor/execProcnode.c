@@ -122,7 +122,6 @@
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
-static bool ExecRememberNodeInstrumentation_walker(PlanState *node, void *context);
 static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
 
 
@@ -809,53 +808,6 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 		InstrStopNode(node->instrument, 0);
 
 	return false;
-}
-
-/*
- * ExecRememberNodeInstrumentation
- *
- * Register all per-node instrumentation entries as unfinalized children of
- * the executor's instrumentation. This is needed for abort recovery: if the
- * executor aborts, we need to walk each per-node entry to recover buffer/WAL
- * data from nodes that never got finalized, that someone might be interested
- * in as an aggregate.
- */
-void
-ExecRememberNodeInstrumentation(PlanState *node, QueryInstrumentation *parent)
-{
-	(void) ExecRememberNodeInstrumentation_walker(node, parent);
-}
-
-static bool
-ExecRememberNodeInstrumentation_walker(PlanState *node, void *context)
-{
-	QueryInstrumentation *parent = (QueryInstrumentation *) context;
-
-	Assert(parent != NULL);
-
-	if (node == NULL)
-		return false;
-
-	if (node->instrument)
-	{
-		InstrQueryRememberChild(parent, &node->instrument->instr);
-
-		/* IndexScan/IndexOnlyScan have a separate entry to track table access */
-		if (IsA(node, IndexScanState))
-		{
-			IndexScanState *iss = castNode(IndexScanState, node);
-
-			InstrQueryRememberChild(parent, &iss->iss_Instrument->table_instr);
-		}
-		else if (IsA(node, IndexOnlyScanState))
-		{
-			IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
-
-			InstrQueryRememberChild(parent, &ioss->ioss_Instrument->table_instr);
-		}
-	}
-
-	return planstate_tree_walker(node, ExecRememberNodeInstrumentation_walker, context);
 }
 
 /*

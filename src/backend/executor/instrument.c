@@ -372,6 +372,8 @@ InstrAllocNode(QueryInstrumentation *qinstr, bool async_mode)
 	InstrInitNode(instr, qinstr->instrument_options);
 	instr->async_mode = async_mode;
 
+	InstrQueryRememberChild(qinstr, &instr->instr);
+
 	return instr;
 }
 

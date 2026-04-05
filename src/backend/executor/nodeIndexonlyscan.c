@@ -636,7 +636,10 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 		 * full InstrNode*) to reduce overhead.
 		 */
 		if ((estate->es_instrument->instrument_options & INSTRUMENT_BUFFERS) != 0)
+		{
 			InstrInitOptions(&indexstate->ioss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			InstrQueryRememberChild(estate->es_instrument, &indexstate->ioss_Instrument->table_instr);
+		}
 	}
 
 	/* Open the index relation. */
