@@ -1381,7 +1381,7 @@ ExecInitPartitionDispatchInfo(EState *estate,
 	{
 		ResultRelInfo *rri = makeNode(ResultRelInfo);
 
-		InitResultRelInfo(rri, rel, 0, rootResultRelInfo, 0);
+		InitResultRelInfo(rri, rel, 0, rootResultRelInfo, NULL);
 		proute->nonleaf_partitions[dispatchidx] = rri;
 	}
 	else

@@ -54,12 +54,15 @@ typedef struct Instrumentation Instrumentation;
 typedef struct pairingheap pairingheap;
 typedef struct PlanState PlanState;
 typedef struct QueryEnvironment QueryEnvironment;
+typedef struct QueryInstrumentation QueryInstrumentation;
 typedef struct RelationData *Relation;
 typedef Relation *RelationPtr;
 typedef struct ScanKeyData ScanKeyData;
 typedef struct SnapshotData *Snapshot;
 typedef struct SortSupportData *SortSupport;
 typedef struct TIDBitmap TIDBitmap;
+typedef struct NodeInstrumentation NodeInstrumentation;
+typedef struct TriggerInstrumentation TriggerInstrumentation;
 typedef struct TupleConversionMap TupleConversionMap;
 typedef struct TupleDescData *TupleDesc;
 typedef struct Tuplesortstate Tuplesortstate;
@@ -67,7 +70,7 @@ typedef struct Tuplestorestate Tuplestorestate;
 typedef struct TupleTableSlot TupleTableSlot;
 typedef struct TupleTableSlotOps TupleTableSlotOps;
 typedef struct WalUsage WalUsage;
-typedef struct WorkerInstrumentation WorkerInstrumentation;
+typedef struct WorkerNodeInstrumentation WorkerNodeInstrumentation;
 
 
 /* ----------------
@@ -552,7 +555,7 @@ typedef struct ResultRelInfo
 	ExprState **ri_TrigWhenExprs;
 
 	/* optional runtime measurements for triggers */
-	Instrumentation *ri_TrigInstrument;
+	TriggerInstrumentation *ri_TrigInstrument;
 
 	/* On-demand created slots for triggers / returning processing */
 	TupleTableSlot *ri_ReturningSlot;	/* for trigger output tuples */
@@ -751,7 +754,7 @@ typedef struct EState
 									 * ExecutorRun() calls. */
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
-	int			es_instrument;	/* OR of InstrumentOption flags */
+	QueryInstrumentation *es_instrument;	/* query-level instrumentation */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */
@@ -1206,8 +1209,10 @@ typedef struct PlanState
 	ExecProcNodeMtd ExecProcNodeReal;	/* actual function, if above is a
 										 * wrapper */
 
-	Instrumentation *instrument;	/* Optional runtime stats for this node */
-	WorkerInstrumentation *worker_instrument;	/* per-worker instrumentation */
+	NodeInstrumentation *instrument;	/* Optional runtime stats for this
+										 * node */
+	WorkerNodeInstrumentation *worker_instrument;	/* per-worker
+													 * instrumentation */
 
 	/* Per-worker JIT instrumentation */
 	struct SharedJitInstrumentation *worker_jit_instrument;
