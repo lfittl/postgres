@@ -1401,6 +1401,10 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
  * also provides a way for EXPLAIN ANALYZE to report the runtimes of such
  * triggers.)  So we make additional ResultRelInfo's as needed, and save them
  * in es_trig_target_relations.
+ *
+ * Note: if new relation lists are searched here, they must also be added to
+ * ExecFinalizeTriggerInstrumentation so that trigger instrumentation data
+ * is properly accumulated.
  */
 ResultRelInfo *
 ExecGetTriggerResultRel(EState *estate, Oid relid,
