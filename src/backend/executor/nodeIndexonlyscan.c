@@ -67,6 +67,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	IndexScanDesc scandesc;
 	TupleTableSlot *slot;
 	ItemPointer tid;
+	Instrumentation *table_instr = NULL;
 
 	/*
 	 * extract necessary information from index scan node
@@ -82,6 +83,9 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	scandesc = node->ioss_ScanDesc;
 	econtext = node->ss.ps.ps_ExprContext;
 	slot = node->ss.ss_ScanTupleSlot;
+
+	if (node->ioss_Instrument && node->ioss_Instrument->table_instr.need_stack)
+		table_instr = &node->ioss_Instrument->table_instr;
 
 	if (scandesc == NULL)
 	{
@@ -165,11 +169,22 @@ IndexOnlyNext(IndexOnlyScanState *node)
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{
+			bool		found;
+
 			/*
 			 * Rats, we have to visit the heap to check visibility.
 			 */
 			InstrCountTuples2(node, 1);
-			if (!index_fetch_heap(scandesc, node->ioss_TableSlot))
+
+			if (table_instr)
+				InstrPushStack(table_instr);
+
+			found = index_fetch_heap(scandesc, node->ioss_TableSlot);
+
+			if (table_instr)
+				InstrPopStack(table_instr);
+
+			if (!found)
 				continue;		/* no visible tuple, try next index entry */
 
 			ExecClearTuple(node->ioss_TableSlot);
