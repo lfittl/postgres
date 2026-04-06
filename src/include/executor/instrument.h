@@ -302,7 +302,8 @@ extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
 typedef struct TupleTableSlot TupleTableSlot;
 typedef struct PlanState PlanState;
-extern TupleTableSlot *ExecProcNodeInstr(PlanState *node);
+typedef TupleTableSlot *(*ExecProcNodeMtd) (PlanState *pstate);
+extern ExecProcNodeMtd InstrNodeSetupExecProcNode(NodeInstrumentation *instr);
 
 extern TriggerInstrumentation *InstrAllocTrigger(QueryInstrumentation *qinstr,
 												 int instrument_options, int n);
