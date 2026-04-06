@@ -586,7 +586,8 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 					  partrel,
 					  0,
 					  rootResultRelInfo,
-					  estate->es_instrument);
+					  estate->es_instrument,
+					  estate->es_query_instr);
 
 	/*
 	 * Verify result relation is a valid target for an INSERT.  An UPDATE of a
@@ -1381,7 +1382,7 @@ ExecInitPartitionDispatchInfo(EState *estate,
 	{
 		ResultRelInfo *rri = makeNode(ResultRelInfo);
 
-		InitResultRelInfo(rri, rel, 0, rootResultRelInfo, 0);
+		InitResultRelInfo(rri, rel, 0, rootResultRelInfo, 0, NULL);
 		proute->nonleaf_partitions[dispatchidx] = rri;
 	}
 	else

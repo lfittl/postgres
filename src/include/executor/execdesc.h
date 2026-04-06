@@ -42,6 +42,8 @@ typedef struct QueryDesc
 	ParamListInfo params;		/* param values being passed in */
 	QueryEnvironment *queryEnv; /* query environment passed in */
 	int			instrument_options; /* OR of InstrumentOption flags */
+	int			totaltime_options;	/* OR of InstrumentOption flags for
+									 * totaltime */
 
 	/* These fields are set by ExecutorStart */
 	TupleDesc	tupDesc;		/* descriptor for result tuples */
@@ -51,7 +53,7 @@ typedef struct QueryDesc
 	/* This field is set by ExecutePlan */
 	bool		already_executed;	/* true if previously executed */
 
-	/* This is always set NULL by the core system, but plugins can change it */
+	/* This field is allocated by ExecutorRun if needed */
 	struct Instrumentation *totaltime;	/* total time spent in ExecutorRun */
 } QueryDesc;
 
