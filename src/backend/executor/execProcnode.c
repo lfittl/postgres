@@ -413,7 +413,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAllocNode(estate->es_instrument,
+		result->instrument = InstrAllocNode(estate->es_query_instr,
+											estate->es_instrument,
 											result->async_capable);
 
 	return result;
@@ -768,10 +769,10 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * at least once already.  We don't expect much CPU consumption during
 	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
 	 * down workers at this stage.  If so, their buffer usage will get
-	 * propagated into pgBufferUsage at this point, and we want to make sure
-	 * that it gets associated with the Gather node.  We skip this if the node
-	 * has never been executed, so as to avoid incorrectly making it appear
-	 * that it has.
+	 * propagated into the current instrumentation stack entry at this point,
+	 * and we want to make sure that it gets associated with the Gather node.
+	 * We skip this if the node has never been executed, so as to avoid
+	 * incorrectly making it appear that it has.
 	 */
 	if (node->instrument && node->instrument->running)
 		InstrStartNode(node->instrument);

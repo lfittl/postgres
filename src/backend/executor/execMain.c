@@ -254,10 +254,18 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 * Set up query-level instrumentation if extensions have requested it via
 	 * query_instr_options. Ensure an extension has not allocated query_instr
 	 * itself.
+	 *
+	 * Alternatively, also set it up when running EXPLAIN (ANALYZE), as we
+	 * utilize query_instr as the parent for node and trigger instrumentation.
 	 */
 	Assert(queryDesc->query_instr == NULL);
-	if (queryDesc->query_instr_options)
-		queryDesc->query_instr = InstrAlloc(queryDesc->query_instr_options);
+	if (queryDesc->query_instr_options || queryDesc->instrument_options)
+	{
+		estate->es_query_instr = InstrQueryAlloc(queryDesc->instrument_options |
+												 queryDesc->query_instr_options);
+
+		queryDesc->query_instr = estate->es_query_instr;
+	}
 
 	/*
 	 * Set up an AFTER-trigger statement context, unless told not to, or
@@ -340,9 +348,9 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
-	/* Allow instrumentation of Executor overall runtime */
-	if (queryDesc->query_instr)
-		InstrStart(queryDesc->query_instr);
+	/* Start up instrumentation for this execution run */
+	if (estate->es_query_instr)
+		InstrQueryStart(estate->es_query_instr);
 
 	/*
 	 * extract information from the query descriptor and the query feature.
@@ -393,8 +401,8 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	if (sendTuples)
 		dest->rShutdown(dest);
 
-	if (queryDesc->query_instr)
-		InstrStop(queryDesc->query_instr);
+	if (estate->es_query_instr)
+		InstrQueryStop(estate->es_query_instr);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -443,8 +451,8 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
 	/* Allow instrumentation of Executor overall runtime */
-	if (queryDesc->query_instr)
-		InstrStart(queryDesc->query_instr);
+	if (estate->es_query_instr)
+		InstrQueryStart(estate->es_query_instr);
 
 	/* Run ModifyTable nodes to completion */
 	ExecPostprocessPlan(estate);
@@ -453,8 +461,23 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	if (!(estate->es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS))
 		AfterTriggerEndQuery(estate);
 
-	if (queryDesc->query_instr)
-		InstrStop(queryDesc->query_instr);
+	if (estate->es_query_instr)
+	{
+		/*
+		 * Accumulate per-node and trigger statistics to the query entry.
+		 *
+		 * Parallel workers skip this: their per-node stats are reported
+		 * individually via ExecParallelReportInstrumentation and imported by
+		 * the leader from there (see InstrAccumWorkerNodeUsage), so
+		 * accounting for them in the query-level stats the leader receives
+		 * as well would double-count.
+		 */
+		if (!IsParallelWorker())
+			InstrQueryFinalizeChildren(estate->es_query_instr,
+									   &estate->es_query_instr->instr);
+
+		InstrQueryStopFinalize(estate->es_query_instr);
+	}
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1287,7 +1310,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 				  Relation resultRelationDesc,
 				  Index resultRelationIndex,
 				  ResultRelInfo *partition_root_rri,
-				  int instrument_options)
+				  int instrument_options,
+				  QueryInstrumentation *qinstr)
 {
 	MemSet(resultRelInfo, 0, sizeof(ResultRelInfo));
 	resultRelInfo->type = T_ResultRelInfo;
@@ -1308,8 +1332,19 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 			palloc0_array(FmgrInfo, n);
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0_array(ExprState *, n);
+
+		/*
+		 * Per-trigger instrumentation is only needed when per-node
+		 * instrumentation (EXPLAIN ANALYZE) is requested.  Query-level
+		 * instrumentation alone (e.g. pg_stat_statements) accounts for
+		 * trigger activity through the stack entry current while the trigger
+		 * runs, so don't allocate anything in that case.
+		 */
 		if (instrument_options)
-			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(n, instrument_options);
+		{
+			Assert(qinstr != NULL);
+			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(qinstr, instrument_options, n);
+		}
 	}
 	else
 	{
@@ -1447,7 +1482,8 @@ ExecGetTriggerResultRel(EState *estate, Oid relid,
 					  rel,
 					  0,		/* dummy rangetable index */
 					  rootRelInfo,
-					  estate->es_instrument);
+					  estate->es_instrument,
+					  estate->es_query_instr);
 	estate->es_trig_target_relations =
 		lappend(estate->es_trig_target_relations, rInfo);
 	MemoryContextSwitchTo(oldcontext);
@@ -1508,9 +1544,14 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);
 
-			/* dummy rangetable index */
-			InitResultRelInfo(rInfo, ancRel, 0, NULL,
-							  estate->es_instrument);
+			/*
+			 * Dummy rangetable index, and no trigger instrumentation: these
+			 * ResultRelInfos are only used to queue AFTER triggers (see
+			 * ExecCrossPartitionUpdateForeignKey).  When those fire, the
+			 * relation is looked up again via ExecGetTriggerResultRel, and
+			 * the ResultRelInfo found there carries the instrumentation.
+			 */
+			InitResultRelInfo(rInfo, ancRel, 0, NULL, 0, NULL);
 			ancResultRels = lappend(ancResultRels, rInfo);
 		}
 		ancResultRels = lappend(ancResultRels, rootRelInfo);
@@ -3089,13 +3130,18 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	rcestate->es_queryEnv = parentestate->es_queryEnv;
 
 	/*
+	 * es_instrument and es_query_instr must NOT be copied. EPQ is intended to
+	 * be called from within other plan nodes, and we already track things on
+	 * those plan nodes themselves, if needed.
+	 */
+
+	/*
 	 * ResultRelInfos needed by subplans are initialized from scratch when the
 	 * subplans themselves are initialized.
 	 */
 	rcestate->es_result_relations = NULL;
 	/* es_trig_target_relations must NOT be copied */
 	rcestate->es_top_eflags = parentestate->es_top_eflags;
-	rcestate->es_instrument = parentestate->es_instrument;
 	/* es_auxmodifytables must NOT be copied */
 
 	/*
