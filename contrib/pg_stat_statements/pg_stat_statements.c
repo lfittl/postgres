@@ -929,11 +929,10 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
-
-		InstrStop(&instr);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -1145,6 +1144,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1158,8 +1158,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 * For the same reason, we can't risk restoring pstmt->queryId to its
 		 * former value, which'd otherwise be a good idea.
 		 */
-
-		InstrStop(&instr);
 
 		/*
 		 * Track the total number of rows retrieved or affected by the utility

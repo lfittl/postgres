@@ -309,7 +309,7 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	Oid			save_userid;
 	int			save_sec_context;
 	int			save_nestlevel;
-	Instrumentation *instr = NULL;
+	QueryInstrumentation *instr = NULL;
 	PgStat_Counter startreadtime = 0;
 	PgStat_Counter startwritetime = 0;
 
@@ -361,8 +361,8 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 
 		pg_rusage_init(&ru0);
 
-		instr = InstrAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
-		InstrStart(instr);
+		instr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+		InstrQueryStart(instr);
 	}
 
 	/* Used for instrumentation and stats report */
@@ -743,7 +743,7 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 	{
 		TimestampTz endtime = GetCurrentTimestamp();
 
-		InstrStop(instr);
+		InstrQueryStopFinalize(instr);
 
 		if (verbose || params->log_analyze_min_duration == 0 ||
 			TimestampDifferenceExceeds(starttime, endtime,
@@ -757,8 +757,8 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
-			BufferUsage bufusage = instr->bufusage;
-			WalUsage	walusage = instr->walusage;
+			BufferUsage bufusage = instr->instr.bufusage;
+			WalUsage	walusage = instr->instr.walusage;
 
 			total_blks_hit = bufusage.shared_blks_hit +
 				bufusage.local_blks_hit;
