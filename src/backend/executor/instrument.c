@@ -21,15 +21,42 @@
 #include "nodes/execnodes.h"
 #include "portability/instr_time.h"
 #include "utils/guc_hooks.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 
 BufferUsage pgBufferUsage;
-static BufferUsage save_pgBufferUsage;
 WalUsage	pgWalUsage;
-static WalUsage save_pgWalUsage;
+Instrumentation instr_top;
+InstrStackState instr_stack = {
+	.stack_space = 0,
+	.stack_size = 0,
+	.entries = NULL,
+	.current = &instr_top,
+};
 
-static void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
-static void WalUsageAdd(WalUsage *dst, WalUsage *add);
+void
+InstrStackGrow(void)
+{
+	int			space = instr_stack.stack_space;
 
+	Assert(instr_stack.stack_size >= instr_stack.stack_space);
+
+	if (instr_stack.entries == NULL)
+	{
+		space = 10;				/* Allocate sufficient initial space for
+								 * typical activity */
+		instr_stack.entries = MemoryContextAlloc(TopMemoryContext,
+												 sizeof(Instrumentation *) * space);
+	}
+	else
+	{
+		space *= 2;
+		instr_stack.entries = repalloc_array(instr_stack.entries, Instrumentation *, space);
+	}
+
+	/* Update stack space after allocation succeeded to protect against OOMs */
+	instr_stack.stack_space = space;
+}
 
 /* General purpose instrumentation handling */
 Instrumentation *
@@ -49,8 +76,22 @@ InstrInitOptions(Instrumentation *instr, int instrument_options)
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 }
 
-inline void
-InstrStart(Instrumentation *instr)
+static inline bool
+InstrNeedStack(int instrument_options)
+{
+	return (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0;
+}
+
+/*
+ * Common part of InstrStart and InstrStartNode: start the timer, and enter
+ * the entry onto the instrumentation stack.
+ *
+ * The diff-mode handling (see struct comment in instrument.h) lives only in
+ * InstrStart: node instrumentation never measures by diffing, so keeping the
+ * checks out of here keeps them out of the per-tuple ExecProcNodeInstr path.
+ */
+static inline void
+InstrStartCommon(Instrumentation *instr)
 {
 	if (instr->need_timer)
 	{
@@ -60,17 +101,30 @@ InstrStart(Instrumentation *instr)
 			INSTR_TIME_SET_CURRENT_FAST(instr->starttime);
 	}
 
-	/* save buffer usage totals at start, if needed */
-	if (instr->need_bufusage)
-		instr->bufusage_start = pgBufferUsage;
+	if (instr->need_stack)
+		InstrPushStack(instr);
+}
 
-	if (instr->need_walusage)
-		instr->walusage_start = pgWalUsage;
+inline void
+InstrStart(Instrumentation *instr)
+{
+	InstrStartCommon(instr);
+
+	if (!instr->need_stack)
+	{
+		/* save buffer usage totals at start, if needed */
+		if (instr->need_bufusage)
+			instr->bufusage_start = pgBufferUsage;
+
+		if (instr->need_walusage)
+			instr->walusage_start = pgWalUsage;
+	}
 }
 
 /*
  * Helper for InstrStop() and InstrStopNode(), to avoid code duplication
- * despite slightly different needs about how time is accumulated.
+ * despite slightly different needs about how time is accumulated.  Like
+ * InstrStartCommon, this omits the diff-mode handling.
  */
 static inline void
 InstrStopCommon(Instrumentation *instr, instr_time *accum_time)
@@ -89,31 +143,403 @@ InstrStopCommon(Instrumentation *instr, instr_time *accum_time)
 		INSTR_TIME_SET_ZERO(instr->starttime);
 	}
 
-	/* Add delta of buffer usage since InstrStart to the totals */
-	if (instr->need_bufusage)
-		BufferUsageAccumDiff(&instr->bufusage,
-							 &pgBufferUsage, &instr->bufusage_start);
-
-	if (instr->need_walusage)
-		WalUsageAccumDiff(&instr->walusage,
-						  &pgWalUsage, &instr->walusage_start);
+	/* pop the stack, unless InstrStopFinalize previously cleaned up */
+	if (instr->on_stack)
+		InstrPopStack(instr);
 }
 
 void
 InstrStop(Instrumentation *instr)
 {
 	InstrStopCommon(instr, &instr->total);
+
+	if (!instr->need_stack)
+	{
+		/* Add delta of buffer usage since InstrStart to the totals */
+		if (instr->need_bufusage)
+			BufferUsageAccumDiff(&instr->bufusage,
+								 &pgBufferUsage, &instr->bufusage_start);
+
+		if (instr->need_walusage)
+			WalUsageAccumDiff(&instr->walusage,
+							  &pgWalUsage, &instr->walusage_start);
+	}
+}
+
+/*
+ * Workhorse for InstrStopFinalize and the abort cleanup.
+ *
+ * If 'allow_stopped' is set, the entry may already have been stopped (as
+ * happens for a QueryInstrumentation between two InstrQueryStart/InstrQueryStop
+ * pairs, e.g. between fetches from a cursor), in which case there is no timer
+ * to stop and only the accumulation to the parent remains.
+ */
+static void
+InstrStopFinalizeInternal(Instrumentation *instr, bool allow_stopped)
+{
+	/*
+	 * If our current node is on the stack, make sure we reset the stack to
+	 * the parent of whichever of the released stack entries has the lowest
+	 * index
+	 */
+	if (instr->on_stack)
+	{
+		int			idx = -1;
+
+		for (int i = instr_stack.stack_size - 1; i >= 0; i--)
+		{
+			if (instr_stack.entries[i] == instr)
+			{
+				idx = i;
+				break;
+			}
+		}
+
+		if (idx < 0)
+			elog(ERROR, "instrumentation entry not found on stack");
+
+		/* Clear on_stack for any intermediate entries we're skipping over */
+		for (int i = instr_stack.stack_size - 1; i > idx; i--)
+			instr_stack.entries[i]->on_stack = false;
+
+		while (instr_stack.stack_size > idx + 1)
+			instr_stack.stack_size--;
+	}
+
+	if (!(allow_stopped && instr->need_timer &&
+		  INSTR_TIME_IS_ZERO(instr->starttime)))
+		InstrStop(instr);
+
+	/*
+	 * Accumulate all instrumentation to the currently active instrumentation,
+	 * so that callers get a complete picture of activity, even after an abort
+	 */
+	InstrAccumStack(instr_stack.current, instr);
+}
+
+/*
+ * Stops instrumentation, finalizes the stack entry and accumulates to its parent.
+ *
+ * Note that this intentionally allows passing a stack that is not the current
+ * top, as can happen with PG_FINALLY, or resource owners, which don't have a
+ * guaranteed cleanup order.
+ */
+void
+InstrStopFinalize(Instrumentation *instr)
+{
+	InstrStopFinalizeInternal(instr, false);
+}
+
+/*
+ * Finalize a child entry registered with InstrQueryRememberChild, by
+ * accumulating its buffer/WAL usage to the provided instrumentation, which may
+ * be the current entry, or one the caller treats as a parent and will add to
+ * the totals later.
+ *
+ * The entry is removed from its parent's unfinalized list, so that neither
+ * InstrQueryFinalizeChildren nor the abort handling count it again, and
+ * marked as finalized: later calls are no-ops.  Most children are finalized
+ * through InstrQueryFinalizeChildren; a caller that is done with an entry
+ * earlier finalizes it directly.
+ *
+ * For entries that are not registered, e.g. copies of other processes'
+ * instrumentation, use InstrAccumStack instead.
+ */
+void
+InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent)
+{
+	if (!instr->need_stack || instr->finalized)
+		return;
+
+	Assert(!dlist_node_is_detached(&instr->unfinalized_entry));
+	dlist_delete_thoroughly(&instr->unfinalized_entry);
+
+	InstrAccumStack(parent, instr);
+	instr->finalized = true;
+}
+
+
+/* Query instrumentation handling */
+
+/*
+ * Finalize all entries registered with InstrQueryRememberChild that have not
+ * been finalized yet (plan nodes, triggers, etc.), accumulating each one's
+ * buffer/WAL usage directly to the target.
+ *
+ * The executor calls this at ExecutorFinish with the query entry as the
+ * target, and the abort handling does the same, so that nothing registered
+ * with a query entry can ever be lost, whichever way the query ends.
+ *
+ * Children are intentionally not rolled up into their parents: per-node
+ * stats stay exclusive of child nodes, i.e. they only reflect activity that
+ * happened while the node itself was the top of the instrumentation stack
+ * (which includes statements it ran, e.g. through a function).  This keeps
+ * the per-node counters identical in the leader and in parallel workers
+ * (whose nodes get copied to the leader through shared memory), and makes the
+ * normal and the abort path do the same thing.  EXPLAIN computes the
+ * inclusive numbers it displays by summing subtrees at display time.
+ *
+ * In the executor, this must run after ExecShutdownNode has done its work,
+ * e.g. parallel worker instrumentation has been retrieved by the leader.
+ */
+void
+InstrQueryFinalizeChildren(QueryInstrumentation *qinstr, Instrumentation *target)
+{
+	dlist_mutable_iter iter;
+
+	dlist_foreach_modify(iter, &qinstr->unfinalized_entries)
+	{
+		Instrumentation *child = dlist_container(Instrumentation, unfinalized_entry, iter.cur);
+
+		InstrFinalizeChild(child, target);
+	}
+}
+
+/*
+ * Use ResourceOwner mechanism to correctly reset instr_stack on abort.
+ */
+static void ResOwnerReleaseInstrumentation(Datum res);
+static const ResourceOwnerDesc instrumentation_resowner_desc =
+{
+	.name = "instrumentation",
+	.release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+	.release_priority = RELEASE_PRIO_INSTRUMENTATION,
+	.ReleaseResource = ResOwnerReleaseInstrumentation,
+	.DebugPrint = NULL,			/* default message is fine */
+};
+
+static inline void
+ResourceOwnerRememberInstrumentation(ResourceOwner owner, QueryInstrumentation *qinstr)
+{
+	ResourceOwnerRemember(owner, PointerGetDatum(qinstr), &instrumentation_resowner_desc);
+}
+
+static inline void
+ResourceOwnerForgetInstrumentation(ResourceOwner owner, QueryInstrumentation *qinstr)
+{
+	ResourceOwnerForget(owner, PointerGetDatum(qinstr), &instrumentation_resowner_desc);
+}
+
+static void
+ResOwnerReleaseInstrumentation(Datum res)
+{
+	QueryInstrumentation *qinstr = (QueryInstrumentation *) DatumGetPointer(res);
+	MemoryContext instr_cxt = qinstr->instr_cxt;
+
+	/* Accumulate data from all unfinalized child entries (nodes, triggers) */
+	InstrQueryFinalizeChildren(qinstr, &qinstr->instr);
+
+	/*
+	 * Ensure the stack is reset as expected, and we accumulate to the parent.
+	 * The entry stays registered between InstrQueryStop and the next
+	 * InstrQueryStart, so it may well not be running at this point.
+	 */
+	InstrStopFinalizeInternal(&qinstr->instr, true);
+
+	/*
+	 * Destroy the dedicated instrumentation context, which frees the
+	 * QueryInstrumentation and all child allocations.
+	 */
+	MemoryContextDelete(instr_cxt);
+}
+
+QueryInstrumentation *
+InstrQueryAlloc(int instrument_options)
+{
+	QueryInstrumentation *instr;
+	MemoryContext instr_cxt;
+
+	/*
+	 * When the instrumentation stack is used, create a dedicated memory
+	 * context for this query's instrumentation allocations.  It starts out as
+	 * a child of the current memory context, so that it is freed along with
+	 * the caller's state if the caller is abandoned before InstrQueryStart,
+	 * and is moved under TopMemoryContext while a ResourceOwner is
+	 * responsible for it (see InstrQueryStart), since the abort cleanup needs
+	 * to access it after the caller's memory may already be gone.
+	 *
+	 * For simpler cases (timer/rows only), use the current memory context.
+	 *
+	 * All child instrumentation allocations (nodes, triggers, etc) must be
+	 * allocated within this context to ensure correct clean up on abort.
+	 */
+	if (InstrNeedStack(instrument_options))
+		instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
+										  "Instrumentation",
+										  ALLOCSET_SMALL_SIZES);
+	else
+		instr_cxt = CurrentMemoryContext;
+
+	instr = MemoryContextAllocZero(instr_cxt, sizeof(QueryInstrumentation));
+	instr->instrument_options = instrument_options;
+	instr->instr_cxt = instr_cxt;
+
+	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.need_stack = InstrNeedStack(instrument_options);
+	dlist_init(&instr->unfinalized_entries);
+
+	return instr;
+}
+
+void
+InstrQueryStart(QueryInstrumentation *qinstr)
+{
+	/*
+	 * On the first start, hand the entry over to the current ResourceOwner,
+	 * which stays responsible for it until InstrQueryStopFinalize (or abort).
+	 * It is intentionally not released at InstrQueryStop, so that an abort
+	 * between two start/stop pairs (e.g. between fetches from a cursor) still
+	 * accumulates what was measured so far.
+	 */
+	if (qinstr->instr.need_stack && qinstr->owner == NULL)
+	{
+		Assert(CurrentResourceOwner != NULL);
+
+		/*
+		 * Enlarge first, as that is the only step that can fail; once the
+		 * context is under TopMemoryContext we must be sure to register it.
+		 */
+		ResourceOwnerEnlarge(CurrentResourceOwner);
+		MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
+
+		qinstr->owner = CurrentResourceOwner;
+		ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+	}
+
+	InstrStart(&qinstr->instr);
+}
+
+void
+InstrQueryStop(QueryInstrumentation *qinstr)
+{
+	InstrStop(&qinstr->instr);
+}
+
+void
+InstrQueryStopFinalize(QueryInstrumentation *qinstr)
+{
+	InstrStopFinalize(&qinstr->instr);
+
+	if (!qinstr->instr.need_stack)
+	{
+		Assert(qinstr->owner == NULL);
+		return;
+	}
+
+	Assert(qinstr->owner != NULL);
+	ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
+	qinstr->owner = NULL;
+
+	/*
+	 * Reparent the dedicated instrumentation context under the current memory
+	 * context, so that its lifetime is now tied to the caller's context
+	 * rather than TopMemoryContext.
+	 */
+	MemoryContextSetParent(qinstr->instr_cxt, CurrentMemoryContext);
+}
+
+/*
+ * Register a child Instrumentation entry for abort processing.
+ *
+ * On abort, ResOwnerReleaseInstrumentation will walk the parent's list to
+ * recover buffer/WAL data from entries that were never finalized, in order for
+ * aggregate totals to be accurate despite the query erroring out.
+ */
+void
+InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentation *child)
+{
+	if (child->need_stack)
+		dlist_push_head(&parent->unfinalized_entries, &child->unfinalized_entry);
+}
+
+/* start instrumentation during parallel worker startup */
+QueryInstrumentation *
+InstrStartParallelQuery(void)
+{
+	QueryInstrumentation *qinstr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+
+	InstrQueryStart(qinstr);
+	return qinstr;
+}
+
+/*
+ * Report usage after parallel worker shutdown, to be handed to the leader
+ * (which accumulates it into its own stack, see InstrAccumParallelQuery).
+ */
+void
+InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
+{
+	InstrQueryStopFinalize(qinstr);
+	memcpy(bufusage, &qinstr->instr.bufusage, sizeof(BufferUsage));
+	memcpy(walusage, &qinstr->instr.walusage, sizeof(WalUsage));
+}
+
+/*
+ * Record WAL/buffer usage imported from a parallel worker.
+ */
+void
+InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
+{
+	BufferUsageAdd(&pgBufferUsage, bufusage);
+	WalUsageAdd(&pgWalUsage, walusage);
+}
+
+/*
+ * Accumulate work done by parallel workers in the leader's stats.
+ *
+ * Note that what gets added here effectively depends on whether per-node
+ * instrumentation is active. If it's active the parallel worker intentionally
+ * does not roll up its nodes into the query-level stats, because the leader
+ * imports the per-node stats separately (see InstrAccumWorkerNodeUsage).
+ * Instead, this only accumulates any extra activity outside of nodes.
+ *
+ * Otherwise this is responsible for making sure that the complete query
+ * activity is accumulated.
+ */
+void
+InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+{
+	InstrAccumWorkerUsage(bufusage, walusage);
+
+	/*
+	 * There is no node to attribute query-level worker usage to, so add it to
+	 * the current stack entry directly, which is the Gather node when workers
+	 * are shut down during its execution.
+	 */
+	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
+	WalUsageAdd(&instr_stack.current->walusage, walusage);
+}
+
+/*
+ * Account for a parallel worker's per-node usage in the leader's query entry.
+ *
+ * The usage is deliberately kept out of the leader's own per-node entries,
+ * which only ever describe the leader's activity; EXPLAIN combines the two
+ * from the per-worker copies at display time.  It goes straight to the query
+ * entry rather than the current stack entry, since the latter is the Gather
+ * node while workers are being shut down.
+ */
+void
+InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr, Instrumentation *add)
+{
+	Assert(qinstr != NULL);
+
+	InstrAccumStack(&qinstr->instr, add);
+	InstrAccumWorkerUsage(&add->bufusage, &add->walusage);
 }
 
 /* Node instrumentation handling */
 
 /* Allocate new node instrumentation structure */
 NodeInstrumentation *
-InstrAllocNode(int instrument_options, bool async_mode)
+InstrAllocNode(QueryInstrumentation *qinstr, int instrument_options,
+			   bool async_mode)
 {
-	NodeInstrumentation *instr = palloc_object(NodeInstrumentation);
+	NodeInstrumentation *instr = MemoryContextAlloc(qinstr->instr_cxt, sizeof(NodeInstrumentation));
 
 	InstrInitNode(instr, instrument_options, async_mode);
+
+	InstrQueryRememberChild(qinstr, &instr->instr);
 
 	return instr;
 }
@@ -124,6 +550,7 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 {
 	memset(instr, 0, sizeof(NodeInstrumentation));
 	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.need_stack = InstrNeedStack(instrument_options);
 	instr->async_mode = async_mode;
 }
 
@@ -131,8 +558,9 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 inline void
 InstrStartNode(NodeInstrumentation *instr)
 {
-	InstrStart(&instr->instr);
+	InstrStartCommon(&instr->instr);
 }
+
 
 /* Exit from a plan node */
 inline void
@@ -225,7 +653,8 @@ InstrEndLoop(NodeInstrumentation *instr)
 }
 
 /*
- * Aggregate instrumentation from parallel workers. Must be called after
+ * Aggregate node instrumentation, e.g. a parallel worker's stats into its
+ * shared memory slot, or for display purposes.  Must be called after
  * InstrEndLoop.
  */
 void
@@ -241,22 +670,30 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 	dst->nfiltered1 += add->nfiltered1;
 	dst->nfiltered2 += add->nfiltered2;
 
-	if (dst->instr.need_bufusage)
-		BufferUsageAdd(&dst->instr.bufusage, &add->instr.bufusage);
-
-	if (dst->instr.need_walusage)
-		WalUsageAdd(&dst->instr.walusage, &add->instr.walusage);
+	InstrAccumStack(&dst->instr, &add->instr);
 }
 
 /* Trigger instrumentation handling */
 TriggerInstrumentation *
-InstrAllocTrigger(int n, int instrument_options)
+InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 {
-	TriggerInstrumentation *tginstr = palloc0_array(TriggerInstrumentation, n);
+	TriggerInstrumentation *tginstr;
 	int			i;
 
+	/*
+	 * Allocate in the query's dedicated instrumentation context so all
+	 * instrumentation data is grouped together and cleaned up as a unit.
+	 */
+	Assert(qinstr != NULL && qinstr->instr_cxt != NULL);
+	tginstr = MemoryContextAllocZero(qinstr->instr_cxt,
+									 n * sizeof(TriggerInstrumentation));
+
 	for (i = 0; i < n; i++)
+	{
 		InstrInitOptions(&tginstr[i].instr, instrument_options);
+		tginstr[i].instr.need_stack = InstrNeedStack(instrument_options);
+		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
+	}
 
 	return tginstr;
 }
@@ -270,38 +707,30 @@ InstrStartTrigger(TriggerInstrumentation *tginstr)
 void
 InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings)
 {
+	/*
+	 * This trigger may be called again, so we don't finalize instrumentation
+	 * here. Accumulation to the parent happens at ExecutorFinish through
+	 * InstrQueryFinalizeChildren.
+	 */
 	InstrStop(&tginstr->instr);
 	tginstr->firings += firings;
 }
 
-/* note current values during parallel executor startup */
 void
-InstrStartParallelQuery(void)
+InstrAccumStack(Instrumentation *dst, Instrumentation *add)
 {
-	save_pgBufferUsage = pgBufferUsage;
-	save_pgWalUsage = pgWalUsage;
-}
+	Assert(dst != NULL);
+	Assert(add != NULL);
 
-/* report usage after parallel executor shutdown */
-void
-InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
-{
-	memset(bufusage, 0, sizeof(BufferUsage));
-	BufferUsageAccumDiff(bufusage, &pgBufferUsage, &save_pgBufferUsage);
-	memset(walusage, 0, sizeof(WalUsage));
-	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
-}
+	if (!add->need_stack)
+		return;
 
-/* accumulate work done by workers in leader's stats */
-void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
-{
-	BufferUsageAdd(&pgBufferUsage, bufusage);
-	WalUsageAdd(&pgWalUsage, walusage);
+	BufferUsageAdd(&dst->bufusage, &add->bufusage);
+	WalUsageAdd(&dst->walusage, &add->walusage);
 }
 
 /* dst += add */
-static void
+void
 BufferUsageAdd(BufferUsage *dst, const BufferUsage *add)
 {
 	dst->shared_blks_hit += add->shared_blks_hit;
@@ -353,8 +782,8 @@ BufferUsageAccumDiff(BufferUsage *dst,
 }
 
 /* helper functions for WAL usage accumulation */
-static inline void
-WalUsageAdd(WalUsage *dst, WalUsage *add)
+void
+WalUsageAdd(WalUsage *dst, const WalUsage *add)
 {
 	dst->wal_bytes += add->wal_bytes;
 	dst->wal_records += add->wal_records;
