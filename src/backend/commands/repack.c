@@ -2886,7 +2886,7 @@ initialize_change_context(ChangeContext *chgcxt,
 	chgcxt->cc_estate = CreateExecutorState();
 
 	chgcxt->cc_rri = (ResultRelInfo *) palloc(sizeof(ResultRelInfo));
-	InitResultRelInfo(chgcxt->cc_rri, relation, 0, 0, 0);
+	InitResultRelInfo(chgcxt->cc_rri, relation, 0, 0, 0, NULL);
 	ExecOpenIndices(chgcxt->cc_rri, false);
 
 	/*
