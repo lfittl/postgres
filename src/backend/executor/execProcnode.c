@@ -122,6 +122,7 @@
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
+static bool ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context);
 
 
 /* ------------------------------------------------------------------------
@@ -413,7 +414,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAllocNode(estate->es_instrument,
+		result->instrument = InstrAllocNode(estate->es_query_instr,
+											estate->es_instrument,
 											result->async_capable);
 
 	return result;
@@ -768,10 +770,10 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * at least once already.  We don't expect much CPU consumption during
 	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
 	 * down workers at this stage.  If so, their buffer usage will get
-	 * propagated into pgBufferUsage at this point, and we want to make sure
-	 * that it gets associated with the Gather node.  We skip this if the node
-	 * has never been executed, so as to avoid incorrectly making it appear
-	 * that it has.
+	 * propagated into the current instrumentation stack entry at this point,
+	 * and we want to make sure that it gets associated with the Gather node.
+	 * We skip this if the node has never been executed, so as to avoid
+	 * incorrectly making it appear that it has.
 	 */
 	if (node->instrument && node->instrument->running)
 		InstrStartNode(node->instrument);
@@ -807,6 +809,47 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 		InstrStopNode(node->instrument, 0);
 
 	return false;
+}
+
+/*
+ * ExecFinalizeNodeInstrumentation
+ *
+ * Accumulate each node's own buffer/WAL usage directly to the target,
+ * typically the query-level entry.
+ *
+ * Nodes are intentionally not rolled up into their parents: per-node stats
+ * stay exclusive of child nodes, i.e. they only reflect activity that
+ * happened while the node itself was the top of the instrumentation stack
+ * (which includes statements it ran, e.g. through a function).  This keeps
+ * the per-node counters identical in the leader and in parallel workers
+ * (whose nodes get copied to the leader through shared memory), and matches
+ * what the abort path in ResOwnerReleaseInstrumentation does.  EXPLAIN
+ * computes the inclusive numbers it displays by summing subtrees at display
+ * time.
+ *
+ * This must run after the cleanup done by ExecShutdownNode, and not rely on any
+ * resources cleaned up by it. We also expect shutdown actions to have occurred,
+ * e.g. parallel worker instrumentation to have been added to the leader.
+ */
+void
+ExecFinalizeNodeInstrumentation(PlanState *node, Instrumentation *target)
+{
+	(void) ExecFinalizeNodeInstrumentation_walker(node, target);
+}
+
+static bool
+ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	Assert(node->instrument != NULL);
+
+	InstrFinalizeChild(&node->instrument->instr, (Instrumentation *) context);
+
+	return planstate_tree_walker(node,
+								 ExecFinalizeNodeInstrumentation_walker,
+								 context);
 }
 
 /*
