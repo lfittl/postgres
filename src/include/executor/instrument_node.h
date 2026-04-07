@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "executor/instrument.h"
+
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
  * instrumentation. Instrumentation and parallel-awareness are independent, so
@@ -26,6 +28,7 @@
  * robust system.
  */
 #define PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET	UINT64CONST(0xD000000000000000)
+
 
 /* ---------------------
  *	Instrumentation information for aggregate function execution
@@ -56,6 +59,9 @@ typedef struct IndexScanInstrumentation
 {
 	/* Index search count (incremented with pgstat_count_index_scan call) */
 	uint64		nsearches;
+
+	/* Instrumentation utilized for tracking buffer usage during table access */
+	Instrumentation table_instr;
 } IndexScanInstrumentation;
 
 /*
