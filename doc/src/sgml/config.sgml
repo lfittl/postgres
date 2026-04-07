@@ -2533,6 +2533,62 @@ include_dir 'conf.d'
      </variablelist>
     </sect2>
 
+    <sect2 id="runtime-config-resource-time">
+     <title>Timing</title>
+
+     <variablelist>
+     <varlistentry id="guc-timing-clock-source" xreflabel="timing_clock_source">
+      <term><varname>timing_clock_source</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>timing_clock_source</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Selects the method for making timing measurements using the OS or specialized CPU
+        instructions. Possible values are:
+         <itemizedlist>
+          <listitem>
+           <para>
+            <literal>auto</literal> (automatically chooses TSC clock source on supported
+            x86-64 CPUs, otherwise uses the OS system clock)
+           </para>
+          </listitem>
+          <listitem>
+           <para>
+            <literal>system</literal> (measures timing using the OS system clock)
+           </para>
+          </listitem>
+          <listitem>
+           <para>
+            <literal>tsc</literal> (measures timing with a CPU instruction, e.g. using RDTSC/RDTSCP on x86-64)
+           </para>
+          </listitem>
+         </itemizedlist>
+         The default is <literal>auto</literal>. Only superusers can change
+         this setting. Changing the setting during query execution is not recommended
+         and may cause interval timings to jump significantly or produce negative values.
+        </para>
+        <para>
+          If enabled, the TSC clock source will use specialized CPU instructions
+          when measuring time intervals. This lowers timing overhead compared to
+          reading the OS system clock, and reduces the measurement error on top
+          of the actual runtime, for example with EXPLAIN ANALYZE.
+        </para>
+        <para>
+          On x86-64 CPUs the TSC clock source utilizes the Time-Stamp Counter (TSC)
+          of the CPU. The RDTSC instruction is used to read the TSC for EXPLAIN ANALYZE.
+          For timings that require higher precision the RDTSCP instruction is used,
+          which avoids inaccuracies due to CPU instruction re-ordering. Use of
+          RDTSC/RDTSCP is not supported on older x86-64 CPUs or hypervisors that don't
+          pass the TSC frequency to guest VMs, and is not advised on systems that
+          utilize an emulated TSC. The TSC clock source is currently not supported on
+          other architectures.
+        </para>
+      </listitem>
+     </varlistentry>
+     </variablelist>
+    </sect2>
 
     <sect2 id="runtime-config-resource-background-writer">
      <title>Background Writer</title>
