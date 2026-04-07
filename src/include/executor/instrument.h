@@ -142,6 +142,10 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
+typedef struct TupleTableSlot TupleTableSlot;
+typedef struct PlanState PlanState;
+extern TupleTableSlot *ExecProcNodeInstr(PlanState *node);
+
 extern TriggerInstrumentation *InstrAllocTrigger(int n, int instrument_options);
 extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings);

@@ -16,6 +16,8 @@
 #include <unistd.h>
 
 #include "executor/instrument.h"
+#include "executor/tuptable.h"
+#include "nodes/execnodes.h"
 #include "portability/instr_time.h"
 #include "utils/guc_hooks.h"
 
@@ -46,7 +48,7 @@ InstrInitOptions(Instrumentation *instr, int instrument_options)
 	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
 }
 
-void
+inline void
 InstrStart(Instrumentation *instr)
 {
 	if (instr->need_timer)
@@ -125,14 +127,14 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 }
 
 /* Entry to a plan node */
-void
+inline void
 InstrStartNode(NodeInstrumentation *instr)
 {
 	InstrStart(&instr->instr);
 }
 
 /* Exit from a plan node */
-void
+inline void
 InstrStopNode(NodeInstrumentation *instr, double nTuples)
 {
 	double		save_tuplecount = instr->tuplecount;
@@ -164,6 +166,25 @@ InstrStopNode(NodeInstrumentation *instr, double nTuples)
 		if (instr->async_mode && save_tuplecount < 1.0)
 			instr->firsttuple = instr->counter;
 	}
+}
+
+/*
+ * ExecProcNode wrapper that performs instrumentation calls.  By keeping
+ * this a separate function, we avoid overhead in the normal case where
+ * no instrumentation is wanted.
+ */
+TupleTableSlot *
+ExecProcNodeInstr(PlanState *node)
+{
+	TupleTableSlot *result;
+
+	InstrStartNode(node->instrument);
+
+	result = node->ExecProcNodeReal(node);
+
+	InstrStopNode(node->instrument, TupIsNull(result) ? 0.0 : 1.0);
+
+	return result;
 }
 
 /* Update tuple count */
