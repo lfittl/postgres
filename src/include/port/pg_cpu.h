@@ -56,7 +56,7 @@ x86_feature_available(X86FeatureId feature)
 	return X86Features[feature];
 }
 
-extern uint32 x86_tsc_frequency_khz(void);
+extern uint32 x86_tsc_frequency_khz(const char **source);
 
 #endif							/* defined(USE_SSE2) || defined(__i386__) */
 

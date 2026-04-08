@@ -13,7 +13,11 @@
  *-------------------------------------------------------------------------
  */
 
-#include "c.h"
+#ifndef FRONTEND
+#include "postgres.h"
+#else
+#include "postgres_fe.h"
+#endif
 
 #if defined(USE_SSE2) || defined(__i386__)
 
@@ -152,7 +156,7 @@ set_x86_features(void)
 
 /* TSC (Time-stamp Counter) handling code */
 
-static uint32 x86_hypervisor_tsc_frequency_khz(void);
+static uint32 x86_hypervisor_tsc_frequency_khz(const char **hvname);
 
 /*
  * Determine the TSC frequency of the CPU through CPUID, where supported.
@@ -161,13 +165,17 @@ static uint32 x86_hypervisor_tsc_frequency_khz(void);
  * 0 indicates the frequency information was not accessible via CPUID.
  */
 uint32
-x86_tsc_frequency_khz(void)
+x86_tsc_frequency_khz(const char **source)
 {
 	unsigned int reg[4] = {0};
+	const char *hvname = NULL;
+
+	if (source)
+		*source = NULL;
 
 	if (x86_feature_available(PG_HYPERVISOR))
 	{
-		uint32		freq = x86_hypervisor_tsc_frequency_khz();
+		uint32		freq = x86_hypervisor_tsc_frequency_khz(&hvname);
 
 		/*
 		 * If the hypervisor specific logic didn't figure out the frequency,
@@ -176,7 +184,12 @@ x86_tsc_frequency_khz(void)
 		 * frequency.
 		 */
 		if (freq > 0)
+		{
+			if (source)
+				*source = psprintf("x86, hypervisor (%s), cpuid 0x40000010",
+								   hvname);
 			return freq;
+		}
 	}
 
 	/*
@@ -210,6 +223,9 @@ x86_tsc_frequency_khz(void)
 		if (reg[EAX] == 0 || reg[EBX] == 0)
 			return 0;
 
+		if (source)
+			*source = hvname ? psprintf("x86, hypervisor (%s), cpuid 0x15", hvname) : "x86, cpuid 0x15";
+
 		return reg[ECX] / 1000 * reg[EBX] / reg[EAX];
 	}
 
@@ -220,7 +236,12 @@ x86_tsc_frequency_khz(void)
 	 */
 	pg_cpuid(0x16, reg);
 	if (reg[EAX] > 0)
+	{
+		if (source)
+			*source = hvname ? psprintf("x86, hypervisor (%s), cpuid 0x16", hvname) : "x86, cpuid 0x16";
+
 		return reg[EAX] * 1000;
+	}
 
 	return 0;
 }
@@ -239,10 +260,12 @@ x86_tsc_frequency_khz(void)
 #define CPUID_HYPERVISOR_VMWARE(r) (r[EBX] == 0x61774d56 && r[ECX] == 0x4d566572 && r[EDX] == 0x65726177)	/* VMwareVMware */
 #define CPUID_HYPERVISOR_KVM(r) (r[EBX] == 0x4b4d564b && r[ECX] == 0x564b4d56 && r[EDX] == 0x0000004d)	/* KVMKVMKVM */
 static uint32
-x86_hypervisor_tsc_frequency_khz(void)
+x86_hypervisor_tsc_frequency_khz(const char **hvname)
 {
 #if defined(HAVE__CPUIDEX)
 	unsigned int reg[4] = {0};
+
+	Assert(hvname != NULL);
 
 	/*
 	 * The hypervisor is determined using the 0x40000000 Hypervisor
@@ -255,12 +278,23 @@ x86_hypervisor_tsc_frequency_khz(void)
 	 */
 	__cpuidex((int *) reg, 0x40000000, 0);
 
+	/* Always identify the hypervisor */
+	if (CPUID_HYPERVISOR_VMWARE(reg))
+		*hvname = "vmware";
+	else if (CPUID_HYPERVISOR_KVM(reg))
+		*hvname = "kvm";
+	else
+		*hvname = "other";
+
 	if (reg[EAX] >= 0x40000010 && (CPUID_HYPERVISOR_VMWARE(reg) || CPUID_HYPERVISOR_KVM(reg)))
 	{
 		__cpuidex((int *) reg, 0x40000010, 0);
 		if (reg[EAX] > 0)
 			return reg[EAX];
 	}
+#else
+	Assert(hvname != NULL);
+	*hvname = "unknown";
 #endif							/* HAVE__CPUIDEX */
 
 	return 0;
