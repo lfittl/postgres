@@ -13,7 +13,11 @@
  *-------------------------------------------------------------------------
  */
 
-#include "c.h"
+#ifndef FRONTEND
+#include "postgres.h"
+#else
+#include "postgres_fe.h"
+#endif
 
 #if defined(USE_SSE2) || defined(__i386__)
 
@@ -161,7 +165,7 @@ static uint32 x86_hypervisor_tsc_frequency_khz(void);
  * 0 indicates the frequency information was not accessible via CPUID.
  */
 uint32
-x86_tsc_frequency_khz(void)
+x86_tsc_frequency_khz(char *source, size_t source_len)
 {
 	unsigned int reg[4] = {0};
 
@@ -174,7 +178,17 @@ x86_tsc_frequency_khz(void)
 	 * to be wildly incorrect when virtualized.
 	 */
 	if (x86_feature_available(PG_HYPERVISOR))
-		return x86_hypervisor_tsc_frequency_khz();
+	{
+		uint32		freq = x86_hypervisor_tsc_frequency_khz();
+
+		if (source)
+		{
+			strlcat(source, ", hypervisor", source_len);
+			if (freq > 0)
+				strlcat(source, ", cpuid 0x40000010", source_len);
+		}
+		return freq;
+	}
 
 	/*
 	 * On modern Intel CPUs, the TSC is implemented by invariant timekeeping
@@ -207,6 +221,9 @@ x86_tsc_frequency_khz(void)
 		if (reg[EAX] == 0 || reg[EBX] == 0)
 			return 0;
 
+		if (source)
+			strlcat(source, ", cpuid 0x15", source_len);
+
 		return reg[ECX] / 1000 * reg[EBX] / reg[EAX];
 	}
 
@@ -217,7 +234,12 @@ x86_tsc_frequency_khz(void)
 	 */
 	pg_cpuid(0x16, reg);
 	if (reg[EAX] > 0)
+	{
+		if (source)
+			strlcat(source, ", cpuid 0x16", source_len);
+
 		return reg[EAX] * 1000;
+	}
 
 	return 0;
 }

@@ -165,9 +165,18 @@ extern PGDLLIMPORT int32 timing_tsc_frequency_khz;
 
 extern void pg_initialize_timing_tsc(void);
 
-extern uint32 pg_tsc_calibrate_frequency(void);
+typedef struct TscClockSourceInfo
+{
+	int32		frequency_khz;	/* from CPUID or calibration */
+	int32		calibrated_frequency_khz;	/* from calibration */
+	char		frequency_source[128];	/* describes how frequency was
+										 * determined */
+} TscClockSourceInfo;
+
+extern const TscClockSourceInfo *pg_timing_tsc_clock_source_info(void);
 
 #endif							/* PG_INSTR_TSC_CLOCK */
+
 
 /*
  * Returns the current timing clock source effectively in use, resolving
