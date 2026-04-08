@@ -184,7 +184,7 @@ static void
 test_tsc_timing(void)
 {
 	uint64		loop_count;
-	uint32		calibrated_freq;
+	const TscClockSourceInfo *info;
 
 	printf("\n");
 	loop_count = test_timing(test_duration, TIMING_CLOCK_SOURCE_TSC, false);
@@ -198,11 +198,13 @@ test_tsc_timing(void)
 		output(loop_count);
 		printf("\n");
 
-		printf(_("TSC frequency in use: %u kHz\n"), timing_tsc_frequency_khz);
+		info = pg_timing_tsc_clock_source_info();
+		printf(_("TSC frequency in use: %d kHz\n"), info->frequency_khz);
+		if (info->frequency_source[0] != '\0')
+			printf(_("TSC frequency source: %s\n"), info->frequency_source);
 
-		calibrated_freq = pg_tsc_calibrate_frequency();
-		if (calibrated_freq > 0)
-			printf(_("TSC frequency from calibration: %u kHz\n"), calibrated_freq);
+		if (info->calibrated_frequency_khz > 0)
+			printf(_("TSC frequency from calibration: %d kHz\n"), info->calibrated_frequency_khz);
 		else
 			printf(_("TSC calibration did not converge\n"));
 

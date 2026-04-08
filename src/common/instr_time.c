@@ -70,6 +70,8 @@ static void set_ticks_per_ns(void);
 static void set_ticks_per_ns_system(void);
 
 #if PG_INSTR_TSC_CLOCK
+static TscClockSourceInfo tsc_info = {.calibrated_frequency_khz = -1};
+
 static bool tsc_use_by_default(void);
 static void set_ticks_per_ns_for_tsc(void);
 #endif
@@ -166,6 +168,7 @@ set_ticks_per_ns_system(void)
 #if PG_INSTR_TSC_CLOCK
 
 static void tsc_detect_frequency(void);
+static uint32 pg_tsc_calibrate_frequency(void);
 
 /*
  * Initialize the TSC clock source by determining its usability and frequency.
@@ -202,21 +205,36 @@ static void
 tsc_detect_frequency(void)
 {
 	timing_tsc_frequency_khz = 0;
+	tsc_info.frequency_khz = 0;
+	tsc_info.frequency_source[0] = '\0';
 
 	/* We require RDTSCP support and an invariant TSC, bail if not available */
 	if (!x86_feature_available(PG_RDTSCP) || !x86_feature_available(PG_TSC_INVARIANT))
 		return;
 
 	/* Determine speed at which the TSC advances */
-	timing_tsc_frequency_khz = x86_tsc_frequency_khz();
+	timing_tsc_frequency_khz = x86_tsc_frequency_khz(tsc_info.frequency_source,
+													 sizeof(tsc_info.frequency_source));
 	if (timing_tsc_frequency_khz > 0)
+	{
+		tsc_info.frequency_khz = timing_tsc_frequency_khz;
 		return;
+	}
 
 	/*
 	 * CPUID did not give us the TSC frequency. We can instead measure the
 	 * frequency by comparing ticks against walltime in a calibration loop.
 	 */
-	timing_tsc_frequency_khz = pg_tsc_calibrate_frequency();
+	if (tsc_info.calibrated_frequency_khz < 0)
+		tsc_info.calibrated_frequency_khz = pg_tsc_calibrate_frequency();
+
+	timing_tsc_frequency_khz = tsc_info.calibrated_frequency_khz;
+	if (timing_tsc_frequency_khz > 0)
+	{
+		strlcpy(tsc_info.frequency_source, "x86, calibration",
+				sizeof(tsc_info.frequency_source));
+		tsc_info.frequency_khz = timing_tsc_frequency_khz;
+	}
 }
 
 /*
@@ -282,7 +300,7 @@ tsc_use_by_default(void)
 #define TSC_CALIBRATION_ITERATIONS	1000000
 #define TSC_CALIBRATION_SKIPS		100
 #define TSC_CALIBRATION_STABLE_CYCLES	10
-uint32
+static uint32
 pg_tsc_calibrate_frequency(void)
 {
 	instr_time	initial_wall;
@@ -367,6 +385,26 @@ pg_tsc_calibrate_frequency(void)
 		return 0;				/* did not converge */
 
 	return (uint32) freq_khz;
+}
+
+/*
+ * Returns TSC clock source information for diagnostic purposes.
+ *
+ * On first call, runs the TSC calibration loop (if not already done during
+ * frequency detection) which may take up to TSC_CALIBRATION_MAX_NS.
+ * Subsequent calls return cached results.
+ *
+ * Note: This won't return the right info in EXEC_BACKEND builds if this were
+ * used in the backend (which it currently is not), as tsc_info is not copied
+ * using read_backend_variables - only the TSC frequency is.
+ */
+const TscClockSourceInfo *
+pg_timing_tsc_clock_source_info(void)
+{
+	if (tsc_info.calibrated_frequency_khz < 0)
+		tsc_info.calibrated_frequency_khz = pg_tsc_calibrate_frequency();
+
+	return &tsc_info;
 }
 
 #endif							/* PG_INSTR_TSC_CLOCK */
