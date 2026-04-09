@@ -169,9 +169,6 @@ x86_tsc_frequency_khz(char *source, size_t source_len)
 {
 	unsigned int reg[4] = {0};
 
-	if (source)
-		strlcpy(source, "x86", source_len);
-
 	/*
 	 * If we're inside a virtual machine, try to fetch the TSC frequency from
 	 * the hypervisor, using a hypervisor specific method.

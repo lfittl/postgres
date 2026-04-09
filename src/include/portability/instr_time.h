@@ -161,6 +161,7 @@ extern PGDLLIMPORT bool timing_tsc_enabled;
  */
 extern PGDLLIMPORT int32 timing_tsc_frequency_khz;
 
+
 #if PG_INSTR_TSC_CLOCK
 
 extern void pg_initialize_timing_tsc(void);
@@ -177,6 +178,7 @@ typedef struct TscClockSourceInfo
 extern const TscClockSourceInfo *pg_timing_tsc_clock_source_info(void);
 
 #endif							/* PG_INSTR_TSC_CLOCK */
+
 
 /*
  * Returns the current timing clock source effectively in use, resolving

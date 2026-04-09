@@ -197,17 +197,28 @@ test_tsc_timing(void)
 		loop_count = test_timing(test_duration, TIMING_CLOCK_SOURCE_TSC, true);
 		output(loop_count);
 		printf("\n");
+	}
 
-		info = pg_timing_tsc_clock_source_info();
-		printf(_("TSC frequency in use: %d kHz\n"), info->frequency_khz);
-		if (info->frequency_source[0] != '\0')
-			printf(_("TSC frequency source: %s\n"), info->frequency_source);
+	/*
+	 * Report TSC information regardless of whether it was usable, makes
+	 * debugging a lot easier.
+	 */
+	info = pg_timing_tsc_clock_source_info();
+	if (info->frequency_source[0] != '\0')
+		printf(_("TSC frequency source: %s\n"), info->frequency_source);
+	printf(_("TSC frequency in use: %d kHz\n"), info->frequency_khz);
 
-		if (info->calibrated_frequency_khz > 0)
-			printf(_("TSC frequency from calibration: %d kHz\n"), info->calibrated_frequency_khz);
-		else
-			printf(_("TSC calibration did not converge\n"));
+	if (info->calibrated_frequency_khz > 0)
+		printf(_("TSC frequency from calibration: %d kHz\n"), info->calibrated_frequency_khz);
+	else
+		printf(_("TSC calibration did not converge\n"));
 
+	/*
+	 * Report whether TSC was usable and, if so, whether it will be used
+	 * automatically.
+	 */
+	if (loop_count > 0)
+	{
 		pg_set_timing_clock_source(TIMING_CLOCK_SOURCE_AUTO);
 		if (pg_current_timing_clock_source() == TIMING_CLOCK_SOURCE_TSC)
 			printf(_("TSC clock source will be used by default, unless timing_clock_source is set to 'system'.\n"));

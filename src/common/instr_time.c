@@ -208,9 +208,23 @@ tsc_detect_frequency(void)
 	tsc_info.frequency_khz = 0;
 	tsc_info.frequency_source[0] = '\0';
 
+	strlcat(tsc_info.frequency_source, "x86",
+			sizeof(tsc_info.frequency_source));
+
 	/* We require RDTSCP support and an invariant TSC, bail if not available */
-	if (!x86_feature_available(PG_RDTSCP) || !x86_feature_available(PG_TSC_INVARIANT))
+	if (!x86_feature_available(PG_RDTSCP))
+	{
+		strlcat(tsc_info.frequency_source, ", no rdtscp",
+				sizeof(tsc_info.frequency_source));
 		return;
+	}
+
+	if (!x86_feature_available(PG_TSC_INVARIANT))
+	{
+		strlcat(tsc_info.frequency_source, ", not invariant",
+				sizeof(tsc_info.frequency_source));
+		return;
+	}
 
 	/* Determine speed at which the TSC advances */
 	timing_tsc_frequency_khz = x86_tsc_frequency_khz(tsc_info.frequency_source,
@@ -231,7 +245,7 @@ tsc_detect_frequency(void)
 	timing_tsc_frequency_khz = tsc_info.calibrated_frequency_khz;
 	if (timing_tsc_frequency_khz > 0)
 	{
-		strlcpy(tsc_info.frequency_source, "x86, calibration",
+		strlcat(tsc_info.frequency_source, ", calibration",
 				sizeof(tsc_info.frequency_source));
 		tsc_info.frequency_khz = timing_tsc_frequency_khz;
 	}
