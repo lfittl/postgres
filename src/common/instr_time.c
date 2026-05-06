@@ -20,6 +20,10 @@
 
 #include <math.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #include "port/pg_cpu.h"
 #include "portability/instr_time.h"
 
@@ -161,7 +165,7 @@ set_ticks_per_ns_system(void)
 
 #endif							/* WIN32 */
 
-/* TSC specific logic */
+/* Hardware clock specific logic (x86 TSC / AArch64 CNTVCT) */
 
 #if PG_INSTR_TSC_CLOCK
 
@@ -188,6 +192,12 @@ set_ticks_per_ns_for_tsc(void)
 	ticks_per_ns_scaled = ((NS_PER_S / 1000) << TICKS_TO_NS_SHIFT) / timing_tsc_frequency_khz;
 	max_ticks_no_overflow = PG_INT64_MAX / ticks_per_ns_scaled;
 }
+
+#if defined(__x86_64__) || defined(_M_X64)
+
+/*
+ * x86-64 TSC specific logic
+ */
 
 /*
  * Detect the TSC frequency and whether RDTSCP is available on x86-64.
@@ -368,5 +378,60 @@ pg_tsc_calibrate_frequency(void)
 
 	return (uint32) freq_khz;
 }
+
+#elif defined(__aarch64__)
+
+/*
+ * Check whether this is a heterogeneous Apple Silicon P+E core system
+ * where CNTVCT_EL0 may tick at different rates on different core types.
+ */
+static bool
+aarch64_has_heterogeneous_cores(void)
+{
+#if defined(__APPLE__)
+	int			nperflevels = 0;
+	size_t		len = sizeof(nperflevels);
+
+	if (sysctlbyname("hw.nperflevels", &nperflevels, &len, NULL, 0) == 0)
+		return nperflevels > 1;
+#endif
+
+	return false;
+}
+
+/*
+ * Detect the generic timer frequency on AArch64.
+ */
+static void
+tsc_detect_frequency(void)
+{
+	if (aarch64_has_heterogeneous_cores())
+	{
+		timing_tsc_frequency_khz = 0;
+		return;
+	}
+
+	timing_tsc_frequency_khz = aarch64_cntvct_frequency_khz();
+}
+
+/*
+ * The ARM generic timer is architecturally guaranteed to be monotonic and
+ * synchronized across cores of the same type, so we always use it by default
+ * when available and cores are homogenous.
+ */
+static bool
+tsc_use_by_default(void)
+{
+	return true;
+}
+
+uint32
+pg_tsc_calibrate_frequency(void)
+{
+	/* No calibration loop on AArch64; frequency comes from CNTFRQ_EL0 */
+	return 0;
+}
+
+#endif							/* defined(__aarch64__) */
 
 #endif							/* PG_INSTR_TSC_CLOCK */
