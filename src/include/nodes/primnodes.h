@@ -1091,8 +1091,6 @@ typedef struct SubLink
  */
 typedef struct SubPlan
 {
-	pg_node_attr(no_query_jumble)
-
 	Expr		xpr;
 	/* Fields copied from original SubLink: */
 	SubLinkType subLinkType;	/* see above */
@@ -1124,9 +1122,9 @@ typedef struct SubPlan
 	List	   *parParam;		/* indices of input Params from parent plan */
 	List	   *args;			/* exprs to pass as parParam values */
 	/* Estimated execution costs: */
-	int			disabled_nodes; /* count of disabled nodes in the plan */
-	Cost		startup_cost;	/* one-time setup cost */
-	Cost		per_call_cost;	/* cost for each subplan evaluation */
+	int			disabled_nodes pg_node_attr(query_jumble_ignore); /* count of disabled nodes in the plan */
+	Cost		startup_cost pg_node_attr(query_jumble_ignore);	/* one-time setup cost */
+	Cost		per_call_cost pg_node_attr(query_jumble_ignore);	/* cost for each subplan evaluation */
 } SubPlan;
 
 /*
