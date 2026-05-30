@@ -546,6 +546,13 @@ do { \
 	else \
 		AppendJumble(jstate, (const unsigned char *) &(expr->item), sizeof(expr->item)); \
 } while (0)
+#define JUMBLE_ARRAY(item, len) \
+	AppendJumble(jstate, (const unsigned char *) (expr->item), sizeof(*(expr->item)) * len)
+#define JUMBLE_BITMAPSET(item) \
+do { \
+	if (expr->item && expr->item->nwords > 0) \
+		AppendJumble(jstate, (const unsigned char *) expr->item->words, sizeof(bitmapword) * expr->item->nwords); \
+} while(0)
 #define JUMBLE_STRING(str) \
 do { \
 	if (expr->str) \
