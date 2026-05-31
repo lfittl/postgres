@@ -1280,13 +1280,18 @@ _jumble${n}(JumbleState *jstate, Node *node)
 	{
 		my $t = $node_type_info{$n}->{field_types}{$f};
 		my @a = @{ $node_type_info{$n}->{field_attrs}{$f} };
+		my $array_size_field;
 		my $query_jumble_ignore = $struct_no_query_jumble;
 		my $query_jumble_location = 0;
 
 		# extract per-field attributes
 		foreach my $a (@a)
 		{
-			if ($a eq 'query_jumble_ignore')
+			if ($a =~ /^array_size\(([\w.]+)\)$/)
+			{
+				$array_size_field = $1;
+			}
+			elsif ($a eq 'query_jumble_ignore')
 			{
 				$query_jumble_ignore = 1;
 			}
@@ -1296,8 +1301,15 @@ _jumble${n}(JumbleState *jstate, Node *node)
 			}
 		}
 
+		# Bitmapset.  Note this must precede the generic node-type
+		# branch below, since Bitmapset is itself a node type.
+		if ($t eq 'Bitmapset*' || $t eq 'Relids')
+		{
+			print $jff "\tJUMBLE_BITMAPSET($f);\n"
+			  unless $query_jumble_ignore;
+		}
 		# node type
-		if (($t =~ /^(\w+)\*$/ or $t =~ /^struct\s+(\w+)\*$/)
+		elsif (($t =~ /^(\w+)\*$/ or $t =~ /^struct\s+(\w+)\*$/)
 			and elem $1, @node_types)
 		{
 			print $jff "\tJUMBLE_NODE($f);\n"
@@ -1316,6 +1328,27 @@ _jumble${n}(JumbleState *jstate, Node *node)
 		{
 			print $jff "\tJUMBLE_STRING($f);\n"
 			  unless $query_jumble_ignore;
+		}
+		elsif ($t =~ /^(\w+)(\*|\[\w+\])$/ and elem $1, @scalar_types)
+		{
+			if (!defined $array_size_field)
+			{
+				die "no array size defined for $n.$f of type $t\n"
+				  unless $query_jumble_ignore;
+			}
+			elsif ($node_type_info{$n}->{field_types}{$array_size_field} eq
+				'List*')
+			{
+				print $jff
+				  "\tJUMBLE_ARRAY($f, list_length(expr->$array_size_field));\n"
+				  unless $query_jumble_ignore;
+			}
+			else
+			{
+				print $jff
+				  "\tJUMBLE_ARRAY($f, expr->$array_size_field);\n"
+				  unless $query_jumble_ignore;
+			}
 		}
 		else
 		{
