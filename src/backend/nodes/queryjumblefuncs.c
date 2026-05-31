@@ -219,6 +219,13 @@ RecordConstLocation(JumbleState *jstate, int location)
 	AppendJumble(jstate, (const unsigned char *) &(expr->item), sizeof(expr->item))
 #define JUMBLE_FIELD_SINGLE(item) \
 	AppendJumble(jstate, (const unsigned char *) &(item), sizeof(item))
+#define JUMBLE_ARRAY(item, len) \
+	AppendJumble(jstate, (const unsigned char *) (expr->item), sizeof(*(expr->item)) * len)
+#define JUMBLE_BITMAPSET(item) \
+do { \
+	if (expr->item && expr->item->nwords > 0) \
+		AppendJumble(jstate, (const unsigned char *) expr->item->words, sizeof(bitmapword) * expr->item->nwords); \
+} while(0)
 #define JUMBLE_STRING(str) \
 do { \
 	if (expr->str) \
