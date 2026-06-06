@@ -3931,26 +3931,45 @@ show_indexsearches_info(PlanState *planstate, ExplainState *es)
 static void
 show_tidbitmap_info(BitmapHeapScanState *planstate, ExplainState *es)
 {
+	uint64		exact_pages;
+	uint64		lossy_pages;
+
 	if (!es->analyze)
 		return;
+
+	/* Start with leader's stats */
+	exact_pages = planstate->stats.exact_pages;
+	lossy_pages = planstate->stats.lossy_pages;
+
+	/* Accumulate worker stats into node-level totals */
+	if (planstate->sinstrument != NULL)
+	{
+		for (int n = 0; n < planstate->sinstrument->num_workers; n++)
+		{
+			BitmapHeapScanInstrumentation *si = &planstate->sinstrument->sinstrument[n];
+
+			exact_pages += si->exact_pages;
+			lossy_pages += si->lossy_pages;
+		}
+	}
 
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
 		ExplainPropertyUInteger("Exact Heap Blocks", NULL,
-								planstate->stats.exact_pages, es);
+								exact_pages, es);
 		ExplainPropertyUInteger("Lossy Heap Blocks", NULL,
-								planstate->stats.lossy_pages, es);
+								lossy_pages, es);
 	}
 	else
 	{
-		if (planstate->stats.exact_pages > 0 || planstate->stats.lossy_pages > 0)
+		if (exact_pages > 0 || lossy_pages > 0)
 		{
 			ExplainIndentText(es);
 			appendStringInfoString(es->str, "Heap Blocks:");
-			if (planstate->stats.exact_pages > 0)
-				appendStringInfo(es->str, " exact=" UINT64_FORMAT, planstate->stats.exact_pages);
-			if (planstate->stats.lossy_pages > 0)
-				appendStringInfo(es->str, " lossy=" UINT64_FORMAT, planstate->stats.lossy_pages);
+			if (exact_pages > 0)
+				appendStringInfo(es->str, " exact=" UINT64_FORMAT, exact_pages);
+			if (lossy_pages > 0)
+				appendStringInfo(es->str, " lossy=" UINT64_FORMAT, lossy_pages);
 			appendStringInfoChar(es->str, '\n');
 		}
 	}
