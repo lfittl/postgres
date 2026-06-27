@@ -39,7 +39,7 @@
 
 #include "access/transam.h"
 #include "catalog/pg_proc.h"
-#include "common/hashfn.h"
+#include "common/hashfn_unstable.h"
 #include "common/int.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -47,8 +47,6 @@
 #include "utils/lsyscache.h"
 #include "parser/scanner.h"
 #include "parser/scansup.h"
-
-#define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 /* GUC parameters */
 int			compute_query_id = COMPUTE_QUERY_ID_AUTO;
@@ -186,8 +184,7 @@ InitJumble(void)
 	jstate = palloc_object(JumbleState);
 
 	/* Set up workspace for query jumbling */
-	jstate->jumble = (unsigned char *) palloc(JUMBLE_SIZE);
-	jstate->jumble_len = 0;
+	fasthash_init(&jstate->jumble, 0);
 	jstate->clocations_buf_size = 32;
 	jstate->clocations = (LocationLen *) palloc(jstate->clocations_buf_size *
 												sizeof(LocationLen));
@@ -221,14 +218,18 @@ DoJumble(JumbleState *jstate, Node *node)
 	if (jstate->has_squashed_lists)
 		jstate->highest_extern_param_id = 0;
 
-	/* Process the jumble buffer and produce the hash value */
-	return DatumGetInt64(hash_any_extended(jstate->jumble,
-										   jstate->jumble_len,
-										   0));
+	/*
+	 * Produce the final hash; we pass zero as the tweak since we already
+	 * emitted the length following each variable-length value
+	 */
+	return (int64) fasthash_final64(&jstate->jumble, 0);
 }
 
 /*
- * AppendJumbleInternal: Internal function for appending to the jumble buffer
+ * AppendJumbleInternal: Internal function for appending to the jumble state
+ *
+ * Accumulates the given value into the streaming fasthash state, processing
+ * it in 8-byte chunks.
  *
  * Note: Callers must ensure that size > 0.
  */
@@ -236,59 +237,24 @@ static pg_attribute_always_inline void
 AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 					 Size size)
 {
-	unsigned char *jumble = jstate->jumble;
-	Size		jumble_len = jstate->jumble_len;
+	Size		orig_size PG_USED_FOR_ASSERTS_ONLY = size;
 
 	/* Ensure the caller didn't mess up */
 	Assert(size > 0);
 
-	/*
-	 * Fast path for when there's enough space left in the buffer.  This is
-	 * worthwhile as means the memcpy can be inlined into very efficient code
-	 * when 'size' is a compile-time constant.
-	 */
-	if (likely(size <= JUMBLE_SIZE - jumble_len))
+	while (size >= FH_SIZEOF_ACCUM)
 	{
-		memcpy(jumble + jumble_len, item, size);
-		jstate->jumble_len += size;
-
-#ifdef USE_ASSERT_CHECKING
-		jstate->total_jumble_len += size;
-#endif
-
-		return;
+		fasthash_accum(&jstate->jumble, (const char *) item, FH_SIZEOF_ACCUM);
+		item += FH_SIZEOF_ACCUM;
+		size -= FH_SIZEOF_ACCUM;
 	}
 
-	/*
-	 * Whenever the jumble buffer is full, we hash the current contents and
-	 * reset the buffer to contain just that hash value, thus relying on the
-	 * hash to summarize everything so far.
-	 */
-	do
-	{
-		Size		part_size;
-
-		if (unlikely(jumble_len >= JUMBLE_SIZE))
-		{
-			int64		start_hash;
-
-			start_hash = DatumGetInt64(hash_any_extended(jumble,
-														 JUMBLE_SIZE, 0));
-			memcpy(jumble, &start_hash, sizeof(start_hash));
-			jumble_len = sizeof(start_hash);
-		}
-		part_size = Min(size, JUMBLE_SIZE - jumble_len);
-		memcpy(jumble + jumble_len, item, part_size);
-		jumble_len += part_size;
-		item += part_size;
-		size -= part_size;
+	if (size > 0)
+		fasthash_accum(&jstate->jumble, (const char *) item, size);
 
 #ifdef USE_ASSERT_CHECKING
-		jstate->total_jumble_len += part_size;
+	jstate->total_jumble_len += orig_size;
 #endif
-	} while (size > 0);
-
-	jstate->jumble_len = jumble_len;
 }
 
 /*
@@ -302,6 +268,12 @@ AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
 		FlushPendingNulls(jstate);
 
 	AppendJumbleInternal(jstate, value, size);
+
+	/*
+	 * Fold in the length so variable-length values are self-delimiting, which
+	 * lets DoJumble finalize with a zero tweak (see hashfn_unstable.h).
+	 */
+	fasthash_accum(&jstate->jumble, (const char *) &size, sizeof(size));
 }
 
 /*
@@ -370,8 +342,30 @@ AppendJumble64(JumbleState *jstate, const unsigned char *value)
 }
 
 /*
+ * AppendJumbleString
+ *		Add the given NUL-terminated string to the jumble state.
+ *
+ * Length is computed on the fly while hashing, avoiding a separate strlen.
+ */
+static pg_noinline void
+AppendJumbleString(JumbleState *jstate, const char *str)
+{
+	Size		size;
+
+	if (jstate->pending_nulls > 0)
+		FlushPendingNulls(jstate);
+
+	size = fasthash_accum_cstring(&jstate->jumble, str);
+	fasthash_accum(&jstate->jumble, (const char *) &size, sizeof(size));
+
+#ifdef USE_ASSERT_CHECKING
+	jstate->total_jumble_len += size;
+#endif
+}
+
+/*
  * FlushPendingNulls
- *		Incorporate the pending_nulls value into the jumble buffer.
+ *		Incorporate the pending_nulls value into the jumble hash.
  *
  * Note: Callers must ensure that there's at least 1 pending NULL.
  */
@@ -549,7 +543,7 @@ do { \
 #define JUMBLE_STRING(str) \
 do { \
 	if (expr->str) \
-		AppendJumble(jstate, (const unsigned char *) (expr->str), strlen(expr->str) + 1); \
+		AppendJumbleString(jstate, expr->str); \
 	else \
 		AppendJumbleNull(jstate); \
 } while(0)
@@ -600,7 +594,7 @@ _jumbleNode(JumbleState *jstate, Node *node)
 			break;
 	}
 
-	/* Ensure we added something to the jumble buffer */
+	/* Ensure we added something to the jumble */
 	Assert(jstate->total_jumble_len > prev_jumble_len);
 }
 
