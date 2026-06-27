@@ -110,9 +110,19 @@ struct SharedExecutorInstrumentation
 	 * follows.
 	 */
 };
-#define GetInstrumentationArray(sei) \
+/*
+ * While the query runs, each parallel worker writes its per-node statistics
+ * directly into its own slot in this array (indexed by ParallelWorkerNumber),
+ * so there is exactly one writer per slot and no write-side locking is needed.
+ * To keep that hot path cheap we pad every slot out to a cache line so that two
+ * workers updating neighbouring slots don't ping-pong the same line.
+ */
+#define SizeOfInstrumentationSlot \
+	CACHELINEALIGN(sizeof(NodeInstrumentation))
+#define GetInstrumentationSlot(sei, node, worker) \
 	(StaticAssertVariableIsOfTypeMacro(sei, SharedExecutorInstrumentation *), \
-	 (NodeInstrumentation *) (((char *) sei) + sei->instrument_offset))
+	 (NodeInstrumentation *) (((char *) (sei)) + (sei)->instrument_offset + \
+		(((Size) (node)) * (sei)->num_workers + (worker)) * SizeOfInstrumentationSlot))
 
 /* Context object for ExecParallelEstimate. */
 typedef struct ExecParallelEstimateContext
@@ -763,10 +773,11 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation_len =
 			offsetof(SharedExecutorInstrumentation, plan_node_id) +
 			sizeof(int) * e.nnodes;
-		instrumentation_len = MAXALIGN(instrumentation_len);
+		/* Cache-line align so the first padded slot starts on a line boundary */
+		instrumentation_len = CACHELINEALIGN(instrumentation_len);
 		instrument_offset = instrumentation_len;
 		instrumentation_len +=
-			mul_size(sizeof(NodeInstrumentation),
+			mul_size(SizeOfInstrumentationSlot,
 					 mul_size(e.nnodes, nworkers));
 		shm_toc_estimate_chunk(&pcxt->estimator, instrumentation_len);
 		shm_toc_estimate_keys(&pcxt->estimator, 1);
@@ -852,17 +863,25 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 	 */
 	if (estate->es_instrument)
 	{
-		NodeInstrumentation *instrument;
-		int			i;
+		int			node;
+		int			worker;
 
 		instrumentation = shm_toc_allocate(pcxt->toc, instrumentation_len);
 		instrumentation->instrument_options = estate->es_instrument;
 		instrumentation->instrument_offset = instrument_offset;
 		instrumentation->num_workers = nworkers;
 		instrumentation->num_plan_nodes = e.nnodes;
-		instrument = GetInstrumentationArray(instrumentation);
-		for (i = 0; i < nworkers * e.nnodes; ++i)
-			InstrInitNode(&instrument[i], estate->es_instrument, false);
+
+		/*
+		 * Initialize each worker's slot.  Workers write into these directly as
+		 * the query runs and never reset them, so this must happen exactly once
+		 * (not on relaunch, where the slots accumulate across rounds).  The
+		 * async_mode flag is fixed up by each worker once it knows its node.
+		 */
+		for (node = 0; node < e.nnodes; ++node)
+			for (worker = 0; worker < nworkers; ++worker)
+				InstrInitNode(GetInstrumentationSlot(instrumentation, node, worker),
+							  estate->es_instrument, false);
 		shm_toc_insert(pcxt->toc, PARALLEL_KEY_INSTRUMENTATION,
 					   instrumentation);
 		pei->instrumentation = instrumentation;
@@ -1094,7 +1113,6 @@ static bool
 ExecParallelRetrieveInstrumentation(PlanState *planstate,
 									SharedExecutorInstrumentation *instrumentation)
 {
-	NodeInstrumentation *instrument;
 	int			i;
 	int			n;
 	int			ibytes;
@@ -1108,11 +1126,14 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	if (i >= instrumentation->num_plan_nodes)
 		elog(ERROR, "plan node %d not found", plan_node_id);
 
-	/* Accumulate the statistics from all workers. */
-	instrument = GetInstrumentationArray(instrumentation);
-	instrument += i * instrumentation->num_workers;
+	/*
+	 * Accumulate the statistics from all workers.  The workers already flushed
+	 * their final cycle with InstrEndLoop before exiting, so no InstrEndLoop is
+	 * needed here.
+	 */
 	for (n = 0; n < instrumentation->num_workers; ++n)
-		InstrAggNode(planstate->instrument, &instrument[n]);
+		InstrAggNode(planstate->instrument,
+					 GetInstrumentationSlot(instrumentation, i, n));
 
 	/*
 	 * Also store the per-worker detail.
@@ -1128,7 +1149,15 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	MemoryContextSwitchTo(oldcontext);
 
 	planstate->worker_instrument->num_workers = instrumentation->num_workers;
-	memcpy(&planstate->worker_instrument->instrument, instrument, ibytes);
+
+	/*
+	 * The shared slots are cache-line padded, so copy them into the tightly
+	 * packed per-worker array one at a time rather than with a single memcpy.
+	 */
+	for (n = 0; n < instrumentation->num_workers; ++n)
+		memcpy(&planstate->worker_instrument->instrument[n],
+			   GetInstrumentationSlot(instrumentation, i, n),
+			   sizeof(NodeInstrumentation));
 
 	/* Perform any node-type-specific work that needs to be done. */
 	switch (nodeTag(planstate))
@@ -1351,24 +1380,27 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
 }
 
 /*
- * Copy instrumentation information from this node and its descendants into
- * dynamic shared memory, so that the parallel leader can retrieve it.
+ * Point each node's instrumentation at this worker's slot in shared memory, so
+ * that the executor writes its statistics there directly as the query runs
+ * (rather than into worker-local memory that is copied out at shutdown).  This
+ * runs once per worker, after ExecutorStart() has allocated the PlanState tree
+ * but before execution begins.
  */
 static bool
-ExecParallelReportInstrumentation(PlanState *planstate,
-								  SharedExecutorInstrumentation *instrumentation)
+ExecParallelRepointInstrumentation(PlanState *planstate,
+								   SharedExecutorInstrumentation *instrumentation)
 {
 	int			i;
 	int			plan_node_id = planstate->plan->plan_node_id;
-	NodeInstrumentation *instrument;
+	NodeInstrumentation *slot;
 
-	InstrEndLoop(planstate->instrument);
+	Assert(IsParallelWorker());
+	Assert(ParallelWorkerNumber < instrumentation->num_workers);
 
 	/*
-	 * If we shuffled the plan_node_id values in ps_instrument into sorted
-	 * order, we could use binary search here.  This might matter someday if
-	 * we're pushing down sufficiently large plan trees.  For now, do it the
-	 * slow, dumb way.
+	 * If we shuffled the plan_node_id values into sorted order, we could use
+	 * binary search here.  This might matter someday if we're pushing down
+	 * sufficiently large plan trees.  For now, do it the slow, dumb way.
 	 */
 	for (i = 0; i < instrumentation->num_plan_nodes; ++i)
 		if (instrumentation->plan_node_id[i] == plan_node_id)
@@ -1376,18 +1408,37 @@ ExecParallelReportInstrumentation(PlanState *planstate,
 	if (i >= instrumentation->num_plan_nodes)
 		elog(ERROR, "plan node %d not found", plan_node_id);
 
-	/*
-	 * Add our statistics to the per-node, per-worker totals.  It's possible
-	 * that this could happen more than once if we relaunched workers.
-	 */
-	instrument = GetInstrumentationArray(instrumentation);
-	instrument += i * instrumentation->num_workers;
-	Assert(IsParallelWorker());
-	Assert(ParallelWorkerNumber < instrumentation->num_workers);
-	InstrAggNode(&instrument[ParallelWorkerNumber], planstate->instrument);
+	slot = GetInstrumentationSlot(instrumentation, i, ParallelWorkerNumber);
 
-	return planstate_tree_walker(planstate, ExecParallelReportInstrumentation,
+	/*
+	 * The leader initialized the slot's options but cannot know each node's
+	 * async mode, so carry that over from the local instrumentation.  We do not
+	 * otherwise reset the slot: when workers are relaunched (e.g. a rescanned
+	 * Gather) the slots accumulate across rounds.
+	 */
+	slot->async_mode = planstate->instrument->async_mode;
+
+	/* Discard the worker-local instrumentation and write into shmem instead. */
+	pfree(planstate->instrument);
+	planstate->instrument = slot;
+
+	return planstate_tree_walker(planstate, ExecParallelRepointInstrumentation,
 								 instrumentation);
+}
+
+/*
+ * Finish each node's instrumentation before this worker exits.  Since the
+ * instrumentation already lives in shared memory, all that remains is to flush
+ * the final run cycle into the accumulated totals with InstrEndLoop(); the
+ * leader (and any relaunched worker) then sees a consistent slot.
+ */
+static bool
+ExecParallelFinishInstrumentation(PlanState *planstate, void *context)
+{
+	InstrEndLoop(planstate->instrument);
+
+	return planstate_tree_walker(planstate, ExecParallelFinishInstrumentation,
+								 context);
 }
 
 /*
@@ -1564,6 +1615,14 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	pwcxt.seg = seg;
 	ExecParallelInitializeWorker(queryDesc->planstate, &pwcxt);
 
+	/*
+	 * If instrumentation is enabled, point each node's instrumentation at this
+	 * worker's slot in shared memory so the executor writes statistics there
+	 * directly, with no copy needed at shutdown.
+	 */
+	if (instrumentation != NULL)
+		ExecParallelRepointInstrumentation(queryDesc->planstate, instrumentation);
+
 	/* Pass down any tuple bound */
 	ExecSetTupleBound(fpes->tuples_needed, queryDesc->planstate);
 
@@ -1593,10 +1652,13 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
-	/* Report instrumentation data if any instrumentation options are set. */
+	/*
+	 * Finalize instrumentation if any instrumentation options are set.  The
+	 * statistics were written straight into shared memory during execution, so
+	 * this just flushes each node's final run cycle.
+	 */
 	if (instrumentation != NULL)
-		ExecParallelReportInstrumentation(queryDesc->planstate,
-										  instrumentation);
+		ExecParallelFinishInstrumentation(queryDesc->planstate, NULL);
 
 	/* Report JIT instrumentation data if any */
 	if (queryDesc->estate->es_jit && jit_instrumentation != NULL)
