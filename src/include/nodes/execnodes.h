@@ -2330,7 +2330,9 @@ typedef struct MemoizeState
 								 * complete after caching the first tuple. */
 	bool		binary_mode;	/* true when cache key should be compared bit
 								 * by bit, false when using hash equality ops */
-	MemoizeInstrumentation stats;	/* execution statistics */
+	MemoizeInstrumentation stats;	/* local execution statistics (leader) */
+	MemoizeInstrumentation *instr;	/* where to accumulate stats: &stats, or a
+									 * parallel worker's slot in shared memory */
 	SharedMemoizeInfo *shared_info; /* statistics for parallel workers */
 	Bitmapset  *keyparamids;	/* Param->paramids of expressions belonging to
 								 * param_exprs */
@@ -2490,11 +2492,12 @@ typedef struct AggState
 	int			hash_planned_partitions;	/* number of partitions planned
 											 * for first pass */
 	double		hashentrysize;	/* estimate revised during execution */
-	Size		hash_mem_peak;	/* peak hash table memory usage */
 	uint64		hash_ngroups_current;	/* number of groups currently in
 										 * memory in all hash tables */
-	uint64		hash_disk_used; /* kB of disk space used */
-	int			hash_batches_used;	/* batches used during entire execution */
+	/* Local execution statistics (leader), reported by EXPLAIN ANALYZE */
+	AggregateInstrumentation stats;
+	/* where to accumulate stats: &stats, or a worker's slot in shared memory */
+	AggregateInstrumentation *instr;
 
 	AggStatePerHash perhash;	/* array of per-hashtable data */
 	AggStatePerGroup *hash_pergroup;	/* grouping set indexed array of

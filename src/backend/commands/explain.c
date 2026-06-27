@@ -3752,7 +3752,7 @@ static void
 show_hashagg_info(AggState *aggstate, ExplainState *es)
 {
 	Agg		   *agg = (Agg *) aggstate->ss.ps.plan;
-	int64		memPeakKb = BYTES_TO_KILOBYTES(aggstate->hash_mem_peak);
+	int64		memPeakKb = BYTES_TO_KILOBYTES(aggstate->stats.hash_mem_peak);
 
 	if (agg->aggstrategy != AGG_HASHED &&
 		agg->aggstrategy != AGG_MIXED)
@@ -3769,13 +3769,13 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 		 * detect this by checking how much memory it used.  If we find it
 		 * didn't do any work then we don't show its properties.
 		 */
-		if (es->analyze && aggstate->hash_mem_peak > 0)
+		if (es->analyze && aggstate->stats.hash_mem_peak > 0)
 		{
 			ExplainPropertyInteger("HashAgg Batches", NULL,
-								   aggstate->hash_batches_used, es);
+								   aggstate->stats.hash_batches_used, es);
 			ExplainPropertyInteger("Peak Memory Usage", "kB", memPeakKb, es);
 			ExplainPropertyInteger("Disk Usage", "kB",
-								   aggstate->hash_disk_used, es);
+								   aggstate->stats.hash_disk_used, es);
 		}
 	}
 	else
@@ -3795,7 +3795,7 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 		 * detect this by checking how much memory it used.  If we find it
 		 * didn't do any work then we don't show its properties.
 		 */
-		if (es->analyze && aggstate->hash_mem_peak > 0)
+		if (es->analyze && aggstate->stats.hash_mem_peak > 0)
 		{
 			if (!gotone)
 				ExplainIndentText(es);
@@ -3803,14 +3803,14 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 				appendStringInfoSpaces(es->str, 2);
 
 			appendStringInfo(es->str, "Batches: %d  Memory Usage: " INT64_FORMAT "kB",
-							 aggstate->hash_batches_used, memPeakKb);
+							 aggstate->stats.hash_batches_used, memPeakKb);
 			gotone = true;
 
 			/* Only display disk usage if we spilled to disk */
-			if (aggstate->hash_batches_used > 1)
+			if (aggstate->stats.hash_batches_used > 1)
 			{
 				appendStringInfo(es->str, "  Disk Usage: " UINT64_FORMAT "kB",
-								 aggstate->hash_disk_used);
+								 aggstate->stats.hash_disk_used);
 			}
 		}
 

@@ -1971,16 +1971,16 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 
 	/* update peak mem */
 	total_mem = meta_mem + entry_mem + hashkey_mem + buffer_mem;
-	if (total_mem > aggstate->hash_mem_peak)
-		aggstate->hash_mem_peak = total_mem;
+	if (total_mem > aggstate->instr->hash_mem_peak)
+		aggstate->instr->hash_mem_peak = total_mem;
 
 	/* update disk usage */
 	if (aggstate->hash_tapeset != NULL)
 	{
 		uint64		disk_used = LogicalTapeSetBlocks(aggstate->hash_tapeset) * (BLCKSZ / 1024);
 
-		if (aggstate->hash_disk_used < disk_used)
-			aggstate->hash_disk_used = disk_used;
+		if (aggstate->instr->hash_disk_used < disk_used)
+			aggstate->instr->hash_disk_used = disk_used;
 	}
 
 	/* update hashentrysize estimate based on contents */
@@ -3226,7 +3226,7 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 									  spill->ntuples[i], cardinality,
 									  used_bits);
 		aggstate->hash_batches = lappend(aggstate->hash_batches, new_batch);
-		aggstate->hash_batches_used++;
+		aggstate->instr->hash_batches_used++;
 	}
 
 	pfree(spill->ntuples);
@@ -3314,6 +3314,13 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->ss.ps.plan = (Plan *) node;
 	aggstate->ss.ps.state = estate;
 	aggstate->ss.ps.ExecProcNode = ExecAgg;
+
+	/*
+	 * Accumulate hash instrumentation into the node's own storage by default; a
+	 * parallel worker redirects this to its slot in shared memory (see
+	 * ExecAggInitializeWorker).
+	 */
+	aggstate->instr = &aggstate->stats;
 
 	aggstate->aggs = NIL;
 	aggstate->numaggs = 0;
@@ -3721,7 +3728,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggstate->table_filled = false;
 
 		/* Initialize this to 1, meaning nothing spilled, yet */
-		aggstate->hash_batches_used = 1;
+		aggstate->instr->hash_batches_used = 1;
 	}
 
 	/*
@@ -4401,20 +4408,10 @@ ExecEndAgg(AggState *node)
 	int			setno;
 
 	/*
-	 * When ending a parallel worker, copy the statistics gathered by the
-	 * worker back into shared memory so that it can be picked up by the main
-	 * process to report in EXPLAIN ANALYZE.
+	 * In a parallel worker the hash statistics were accumulated directly into
+	 * the worker's slot in shared memory (node->instr), so nothing needs to be
+	 * copied here.
 	 */
-	if (node->shared_info && IsParallelWorker())
-	{
-		AggregateInstrumentation *si;
-
-		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
-		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
-		si->hash_batches_used = node->hash_batches_used;
-		si->hash_disk_used = node->hash_disk_used;
-		si->hash_mem_peak = node->hash_mem_peak;
-	}
 
 	/* Make sure we have closed any open tuplesorts */
 
@@ -4828,6 +4825,20 @@ ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt)
 {
 	node->shared_info =
 		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+
+	/*
+	 * Accumulate hash statistics straight into this worker's slot in shared
+	 * memory as the aggregation runs, rather than copying them out at shutdown.
+	 * Carry over any values already initialized in ExecInitAgg (notably
+	 * hash_batches_used = 1); this also resets the slot if workers are
+	 * relaunched, so each round reports its own statistics.
+	 */
+	if (node->shared_info != NULL)
+	{
+		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
+		node->shared_info->sinstrument[ParallelWorkerNumber] = node->stats;
+		node->instr = &node->shared_info->sinstrument[ParallelWorkerNumber];
+	}
 }
 
 /* ----------------------------------------------------------------

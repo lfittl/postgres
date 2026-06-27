@@ -425,7 +425,7 @@ cache_purge_all(MemoizeState *mstate)
 	mstate->mem_used = 0;
 
 	/* XXX should we add something new to track these purges? */
-	mstate->stats.cache_evictions += evictions; /* Update Stats */
+	mstate->instr->cache_evictions += evictions;	/* Update Stats */
 }
 
 /*
@@ -445,8 +445,8 @@ cache_reduce_memory(MemoizeState *mstate, MemoizeKey *specialkey)
 	uint64		evictions = 0;
 
 	/* Update peak memory usage */
-	if (mstate->mem_used > mstate->stats.mem_peak)
-		mstate->stats.mem_peak = mstate->mem_used;
+	if (mstate->mem_used > mstate->instr->mem_peak)
+		mstate->instr->mem_peak = mstate->mem_used;
 
 	/* We expect only to be called when we've gone over budget on memory */
 	Assert(mstate->mem_used > mstate->mem_limit);
@@ -508,7 +508,7 @@ cache_reduce_memory(MemoizeState *mstate, MemoizeKey *specialkey)
 			break;
 	}
 
-	mstate->stats.cache_evictions += evictions; /* Update Stats */
+	mstate->instr->cache_evictions += evictions;	/* Update Stats */
 
 	return specialkey_intact;
 }
@@ -742,7 +742,7 @@ ExecMemoize(PlanState *pstate)
 
 				if (found && entry->complete)
 				{
-					node->stats.cache_hits += 1;	/* stats update */
+					node->instr->cache_hits += 1;	/* stats update */
 
 					/*
 					 * Set last_tuple and entry so that the state
@@ -770,7 +770,7 @@ ExecMemoize(PlanState *pstate)
 				}
 
 				/* Handle cache miss */
-				node->stats.cache_misses += 1;	/* stats update */
+				node->instr->cache_misses += 1; /* stats update */
 
 				if (found)
 				{
@@ -813,7 +813,7 @@ ExecMemoize(PlanState *pstate)
 				if (unlikely(entry == NULL ||
 							 !cache_store_tuple(node, outerslot)))
 				{
-					node->stats.cache_overflows += 1;	/* stats update */
+					node->instr->cache_overflows += 1;	/* stats update */
 
 					node->mstatus = MEMO_CACHE_BYPASS_MODE;
 
@@ -897,7 +897,7 @@ ExecMemoize(PlanState *pstate)
 				if (unlikely(!cache_store_tuple(node, outerslot)))
 				{
 					/* Couldn't store it?  Handle overflow */
-					node->stats.cache_overflows += 1;	/* stats update */
+					node->instr->cache_overflows += 1;	/* stats update */
 
 					node->mstatus = MEMO_CACHE_BYPASS_MODE;
 
@@ -1065,8 +1065,13 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 	 */
 	mstate->binary_mode = node->binary_mode;
 
-	/* Zero the statistics counters */
+	/*
+	 * Zero the statistics counters.  Accumulate into the node's own storage by
+	 * default; a parallel worker will redirect this to its slot in shared
+	 * memory (see ExecMemoizeInitializeWorker).
+	 */
 	memset(&mstate->stats, 0, sizeof(MemoizeInstrumentation));
+	mstate->instr = &mstate->stats;
 
 	/*
 	 * Because it may require a large allocation, we delay building of the
@@ -1111,21 +1116,14 @@ ExecEndMemoize(MemoizeState *node)
 #endif
 
 	/*
-	 * When ending a parallel worker, copy the statistics gathered by the
-	 * worker back into shared memory so that it can be picked up by the main
-	 * process to report in EXPLAIN ANALYZE.
+	 * In a parallel worker the statistics were accumulated directly into the
+	 * worker's slot in shared memory (node->instr), so nothing needs to be
+	 * copied here; just make sure mem_peak is populated for EXPLAIN.
 	 */
 	if (node->shared_info != NULL && IsParallelWorker())
 	{
-		MemoizeInstrumentation *si;
-
-		/* Make mem_peak available for EXPLAIN */
-		if (node->stats.mem_peak == 0)
-			node->stats.mem_peak = node->mem_used;
-
-		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
-		si = &node->shared_info->sinstrument[ParallelWorkerNumber];
-		memcpy(si, &node->stats, sizeof(MemoizeInstrumentation));
+		if (node->instr->mem_peak == 0)
+			node->instr->mem_peak = node->mem_used;
 	}
 
 	/* Remove the cache context */
@@ -1238,6 +1236,19 @@ ExecMemoizeInitializeWorker(MemoizeState *node, ParallelWorkerContext *pwcxt)
 {
 	node->shared_info =
 		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+
+	/*
+	 * Accumulate statistics straight into this worker's slot in shared memory
+	 * as the scan runs, rather than copying them out at shutdown.  Seed the slot
+	 * from the node's initial counters; this also resets the slot if workers are
+	 * relaunched, so each round reports its own statistics.
+	 */
+	if (node->shared_info != NULL)
+	{
+		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
+		node->shared_info->sinstrument[ParallelWorkerNumber] = node->stats;
+		node->instr = &node->shared_info->sinstrument[ParallelWorkerNumber];
+	}
 }
 
 /* ----------------------------------------------------------------
