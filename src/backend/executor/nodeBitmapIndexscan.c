@@ -186,25 +186,10 @@ ExecEndBitmapIndexScan(BitmapIndexScanState *node)
 	indexScanDesc = node->biss_ScanDesc;
 
 	/*
-	 * When ending a parallel worker, copy the statistics gathered by the
-	 * worker back into shared memory so that it can be picked up by the main
-	 * process to report in EXPLAIN ANALYZE
+	 * In a parallel worker biss_Instrument points directly at the worker's slot
+	 * in shared memory (see ExecBitmapIndexScanInitializeWorker), so the stats
+	 * are already where the leader will read them; nothing to copy here.
 	 */
-	if (node->biss_SharedInfo != NULL && IsParallelWorker())
-	{
-		IndexScanInstrumentation *winstrument;
-
-		Assert(ParallelWorkerNumber < node->biss_SharedInfo->num_workers);
-		winstrument = &node->biss_SharedInfo->winstrument[ParallelWorkerNumber];
-
-		/*
-		 * We have to accumulate the stats rather than performing a memcpy.
-		 * When a Gather/GatherMerge node finishes it will perform planner
-		 * shutdown on the workers.  On rescan it will spin up new workers
-		 * which will have a new BitmapIndexScanState and zeroed stats.
-		 */
-		winstrument->nsearches += node->biss_Instrument->nsearches;
-	}
 
 	/*
 	 * close the index relation (no-op if we didn't open it)
@@ -423,6 +408,18 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 					   node->ss.ps.plan->plan_node_id +
 					   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
 					   false);
+
+	/*
+	 * Write statistics straight into this worker's shared slot as the scan
+	 * runs, rather than into worker-local memory copied out at shutdown.  This
+	 * has no write-side contention (one writer per slot) and lets the leader
+	 * observe progress mid-query.  The slot is not reset here: when workers are
+	 * relaunched (e.g. a rescanned Gather) the counts accumulate across rounds.
+	 */
+	Assert(ParallelWorkerNumber < node->biss_SharedInfo->num_workers);
+	pfree(node->biss_Instrument);
+	node->biss_Instrument =
+		&node->biss_SharedInfo->winstrument[ParallelWorkerNumber];
 }
 
 /* ----------------------------------------------------------------
