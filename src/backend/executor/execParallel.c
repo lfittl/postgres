@@ -1455,10 +1455,14 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 	switch (nodeTag(planstate))
 	{
 		case T_SeqScanState:
+			/*
+			 * Set up instrumentation first (even when not parallel-aware, for
+			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed at
+			 * the worker's shared I/O stats slot when it begins.
+			 */
+			ExecSeqScanInstrumentInitWorker((SeqScanState *) planstate, pwcxt);
 			if (planstate->plan->parallel_aware)
 				ExecSeqScanInitializeWorker((SeqScanState *) planstate, pwcxt);
-			/* even when not parallel-aware, for EXPLAIN ANALYZE */
-			ExecSeqScanInstrumentInitWorker((SeqScanState *) planstate, pwcxt);
 			break;
 		case T_IndexScanState:
 			if (planstate->plan->parallel_aware)
@@ -1487,11 +1491,15 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 												pwcxt);
 			break;
 		case T_TidRangeScanState:
+			/*
+			 * Set up instrumentation first (even when not parallel-aware, for
+			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed at
+			 * the worker's shared I/O stats slot when it begins.
+			 */
+			ExecTidRangeScanInstrumentInitWorker((TidRangeScanState *) planstate,
+												 pwcxt);
 			if (planstate->plan->parallel_aware)
 				ExecTidRangeScanInitializeWorker((TidRangeScanState *) planstate,
-												 pwcxt);
-			/* even when not parallel-aware, for EXPLAIN ANALYZE */
-			ExecTidRangeScanInstrumentInitWorker((TidRangeScanState *) planstate,
 												 pwcxt);
 			break;
 		case T_AppendState:

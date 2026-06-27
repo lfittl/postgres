@@ -212,6 +212,24 @@ TidRangeEval(TidRangeScanState *node)
 	return true;
 }
 
+/*
+ * Where this scan should accumulate I/O instrumentation: this worker's slot in
+ * shared memory when run in a parallel worker (so statistics are written there
+ * directly), otherwise the node's own local storage.  The executor always owns
+ * the storage; the table AM never allocates it.  See the equivalent in
+ * nodeSeqscan.c for details.
+ */
+static TableScanInstrumentation *
+ExecTidRangeScanIOStatsLocation(TidRangeScanState *node)
+{
+	if (node->trss_sinstrument != NULL && IsParallelWorker())
+	{
+		Assert(ParallelWorkerNumber < node->trss_sinstrument->num_workers);
+		return &node->trss_sinstrument->sinstrument[ParallelWorkerNumber].stats;
+	}
+	return &node->stats;
+}
+
 /* ----------------------------------------------------------------
  *		TidRangeNext
  *
@@ -256,6 +274,7 @@ TidRangeNext(TidRangeScanState *node)
 												estate->es_snapshot,
 												&node->trss_mintid,
 												&node->trss_maxtid,
+												ExecTidRangeScanIOStatsLocation(node),
 												flags);
 			node->ss.ss_currentScanDesc = scandesc;
 		}
@@ -351,19 +370,11 @@ ExecEndTidRangeScan(TidRangeScanState *node)
 {
 	TableScanDesc scan = node->ss.ss_currentScanDesc;
 
-	/* Collect IO stats for this process into shared instrumentation */
-	if (node->trss_sinstrument != NULL && IsParallelWorker())
-	{
-		TidRangeScanInstrumentation *si;
-
-		Assert(ParallelWorkerNumber < node->trss_sinstrument->num_workers);
-		si = &node->trss_sinstrument->sinstrument[ParallelWorkerNumber];
-
-		if (scan && scan->rs_instrument)
-		{
-			AccumulateIOStats(&si->stats.io, &scan->rs_instrument->io);
-		}
-	}
+	/*
+	 * In a parallel worker the scan wrote its I/O statistics straight into the
+	 * worker's shared-memory slot (see ExecTidRangeScanIOStatsLocation), so
+	 * there is nothing to collect here.
+	 */
 
 	if (scan != NULL)
 		table_endscan(scan);
@@ -492,7 +503,9 @@ ExecTidRangeScanInitializeDSM(TidRangeScanState *node, ParallelContext *pcxt)
 	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
 	node->ss.ss_currentScanDesc =
 		table_beginscan_parallel_tidrange(node->ss.ss_currentRelation,
-										  pscan, flags);
+										  pscan,
+										  ExecTidRangeScanIOStatsLocation(node),
+										  flags);
 }
 
 /* ----------------------------------------------------------------
@@ -533,7 +546,9 @@ ExecTidRangeScanInitializeWorker(TidRangeScanState *node,
 	pscan = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
 	node->ss.ss_currentScanDesc =
 		table_beginscan_parallel_tidrange(node->ss.ss_currentRelation,
-										  pscan, flags);
+										  pscan,
+										  ExecTidRangeScanIOStatsLocation(node),
+										  flags);
 }
 
 /*

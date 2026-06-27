@@ -42,6 +42,27 @@ static TupleTableSlot *SeqNext(SeqScanState *node);
  * ----------------------------------------------------------------
  */
 
+/*
+ * Where this scan should accumulate I/O instrumentation.
+ *
+ * In a parallel worker this is the worker's own slot in shared memory, so the
+ * scan writes statistics there directly as it runs (no copy at shutdown, and
+ * the leader can observe progress mid-query).  Otherwise it's the node's own
+ * local storage, read back for EXPLAIN via the scan descriptor.  Either way the
+ * executor owns the storage; the table AM never allocates instrumentation
+ * itself (mirroring how index_beginscan() is handed its instrumentation).
+ */
+static TableScanInstrumentation *
+ExecSeqScanIOStatsLocation(SeqScanState *node)
+{
+	if (node->sinstrument != NULL && IsParallelWorker())
+	{
+		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
+		return &node->sinstrument->sinstrument[ParallelWorkerNumber].stats;
+	}
+	return &node->stats;
+}
+
 /* ----------------------------------------------------------------
  *		SeqNext
  *
@@ -78,9 +99,11 @@ SeqNext(SeqScanState *node)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		scandesc = table_beginscan(node->ss.ss_currentRelation,
-								   estate->es_snapshot,
-								   0, NULL, flags);
+		scandesc = table_beginscan_instrument(node->ss.ss_currentRelation,
+											  estate->es_snapshot,
+											  0, NULL,
+											  ExecSeqScanIOStatsLocation(node),
+											  flags);
 		node->ss.ss_currentScanDesc = scandesc;
 	}
 
@@ -310,20 +333,10 @@ ExecEndSeqScan(SeqScanState *node)
 	scanDesc = node->ss.ss_currentScanDesc;
 
 	/*
-	 * Collect I/O stats for this process into shared instrumentation.
+	 * In a parallel worker the scan wrote its I/O statistics straight into the
+	 * worker's shared-memory slot (see ExecSeqScanIOStatsLocation), so there is
+	 * nothing to collect here.
 	 */
-	if (node->sinstrument != NULL && IsParallelWorker())
-	{
-		SeqScanInstrumentation *si;
-
-		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
-		si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
-
-		if (scanDesc && scanDesc->rs_instrument)
-		{
-			AccumulateIOStats(&si->stats.io, &scanDesc->rs_instrument->io);
-		}
-	}
 
 	/*
 	 * close heap scan
@@ -408,7 +421,8 @@ ExecSeqScanInitializeDSM(SeqScanState *node,
 	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
 
 	node->ss.ss_currentScanDesc =
-		table_beginscan_parallel(node->ss.ss_currentRelation, pscan, flags);
+		table_beginscan_parallel(node->ss.ss_currentRelation, pscan,
+								 ExecSeqScanIOStatsLocation(node), flags);
 }
 
 /* ----------------------------------------------------------------
@@ -448,7 +462,8 @@ ExecSeqScanInitializeWorker(SeqScanState *node,
 
 	pscan = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
 	node->ss.ss_currentScanDesc =
-		table_beginscan_parallel(node->ss.ss_currentRelation, pscan, flags);
+		table_beginscan_parallel(node->ss.ss_currentRelation, pscan,
+								 ExecSeqScanIOStatsLocation(node), flags);
 }
 
 /*

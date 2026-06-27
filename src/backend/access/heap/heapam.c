@@ -1167,6 +1167,7 @@ TableScanDesc
 heap_beginscan(Relation relation, Snapshot snapshot,
 			   int nkeys, ScanKey key,
 			   ParallelTableScanDesc parallel_scan,
+			   struct TableScanInstrumentation *instrument,
 			   uint32 flags)
 {
 	HeapScanDesc scan;
@@ -1317,9 +1318,15 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	/* enable read stream instrumentation */
 	if ((flags & SO_SCAN_INSTRUMENT) && (scan->rs_read_stream != NULL))
 	{
-		scan->rs_base.rs_instrument = palloc0_object(TableScanInstrumentation);
-		read_stream_enable_stats(scan->rs_read_stream,
-								 &scan->rs_base.rs_instrument->io);
+		/*
+		 * The caller (the executor) always supplies the location where the
+		 * statistics should be accumulated -- the node's own storage, or a
+		 * parallel worker's slot in shared memory -- so the scan never owns the
+		 * instrumentation and never frees it.
+		 */
+		Assert(instrument != NULL);
+		scan->rs_base.rs_instrument = instrument;
+		read_stream_enable_stats(scan->rs_read_stream, &instrument->io);
 	}
 
 	scan->rs_vmbuffer = InvalidBuffer;
@@ -1424,9 +1431,6 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
-
-	if (scan->rs_base.rs_instrument)
-		pfree(scan->rs_base.rs_instrument);
 
 	pfree(scan);
 }

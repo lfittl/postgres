@@ -94,6 +94,24 @@ typedef struct ParallelBitmapHeapState
 
 
 /*
+ * Where this scan should accumulate instrumentation (page counts and I/O): this
+ * worker's slot in shared memory when run in a parallel worker, so statistics
+ * are written there directly as the scan runs (no copy at shutdown, and the
+ * leader can observe progress mid-query); otherwise the node's own local
+ * storage.
+ */
+static BitmapHeapScanInstrumentation *
+ExecBitmapHeapInstrumentation(BitmapHeapScanState *node)
+{
+	if (node->sinstrument != NULL && IsParallelWorker())
+	{
+		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
+		return &node->sinstrument->sinstrument[ParallelWorkerNumber];
+	}
+	return &node->stats;
+}
+
+/*
  * Do the underlying index scan, build the bitmap, set up the parallel state
  * needed for parallel workers to iterate through the bitmap, and set up the
  * underlying table scan descriptor.
@@ -157,6 +175,7 @@ BitmapTableScanSetup(BitmapHeapScanState *node)
 							   node->ss.ps.state->es_snapshot,
 							   0,
 							   NULL,
+							   &ExecBitmapHeapInstrumentation(node)->stats,
 							   flags);
 	}
 
@@ -175,6 +194,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 {
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	BitmapHeapScanInstrumentation *instr = ExecBitmapHeapInstrumentation(node);
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
@@ -185,8 +205,8 @@ BitmapHeapNext(BitmapHeapScanState *node)
 
 	while (table_scan_bitmap_next_tuple(node->ss.ss_currentScanDesc,
 										slot, &node->recheck,
-										&node->stats.lossy_pages,
-										&node->stats.exact_pages))
+										&instr->lossy_pages,
+										&instr->exact_pages))
 	{
 		/*
 		 * Continuing in previously obtained page.
@@ -317,35 +337,10 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	TableScanDesc scanDesc;
 
 	/*
-	 * When ending a parallel worker, copy the statistics gathered by the
-	 * worker back into shared memory so that it can be picked up by the main
-	 * process to report in EXPLAIN ANALYZE.
+	 * In a parallel worker the scan accumulated its page counts and I/O
+	 * statistics straight into the worker's shared-memory slot (see
+	 * ExecBitmapHeapInstrumentation), so there is nothing to collect here.
 	 */
-	if (node->sinstrument != NULL && IsParallelWorker())
-	{
-		BitmapHeapScanInstrumentation *si;
-
-		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
-		si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
-
-		/*
-		 * Here we accumulate the stats rather than performing memcpy on
-		 * node->stats into si.  When a Gather/GatherMerge node finishes it
-		 * will perform planner shutdown on the workers.  On rescan it will
-		 * spin up new workers which will have a new BitmapHeapScanState and
-		 * zeroed stats.
-		 */
-		si->exact_pages += node->stats.exact_pages;
-		si->lossy_pages += node->stats.lossy_pages;
-
-		/* collect I/O instrumentation for this process */
-		if (node->ss.ss_currentScanDesc &&
-			node->ss.ss_currentScanDesc->rs_instrument)
-		{
-			AccumulateIOStats(&si->stats.io,
-							  &node->ss.ss_currentScanDesc->rs_instrument->io);
-		}
-	}
 
 	/*
 	 * extract information from the node
