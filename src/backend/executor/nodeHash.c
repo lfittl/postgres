@@ -2837,7 +2837,7 @@ ExecHashInitializeDSM(HashState *node, ParallelContext *pcxt)
 	if (!node->ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->shared_info = (SharedHashInfo *)
+	node->shared_info =
 		ExecInstrInitDSM(pcxt, node->ps.plan->plan_node_id,
 						 sizeof(HashInstrumentation));
 }
@@ -2858,7 +2858,7 @@ ExecHashInitializeWorker(HashState *node, ParallelWorkerContext *pwcxt)
 	 * we'll accumulate stats there when shutting down or rebuilding the hash
 	 * table.
 	 */
-	node->shared_info = (SharedHashInfo *)
+	node->shared_info =
 		ExecInstrInitWorker(pwcxt->toc, node->ps.plan->plan_node_id, false);
 	node->hinstrument = GetWorkerInstr(node->shared_info, HashInstrumentation,
 									   ParallelWorkerNumber);
@@ -2890,8 +2890,8 @@ void
 ExecHashRetrieveInstrumentation(HashState *node)
 {
 	/* Replace node->shared_info with a copy in backend-local memory. */
-	node->shared_info = (SharedHashInfo *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
 						  sizeof(HashInstrumentation));
 }
 

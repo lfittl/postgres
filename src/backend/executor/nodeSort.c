@@ -437,7 +437,7 @@ ExecSortInitializeDSM(SortState *node, ParallelContext *pcxt)
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->shared_info = (SharedSortInfo *)
+	node->shared_info =
 		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
 						 sizeof(TuplesortInstrumentation));
 }
@@ -451,7 +451,7 @@ ExecSortInitializeDSM(SortState *node, ParallelContext *pcxt)
 void
 ExecSortInitializeWorker(SortState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info = (SharedSortInfo *)
+	node->shared_info =
 		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 	node->am_worker = true;
 }
@@ -465,7 +465,7 @@ ExecSortInitializeWorker(SortState *node, ParallelWorkerContext *pwcxt)
 void
 ExecSortRetrieveInstrumentation(SortState *node)
 {
-	node->shared_info = (SharedSortInfo *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
 						  sizeof(TuplesortInstrumentation));
 }

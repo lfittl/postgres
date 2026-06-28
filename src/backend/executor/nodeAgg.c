@@ -4798,7 +4798,7 @@ ExecAggInitializeDSM(AggState *node, ParallelContext *pcxt)
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->shared_info = (SharedAggInfo *)
+	node->shared_info =
 		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
 						 sizeof(AggregateInstrumentation));
 }
@@ -4812,7 +4812,7 @@ ExecAggInitializeDSM(AggState *node, ParallelContext *pcxt)
 void
 ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info = (SharedAggInfo *)
+	node->shared_info =
 		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 
 	/*
@@ -4840,7 +4840,7 @@ ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt)
 void
 ExecAggRetrieveInstrumentation(AggState *node)
 {
-	node->shared_info = (SharedAggInfo *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
 						  sizeof(AggregateInstrumentation));
 }

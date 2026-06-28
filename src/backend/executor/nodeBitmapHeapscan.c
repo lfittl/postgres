@@ -610,7 +610,7 @@ ExecBitmapHeapInstrumentInitDSM(BitmapHeapScanState *node,
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->sinstrument = (SharedBitmapHeapInstrumentation *)
+	node->sinstrument =
 		ExecInstrInitDSM(pcxt,
 						 node->ss.ps.plan->plan_node_id +
 						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -627,7 +627,7 @@ ExecBitmapHeapInstrumentInitWorker(BitmapHeapScanState *node,
 	if (!node->ss.ps.instrument)
 		return;
 
-	node->sinstrument = (SharedBitmapHeapInstrumentation *)
+	node->sinstrument =
 		ExecInstrInitWorker(pwcxt->toc,
 							node->ss.ps.plan->plan_node_id +
 							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -643,7 +643,7 @@ ExecBitmapHeapInstrumentInitWorker(BitmapHeapScanState *node,
 void
 ExecBitmapHeapRetrieveInstrumentation(BitmapHeapScanState *node)
 {
-	node->sinstrument = (SharedBitmapHeapInstrumentation *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->sinstrument,
+	node->sinstrument =
+		ExecInstrRetrieve(node->sinstrument,
 						  sizeof(BitmapHeapScanInstrumentation));
 }

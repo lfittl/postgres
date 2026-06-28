@@ -3417,7 +3417,7 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 	 */
 	if (hashstate->shared_info)
 	{
-		SharedHashInfo *shared_info = hashstate->shared_info;
+		SharedWorkerInstrumentation *shared_info = hashstate->shared_info;
 		int			i;
 
 		for (i = 0; i < shared_info->num_workers; ++i)
@@ -3877,7 +3877,7 @@ static void
 show_indexsearches_info(PlanState *planstate, ExplainState *es)
 {
 	Plan	   *plan = planstate->plan;
-	SharedIndexScanInstrumentation *SharedInfo = NULL;
+	SharedWorkerInstrumentation *SharedInfo = NULL;
 	uint64		nsearches = 0;
 
 	if (!es->analyze)
@@ -4090,7 +4090,7 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 	{
 		case T_BitmapHeapScan:
 			{
-				SharedBitmapHeapInstrumentation *sinstrument
+				SharedWorkerInstrumentation *sinstrument
 				= ((BitmapHeapScanState *) planstate)->sinstrument;
 
 				if (sinstrument)
@@ -4116,7 +4116,7 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 			}
 		case T_SeqScan:
 			{
-				SharedSeqScanInstrumentation *sinstrument
+				SharedWorkerInstrumentation *sinstrument
 				= ((SeqScanState *) planstate)->sinstrument;
 
 				if (sinstrument)
@@ -4141,7 +4141,7 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 			}
 		case T_TidRangeScan:
 			{
-				SharedTidRangeScanInstrumentation *sinstrument
+				SharedWorkerInstrumentation *sinstrument
 				= ((TidRangeScanState *) planstate)->trss_sinstrument;
 
 				if (sinstrument)

@@ -493,7 +493,7 @@ ExecSeqScanInstrumentInitDSM(SeqScanState *node, ParallelContext *pcxt)
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
 		return;
 
-	node->sinstrument = (SharedSeqScanInstrumentation *)
+	node->sinstrument =
 		ExecInstrInitDSM(pcxt,
 						 node->ss.ps.plan->plan_node_id +
 						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -512,7 +512,7 @@ ExecSeqScanInstrumentInitWorker(SeqScanState *node,
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0)
 		return;
 
-	node->sinstrument = (SharedSeqScanInstrumentation *)
+	node->sinstrument =
 		ExecInstrInitWorker(pwcxt->toc,
 							node->ss.ps.plan->plan_node_id +
 							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -525,7 +525,7 @@ ExecSeqScanInstrumentInitWorker(SeqScanState *node,
 void
 ExecSeqScanRetrieveInstrumentation(SeqScanState *node)
 {
-	node->sinstrument = (SharedSeqScanInstrumentation *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->sinstrument,
+	node->sinstrument =
+		ExecInstrRetrieve(node->sinstrument,
 						  sizeof(SeqScanInstrumentation));
 }

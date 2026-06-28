@@ -370,7 +370,7 @@ ExecBitmapIndexScanInitializeDSM(BitmapIndexScanState *node,
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->biss_SharedInfo = (SharedIndexScanInstrumentation *)
+	node->biss_SharedInfo =
 		ExecInstrInitDSM(pcxt,
 						 node->ss.ps.plan->plan_node_id +
 						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -391,7 +391,7 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 	if (!node->ss.ps.instrument)
 		return;
 
-	node->biss_SharedInfo = (SharedIndexScanInstrumentation *)
+	node->biss_SharedInfo =
 		ExecInstrInitWorker(pwcxt->toc,
 							node->ss.ps.plan->plan_node_id +
 							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -431,7 +431,7 @@ void
 ExecBitmapIndexScanRetrieveInstrumentation(BitmapIndexScanState *node)
 {
 	/* Create a copy of SharedInfo in backend-local memory */
-	node->biss_SharedInfo = (SharedIndexScanInstrumentation *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->biss_SharedInfo,
+	node->biss_SharedInfo =
+		ExecInstrRetrieve(node->biss_SharedInfo,
 						  sizeof(IndexScanInstrumentation));
 }

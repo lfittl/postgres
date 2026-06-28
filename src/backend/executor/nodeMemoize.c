@@ -1209,7 +1209,7 @@ ExecMemoizeInitializeDSM(MemoizeState *node, ParallelContext *pcxt)
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->shared_info = (SharedMemoizeInfo *)
+	node->shared_info =
 		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
 						 sizeof(MemoizeInstrumentation));
 }
@@ -1223,7 +1223,7 @@ ExecMemoizeInitializeDSM(MemoizeState *node, ParallelContext *pcxt)
 void
 ExecMemoizeInitializeWorker(MemoizeState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info = (SharedMemoizeInfo *)
+	node->shared_info =
 		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 
 	/*
@@ -1250,7 +1250,7 @@ ExecMemoizeInitializeWorker(MemoizeState *node, ParallelWorkerContext *pwcxt)
 void
 ExecMemoizeRetrieveInstrumentation(MemoizeState *node)
 {
-	node->shared_info = (SharedMemoizeInfo *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
 						  sizeof(MemoizeInstrumentation));
 }

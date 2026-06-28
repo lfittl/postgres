@@ -580,7 +580,7 @@ ExecTidRangeScanInstrumentInitDSM(TidRangeScanState *node,
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
 		return;
 
-	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
+	node->trss_sinstrument =
 		ExecInstrInitDSM(pcxt,
 						 node->ss.ps.plan->plan_node_id +
 						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -599,7 +599,7 @@ ExecTidRangeScanInstrumentInitWorker(TidRangeScanState *node,
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0)
 		return;
 
-	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
+	node->trss_sinstrument =
 		ExecInstrInitWorker(pwcxt->toc,
 							node->ss.ps.plan->plan_node_id +
 							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -612,7 +612,7 @@ ExecTidRangeScanInstrumentInitWorker(TidRangeScanState *node,
 void
 ExecTidRangeScanRetrieveInstrumentation(TidRangeScanState *node)
 {
-	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->trss_sinstrument,
+	node->trss_sinstrument =
+		ExecInstrRetrieve(node->trss_sinstrument,
 						  sizeof(TidRangeScanInstrumentation));
 }

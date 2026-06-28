@@ -1782,7 +1782,7 @@ ExecIndexScanInstrumentInitDSM(IndexScanState *node,
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
+	node->iss_SharedInfo =
 		ExecInstrInitDSM(pcxt,
 						 node->ss.ps.plan->plan_node_id +
 						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -1799,7 +1799,7 @@ ExecIndexScanInstrumentInitWorker(IndexScanState *node,
 	if (!node->ss.ps.instrument)
 		return;
 
-	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
+	node->iss_SharedInfo =
 		ExecInstrInitWorker(pwcxt->toc,
 							node->ss.ps.plan->plan_node_id +
 							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -1830,7 +1830,7 @@ void
 ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 {
 	/* Create a copy of SharedInfo in backend-local memory */
-	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->iss_SharedInfo,
+	node->iss_SharedInfo =
+		ExecInstrRetrieve(node->iss_SharedInfo,
 						  sizeof(IndexScanInstrumentation));
 }

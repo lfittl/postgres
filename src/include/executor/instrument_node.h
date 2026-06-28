@@ -80,15 +80,6 @@ typedef struct AggregateInstrumentation
 	int			hash_batches_used;	/* batches used during entire execution */
 } AggregateInstrumentation;
 
-/*
- * Shared memory container for per-worker aggregate information
- */
-typedef struct SharedAggInfo
-{
-	int			num_workers;
-	/* AggregateInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedAggInfo;
-
 
 /* ---------------------
  *	Instrumentation information about read streams and I/O
@@ -149,15 +140,6 @@ typedef struct IndexScanInstrumentation
 	uint64		nsearches;
 } IndexScanInstrumentation;
 
-/*
- * Shared memory container for per-worker information
- */
-typedef struct SharedIndexScanInstrumentation
-{
-	int			num_workers;
-	/* IndexScanInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedIndexScanInstrumentation;
-
 
 /* ---------------------
  *	Instrumentation information for bitmap heap scans
@@ -172,15 +154,6 @@ typedef struct BitmapHeapScanInstrumentation
 	uint64		lossy_pages;
 	TableScanInstrumentation stats;
 } BitmapHeapScanInstrumentation;
-
-/*
- * Shared memory container for per-worker information
- */
-typedef struct SharedBitmapHeapInstrumentation
-{
-	int			num_workers;
-	/* BitmapHeapScanInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedBitmapHeapInstrumentation;
 
 
 /* ---------------------
@@ -201,15 +174,6 @@ typedef struct MemoizeInstrumentation
 									 * current scan's tuples */
 	uint64		mem_peak;		/* peak memory usage in bytes */
 } MemoizeInstrumentation;
-
-/*
- * Shared memory container for per-worker memoize information
- */
-typedef struct SharedMemoizeInfo
-{
-	int			num_workers;
-	/* MemoizeInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedMemoizeInfo;
 
 
 /* ---------------------
@@ -248,15 +212,6 @@ typedef struct TuplesortInstrumentation
 	int64		spaceUsed;		/* space consumption, in kB */
 } TuplesortInstrumentation;
 
-/*
- * Shared memory container for per-worker sort information
- */
-typedef struct SharedSortInfo
-{
-	int			num_workers;
-	/* TuplesortInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedSortInfo;
-
 
 /* ---------------------
  *   Instrumentation information for nodeHash.c
@@ -270,15 +225,6 @@ typedef struct HashInstrumentation
 	int			nbatch_original;	/* planned number of batches */
 	Size		space_peak;		/* peak memory usage in bytes */
 } HashInstrumentation;
-
-/*
- * Shared memory container for per-worker information
- */
-typedef struct SharedHashInfo
-{
-	int			num_workers;
-	/* HashInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedHashInfo;
 
 
 /* ---------------------
@@ -301,13 +247,6 @@ typedef struct IncrementalSortInfo
 	IncrementalSortGroupInfo prefixsortGroupInfo;
 } IncrementalSortInfo;
 
-/* Shared memory container for per-worker incremental sort information */
-typedef struct SharedIncrementalSortInfo
-{
-	int			num_workers;
-	/* IncrementalSortInfo slots follow; access via GetWorkerInstr() */
-} SharedIncrementalSortInfo;
-
 
 /* ---------------------
  *	Instrumentation information for sequential scans
@@ -318,15 +257,6 @@ typedef struct SeqScanInstrumentation
 	TableScanInstrumentation stats;
 } SeqScanInstrumentation;
 
-/*
- * Shared memory container for per-worker information
- */
-typedef struct SharedSeqScanInstrumentation
-{
-	int			num_workers;
-	/* SeqScanInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedSeqScanInstrumentation;
-
 
 /*
  *	Instrumentation information for TID range scans
@@ -335,14 +265,5 @@ typedef struct TidRangeScanInstrumentation
 {
 	TableScanInstrumentation stats;
 } TidRangeScanInstrumentation;
-
-/*
- * Shared memory container for per-worker information
- */
-typedef struct SharedTidRangeScanInstrumentation
-{
-	int			num_workers;
-	/* TidRangeScanInstrumentation slots follow; access via GetWorkerInstr() */
-} SharedTidRangeScanInstrumentation;
 
 #endif							/* INSTRUMENT_NODE_H */

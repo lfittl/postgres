@@ -1193,7 +1193,7 @@ ExecIncrementalSortInitializeDSM(IncrementalSortState *node, ParallelContext *pc
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	node->shared_info = (SharedIncrementalSortInfo *)
+	node->shared_info =
 		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
 						 sizeof(IncrementalSortInfo));
 }
@@ -1207,7 +1207,7 @@ ExecIncrementalSortInitializeDSM(IncrementalSortState *node, ParallelContext *pc
 void
 ExecIncrementalSortInitializeWorker(IncrementalSortState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info = (SharedIncrementalSortInfo *)
+	node->shared_info =
 		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 	node->am_worker = true;
 }
@@ -1221,7 +1221,7 @@ ExecIncrementalSortInitializeWorker(IncrementalSortState *node, ParallelWorkerCo
 void
 ExecIncrementalSortRetrieveInstrumentation(IncrementalSortState *node)
 {
-	node->shared_info = (SharedIncrementalSortInfo *)
-		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
 						  sizeof(IncrementalSortInfo));
 }
