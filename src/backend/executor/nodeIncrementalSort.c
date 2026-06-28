@@ -78,6 +78,7 @@
 
 #include "postgres.h"
 
+#include "executor/execParallel.h"
 #include "executor/execdebug.h"
 #include "executor/nodeIncrementalSort.h"
 #include "miscadmin.h"
@@ -103,7 +104,7 @@
 			{ \
 				Assert(IsParallelWorker()); \
 				Assert(ParallelWorkerNumber < (node)->shared_info->num_workers); \
-				instrumentSortedGroup(&(node)->shared_info->sinfo[ParallelWorkerNumber].groupName##GroupInfo, \
+				instrumentSortedGroup(&GetWorkerInstr((node)->shared_info, IncrementalSortInfo, ParallelWorkerNumber)->groupName##GroupInfo, \
 									  (node)->groupName##_state); \
 			} \
 			else \
@@ -1172,16 +1173,11 @@ ExecReScanIncrementalSort(IncrementalSortState *node)
 void
 ExecIncrementalSortEstimate(IncrementalSortState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = mul_size(pcxt->nworkers, sizeof(IncrementalSortInfo));
-	size = add_size(size, offsetof(SharedIncrementalSortInfo, sinfo));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(IncrementalSortInfo));
 }
 
 /* ----------------------------------------------------------------
@@ -1193,20 +1189,13 @@ ExecIncrementalSortEstimate(IncrementalSortState *node, ParallelContext *pcxt)
 void
 ExecIncrementalSortInitializeDSM(IncrementalSortState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedIncrementalSortInfo, sinfo)
-		+ pcxt->nworkers * sizeof(IncrementalSortInfo);
-	node->shared_info = shm_toc_allocate(pcxt->toc, size);
-	/* ensure any unfilled slots will contain zeroes */
-	memset(node->shared_info, 0, size);
-	node->shared_info->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id,
-				   node->shared_info);
+	node->shared_info =
+		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
+						 sizeof(IncrementalSortInfo));
 }
 
 /* ----------------------------------------------------------------
@@ -1219,7 +1208,7 @@ void
 ExecIncrementalSortInitializeWorker(IncrementalSortState *node, ParallelWorkerContext *pwcxt)
 {
 	node->shared_info =
-		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 	node->am_worker = true;
 }
 
@@ -1232,15 +1221,7 @@ ExecIncrementalSortInitializeWorker(IncrementalSortState *node, ParallelWorkerCo
 void
 ExecIncrementalSortRetrieveInstrumentation(IncrementalSortState *node)
 {
-	Size		size;
-	SharedIncrementalSortInfo *si;
-
-	if (node->shared_info == NULL)
-		return;
-
-	size = offsetof(SharedIncrementalSortInfo, sinfo)
-		+ node->shared_info->num_workers * sizeof(IncrementalSortInfo);
-	si = palloc(size);
-	memcpy(si, node->shared_info, size);
-	node->shared_info = si;
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
+						  sizeof(IncrementalSortInfo));
 }

@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "executor/execParallel.h"
 #include "executor/execdebug.h"
 #include "executor/nodeSort.h"
 #include "miscadmin.h"
@@ -176,7 +177,8 @@ ExecSort(PlanState *pstate)
 
 			Assert(IsParallelWorker());
 			Assert(ParallelWorkerNumber < node->shared_info->num_workers);
-			si = &node->shared_info->sinstrument[ParallelWorkerNumber];
+			si = GetWorkerInstr(node->shared_info, TuplesortInstrumentation,
+								ParallelWorkerNumber);
 			tuplesort_get_stats(tuplesortstate, si);
 		}
 		SO1_printf("ExecSort: %s\n", "sorting done");
@@ -415,16 +417,11 @@ ExecReScanSort(SortState *node)
 void
 ExecSortEstimate(SortState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = mul_size(pcxt->nworkers, sizeof(TuplesortInstrumentation));
-	size = add_size(size, offsetof(SharedSortInfo, sinstrument));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(TuplesortInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -436,20 +433,13 @@ ExecSortEstimate(SortState *node, ParallelContext *pcxt)
 void
 ExecSortInitializeDSM(SortState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedSortInfo, sinstrument)
-		+ pcxt->nworkers * sizeof(TuplesortInstrumentation);
-	node->shared_info = shm_toc_allocate(pcxt->toc, size);
-	/* ensure any unfilled slots will contain zeroes */
-	memset(node->shared_info, 0, size);
-	node->shared_info->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id,
-				   node->shared_info);
+	node->shared_info =
+		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
+						 sizeof(TuplesortInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -462,7 +452,7 @@ void
 ExecSortInitializeWorker(SortState *node, ParallelWorkerContext *pwcxt)
 {
 	node->shared_info =
-		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 	node->am_worker = true;
 }
 
@@ -475,15 +465,7 @@ ExecSortInitializeWorker(SortState *node, ParallelWorkerContext *pwcxt)
 void
 ExecSortRetrieveInstrumentation(SortState *node)
 {
-	Size		size;
-	SharedSortInfo *si;
-
-	if (node->shared_info == NULL)
-		return;
-
-	size = offsetof(SharedSortInfo, sinstrument)
-		+ node->shared_info->num_workers * sizeof(TuplesortInstrumentation);
-	si = palloc(size);
-	memcpy(si, node->shared_info, size);
-	node->shared_info = si;
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
+						  sizeof(TuplesortInstrumentation));
 }

@@ -1673,7 +1673,10 @@ typedef struct SeqScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
-	struct SharedSeqScanInstrumentation *sinstrument;
+	/* Local I/O instrumentation, used by the leader or a non-parallel scan */
+	TableScanInstrumentation stats;
+	/* SeqScanInstrumentation slots, one per worker */
+	struct SharedWorkerInstrumentation *sinstrument;
 } SeqScanState;
 
 /* ----------------
@@ -1763,7 +1766,8 @@ typedef struct IndexScanState
 	Relation	iss_RelationDesc;
 	struct IndexScanDescData *iss_ScanDesc;
 	IndexScanInstrumentation *iss_Instrument;
-	SharedIndexScanInstrumentation *iss_SharedInfo;
+	/* IndexScanInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *iss_SharedInfo;
 
 	/* These are needed for re-checking ORDER BY expr ordering */
 	pairingheap *iss_ReorderQueue;
@@ -1814,7 +1818,8 @@ typedef struct IndexOnlyScanState
 	Relation	ioss_RelationDesc;
 	struct IndexScanDescData *ioss_ScanDesc;
 	IndexScanInstrumentation *ioss_Instrument;
-	SharedIndexScanInstrumentation *ioss_SharedInfo;
+	/* IndexScanInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *ioss_SharedInfo;
 	TupleTableSlot *ioss_TableSlot;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
@@ -1855,7 +1860,8 @@ typedef struct BitmapIndexScanState
 	Relation	biss_RelationDesc;
 	struct IndexScanDescData *biss_ScanDesc;
 	IndexScanInstrumentation *biss_Instrument;
-	SharedIndexScanInstrumentation *biss_SharedInfo;
+	/* IndexScanInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *biss_SharedInfo;
 } BitmapIndexScanState;
 
 
@@ -1883,7 +1889,8 @@ typedef struct BitmapHeapScanState
 	BitmapHeapScanInstrumentation stats;
 	bool		initialized;
 	ParallelBitmapHeapState *pstate;
-	SharedBitmapHeapInstrumentation *sinstrument;
+	/* BitmapHeapScanInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *sinstrument;
 	bool		recheck;
 } BitmapHeapScanState;
 
@@ -1925,7 +1932,10 @@ typedef struct TidRangeScanState
 	ItemPointerData trss_maxtid;
 	bool		trss_inScan;
 	Size		trss_pscanlen;
-	struct SharedTidRangeScanInstrumentation *trss_sinstrument;
+	/* Local I/O instrumentation, used by the leader or a non-parallel scan */
+	TableScanInstrumentation stats;
+	/* TidRangeScanInstrumentation slots, one per worker */
+	struct SharedWorkerInstrumentation *trss_sinstrument;
 } TidRangeScanState;
 
 /* ----------------
@@ -2330,8 +2340,11 @@ typedef struct MemoizeState
 								 * complete after caching the first tuple. */
 	bool		binary_mode;	/* true when cache key should be compared bit
 								 * by bit, false when using hash equality ops */
-	MemoizeInstrumentation stats;	/* execution statistics */
-	SharedMemoizeInfo *shared_info; /* statistics for parallel workers */
+	MemoizeInstrumentation stats;	/* local execution statistics (leader) */
+	MemoizeInstrumentation *instr;	/* where to accumulate stats: &stats, or a
+									 * parallel worker's slot in shared memory */
+	/* MemoizeInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *shared_info;
 	Bitmapset  *keyparamids;	/* Param->paramids of expressions belonging to
 								 * param_exprs */
 } MemoizeState;
@@ -2366,7 +2379,8 @@ typedef struct SortState
 	void	   *tuplesortstate; /* private state of tuplesort.c */
 	bool		am_worker;		/* are we a worker? */
 	bool		datumSort;		/* Datum sort instead of tuple sort? */
-	SharedSortInfo *shared_info;	/* one entry per worker */
+	/* TuplesortInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *shared_info;
 } SortState;
 
 typedef enum
@@ -2397,7 +2411,8 @@ typedef struct IncrementalSortState
 	TupleTableSlot *group_pivot;
 	TupleTableSlot *transfer_tuple;
 	bool		am_worker;		/* are we a worker? */
-	SharedIncrementalSortInfo *shared_info; /* one entry per worker */
+	/* IncrementalSortInfo slots, one per worker */
+	SharedWorkerInstrumentation *shared_info;
 } IncrementalSortState;
 
 /* ---------------------
@@ -2490,11 +2505,12 @@ typedef struct AggState
 	int			hash_planned_partitions;	/* number of partitions planned
 											 * for first pass */
 	double		hashentrysize;	/* estimate revised during execution */
-	Size		hash_mem_peak;	/* peak hash table memory usage */
 	uint64		hash_ngroups_current;	/* number of groups currently in
 										 * memory in all hash tables */
-	uint64		hash_disk_used; /* kB of disk space used */
-	int			hash_batches_used;	/* batches used during entire execution */
+	/* Local execution statistics (leader), reported by EXPLAIN ANALYZE */
+	AggregateInstrumentation stats;
+	/* where to accumulate stats: &stats, or a worker's slot in shared memory */
+	AggregateInstrumentation *instr;
 
 	AggStatePerHash perhash;	/* array of per-hashtable data */
 	AggStatePerGroup *hash_pergroup;	/* grouping set indexed array of
@@ -2504,7 +2520,8 @@ typedef struct AggState
 #define FIELDNO_AGGSTATE_ALL_PERGROUPS 54
 	AggStatePerGroup *all_pergroups;	/* array of first ->pergroups, than
 										 * ->hash_pergroup */
-	SharedAggInfo *shared_info; /* one entry per worker */
+	/* AggregateInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *shared_info;
 } AggState;
 
 /* ----------------
@@ -2709,7 +2726,8 @@ typedef struct HashState
 	 * shared-memory info back to local storage before DSM shutdown.  The
 	 * shared_info field remains NULL in workers, or in non-parallel joins.
 	 */
-	SharedHashInfo *shared_info;
+	/* HashInstrumentation slots, one per worker */
+	SharedWorkerInstrumentation *shared_info;
 
 	/*
 	 * If we are collecting hash stats, this points to an initially-zeroed

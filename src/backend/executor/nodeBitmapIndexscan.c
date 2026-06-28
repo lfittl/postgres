@@ -22,6 +22,8 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/relscan.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeBitmapIndexscan.h"
@@ -186,25 +188,11 @@ ExecEndBitmapIndexScan(BitmapIndexScanState *node)
 	indexScanDesc = node->biss_ScanDesc;
 
 	/*
-	 * When ending a parallel worker, copy the statistics gathered by the
-	 * worker back into shared memory so that it can be picked up by the main
-	 * process to report in EXPLAIN ANALYZE
+	 * In a parallel worker biss_Instrument points directly at the worker's
+	 * slot in shared memory (see ExecBitmapIndexScanInitializeWorker), so the
+	 * stats are already where the leader will read them; nothing to copy
+	 * here.
 	 */
-	if (node->biss_SharedInfo != NULL && IsParallelWorker())
-	{
-		IndexScanInstrumentation *winstrument;
-
-		Assert(ParallelWorkerNumber < node->biss_SharedInfo->num_workers);
-		winstrument = &node->biss_SharedInfo->winstrument[ParallelWorkerNumber];
-
-		/*
-		 * We have to accumulate the stats rather than performing a memcpy.
-		 * When a Gather/GatherMerge node finishes it will perform planner
-		 * shutdown on the workers.  On rescan it will spin up new workers
-		 * which will have a new BitmapIndexScanState and zeroed stats.
-		 */
-		winstrument->nsearches += node->biss_Instrument->nsearches;
-	}
 
 	/*
 	 * close the index relation (no-op if we didn't open it)
@@ -358,8 +346,6 @@ ExecInitBitmapIndexScan(BitmapIndexScan *node, EState *estate, int eflags)
 void
 ExecBitmapIndexScanEstimate(BitmapIndexScanState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/*
 	 * Parallel bitmap index scans are not supported, but we still need to
 	 * store the scan's instrumentation in DSM during parallel query
@@ -367,10 +353,7 @@ ExecBitmapIndexScanEstimate(BitmapIndexScanState *node, ParallelContext *pcxt)
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedIndexScanInstrumentation, winstrument) +
-		pcxt->nworkers * sizeof(IndexScanInstrumentation);
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(IndexScanInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -383,25 +366,15 @@ void
 ExecBitmapIndexScanInitializeDSM(BitmapIndexScanState *node,
 								 ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedIndexScanInstrumentation, winstrument) +
-		pcxt->nworkers * sizeof(IndexScanInstrumentation);
 	node->biss_SharedInfo =
-		(SharedIndexScanInstrumentation *) shm_toc_allocate(pcxt->toc,
-															size);
-	shm_toc_insert(pcxt->toc,
-				   node->ss.ps.plan->plan_node_id +
-				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-				   node->biss_SharedInfo);
-
-	/* Each per-worker area must start out as zeroes */
-	memset(node->biss_SharedInfo, 0, size);
-	node->biss_SharedInfo->num_workers = pcxt->nworkers;
+		ExecInstrInitDSM(pcxt,
+						 node->ss.ps.plan->plan_node_id +
+						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+						 sizeof(IndexScanInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -418,11 +391,34 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 	if (!node->ss.ps.instrument)
 		return;
 
-	node->biss_SharedInfo = (SharedIndexScanInstrumentation *)
-		shm_toc_lookup(pwcxt->toc,
-					   node->ss.ps.plan->plan_node_id +
-					   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-					   false);
+	node->biss_SharedInfo =
+		ExecInstrInitWorker(pwcxt->toc,
+							node->ss.ps.plan->plan_node_id +
+							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+							false);
+
+	/*
+	 * Write statistics straight into this worker's shared slot as the scan
+	 * runs, rather than into worker-local memory copied out at shutdown. This
+	 * has no write-side contention (one writer per slot) and lets the leader
+	 * observe progress mid-query.  The slot is not reset here: when workers
+	 * are relaunched (e.g. a rescanned Gather) the counts accumulate across
+	 * rounds.
+	 */
+	Assert(ParallelWorkerNumber < node->biss_SharedInfo->num_workers);
+	pfree(node->biss_Instrument);
+	node->biss_Instrument = GetWorkerInstr(node->biss_SharedInfo,
+										   IndexScanInstrumentation,
+										   ParallelWorkerNumber);
+
+	/*
+	 * Unlike a plain index scan, the bitmap index scan descriptor is created
+	 * eagerly in ExecInitBitmapIndexScan, before this runs, and it captured a
+	 * pointer to the now-freed local instrumentation.  Repoint it at the
+	 * shared slot so the AM writes there (and not into freed memory).
+	 */
+	if (node->biss_ScanDesc != NULL)
+		node->biss_ScanDesc->instrument = node->biss_Instrument;
 }
 
 /* ----------------------------------------------------------------
@@ -434,15 +430,8 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 void
 ExecBitmapIndexScanRetrieveInstrumentation(BitmapIndexScanState *node)
 {
-	SharedIndexScanInstrumentation *SharedInfo = node->biss_SharedInfo;
-	size_t		size;
-
-	if (SharedInfo == NULL)
-		return;
-
 	/* Create a copy of SharedInfo in backend-local memory */
-	size = offsetof(SharedIndexScanInstrumentation, winstrument) +
-		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
-	node->biss_SharedInfo = palloc(size);
-	memcpy(node->biss_SharedInfo, SharedInfo, size);
+	node->biss_SharedInfo =
+		ExecInstrRetrieve(node->biss_SharedInfo,
+						  sizeof(IndexScanInstrumentation));
 }

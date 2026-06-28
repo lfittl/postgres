@@ -30,6 +30,7 @@
 #include "access/parallel.h"
 #include "catalog/pg_statistic.h"
 #include "commands/tablespace.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/hashjoin.h"
 #include "executor/instrument.h"
@@ -2818,16 +2819,11 @@ ExecHashBuildNullTupleStore(HashJoinTable hashtable)
 void
 ExecHashEstimate(HashState *node, ParallelContext *pcxt)
 {
-	size_t		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = mul_size(pcxt->nworkers, sizeof(HashInstrumentation));
-	size = add_size(size, offsetof(SharedHashInfo, hinstrument));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(HashInstrumentation));
 }
 
 /*
@@ -2837,22 +2833,13 @@ ExecHashEstimate(HashState *node, ParallelContext *pcxt)
 void
 ExecHashInitializeDSM(HashState *node, ParallelContext *pcxt)
 {
-	size_t		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedHashInfo, hinstrument) +
-		pcxt->nworkers * sizeof(HashInstrumentation);
-	node->shared_info = (SharedHashInfo *) shm_toc_allocate(pcxt->toc, size);
-
-	/* Each per-worker area must start out as zeroes. */
-	memset(node->shared_info, 0, size);
-
-	node->shared_info->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id,
-				   node->shared_info);
+	node->shared_info =
+		ExecInstrInitDSM(pcxt, node->ps.plan->plan_node_id,
+						 sizeof(HashInstrumentation));
 }
 
 /*
@@ -2862,8 +2849,6 @@ ExecHashInitializeDSM(HashState *node, ParallelContext *pcxt)
 void
 ExecHashInitializeWorker(HashState *node, ParallelWorkerContext *pwcxt)
 {
-	SharedHashInfo *shared_info;
-
 	/* don't need this if not instrumenting */
 	if (!node->ps.instrument)
 		return;
@@ -2873,9 +2858,10 @@ ExecHashInitializeWorker(HashState *node, ParallelWorkerContext *pwcxt)
 	 * we'll accumulate stats there when shutting down or rebuilding the hash
 	 * table.
 	 */
-	shared_info = (SharedHashInfo *)
-		shm_toc_lookup(pwcxt->toc, node->ps.plan->plan_node_id, false);
-	node->hinstrument = &shared_info->hinstrument[ParallelWorkerNumber];
+	node->shared_info =
+		ExecInstrInitWorker(pwcxt->toc, node->ps.plan->plan_node_id, false);
+	node->hinstrument = GetWorkerInstr(node->shared_info, HashInstrumentation,
+									   ParallelWorkerNumber);
 }
 
 /*
@@ -2903,17 +2889,10 @@ ExecShutdownHash(HashState *node)
 void
 ExecHashRetrieveInstrumentation(HashState *node)
 {
-	SharedHashInfo *shared_info = node->shared_info;
-	size_t		size;
-
-	if (shared_info == NULL)
-		return;
-
 	/* Replace node->shared_info with a copy in backend-local memory. */
-	size = offsetof(SharedHashInfo, hinstrument) +
-		shared_info->num_workers * sizeof(HashInstrumentation);
-	node->shared_info = palloc(size);
-	memcpy(node->shared_info, shared_info, size);
+	node->shared_info =
+		ExecInstrRetrieve(node->shared_info,
+						  sizeof(HashInstrumentation));
 }
 
 /*

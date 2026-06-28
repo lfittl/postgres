@@ -118,7 +118,7 @@ table_beginscan_catalog(Relation relation, int nkeys, ScanKeyData *key)
 	Snapshot	snapshot = RegisterSnapshot(GetCatalogSnapshot(relid));
 
 	return table_beginscan_common(relation, snapshot, nkeys, key,
-								  NULL, flags, SO_NONE);
+								  NULL, NULL, flags, SO_NONE);
 }
 
 
@@ -164,6 +164,7 @@ table_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan,
 
 TableScanDesc
 table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan,
+						 struct TableScanInstrumentation *instrument,
 						 uint32 flags)
 {
 	Snapshot	snapshot;
@@ -186,12 +187,13 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan,
 	}
 
 	return table_beginscan_common(relation, snapshot, 0, NULL,
-								  pscan, internal_flags, flags);
+								  pscan, instrument, internal_flags, flags);
 }
 
 TableScanDesc
 table_beginscan_parallel_tidrange(Relation relation,
 								  ParallelTableScanDesc pscan,
+								  struct TableScanInstrumentation *instrument,
 								  uint32 flags)
 {
 	Snapshot	snapshot;
@@ -217,7 +219,7 @@ table_beginscan_parallel_tidrange(Relation relation,
 	}
 
 	sscan = table_beginscan_common(relation, snapshot, 0, NULL,
-								   pscan, internal_flags, flags);
+								   pscan, instrument, internal_flags, flags);
 	return sscan;
 }
 

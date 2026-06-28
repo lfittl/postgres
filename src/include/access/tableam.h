@@ -361,6 +361,7 @@ typedef struct TableAmRoutine
 								 Snapshot snapshot,
 								 int nkeys, ScanKeyData *key,
 								 ParallelTableScanDesc pscan,
+								 struct TableScanInstrumentation *instrument,
 								 uint32 flags);
 
 	/*
@@ -916,6 +917,7 @@ extern TupleTableSlot *table_slot_create(Relation relation, List **reglist);
 static TableScanDesc
 table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 					   ScanKeyData *key, ParallelTableScanDesc pscan,
+					   struct TableScanInstrumentation *instrument,
 					   uint32 flags, uint32 user_flags)
 {
 	Assert((user_flags & SO_INTERNAL_FLAGS) == 0);
@@ -930,7 +932,8 @@ table_beginscan_common(Relation rel, Snapshot snapshot, int nkeys,
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "scan started during logical decoding");
 
-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan, flags);
+	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, pscan,
+									   instrument, flags);
 }
 
 /*
@@ -947,7 +950,29 @@ table_beginscan(Relation rel, Snapshot snapshot,
 		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
-								  internal_flags, flags);
+								  NULL, internal_flags, flags);
+}
+
+/*
+ * Like table_beginscan(), but lets the caller provide the location where I/O
+ * instrumentation should be accumulated.  When SO_SCAN_INSTRUMENT is set the
+ * caller must supply this (the scan node's own storage, or a parallel worker's
+ * slot in shared memory); the scan AM never allocates instrumentation itself.
+ * This is a separate entry point so that the many uninstrumented callers of
+ * table_beginscan() are unaffected; it mirrors the dedicated instrument
+ * argument that index_beginscan() already takes.
+ */
+static inline TableScanDesc
+table_beginscan_instrument(Relation rel, Snapshot snapshot,
+						   int nkeys, ScanKeyData *key,
+						   struct TableScanInstrumentation *instrument,
+						   uint32 flags)
+{
+	uint32		internal_flags = SO_TYPE_SEQSCAN |
+		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+
+	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
+								  instrument, internal_flags, flags);
 }
 
 /*
@@ -977,7 +1002,7 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
 		flags |= SO_ALLOW_SYNC;
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
-								  flags, SO_NONE);
+								  NULL, flags, SO_NONE);
 }
 
 /*
@@ -990,12 +1015,13 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
  */
 static inline TableScanDesc
 table_beginscan_bm(Relation rel, Snapshot snapshot,
-				   int nkeys, ScanKeyData *key, uint32 flags)
+				   int nkeys, ScanKeyData *key,
+				   struct TableScanInstrumentation *instrument, uint32 flags)
 {
 	uint32		internal_flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
-								  internal_flags, flags);
+								  instrument, internal_flags, flags);
 }
 
 /*
@@ -1023,7 +1049,7 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
 		internal_flags |= SO_ALLOW_PAGEMODE;
 
 	return table_beginscan_common(rel, snapshot, nkeys, key, NULL,
-								  internal_flags, flags);
+								  NULL, internal_flags, flags);
 }
 
 /*
@@ -1037,7 +1063,7 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
 	uint32		flags = SO_TYPE_TIDSCAN;
 
 	return table_beginscan_common(rel, snapshot, 0, NULL, NULL,
-								  flags, SO_NONE);
+								  NULL, flags, SO_NONE);
 }
 
 /*
@@ -1051,7 +1077,7 @@ table_beginscan_analyze(Relation rel)
 	uint32		flags = SO_TYPE_ANALYZE;
 
 	return table_beginscan_common(rel, NULL, 0, NULL, NULL,
-								  flags, SO_NONE);
+								  NULL, flags, SO_NONE);
 }
 
 /*
@@ -1118,13 +1144,15 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 static inline TableScanDesc
 table_beginscan_tidrange(Relation rel, Snapshot snapshot,
 						 ItemPointer mintid,
-						 ItemPointer maxtid, uint32 flags)
+						 ItemPointer maxtid,
+						 struct TableScanInstrumentation *instrument,
+						 uint32 flags)
 {
 	TableScanDesc sscan;
 	uint32		internal_flags = SO_TYPE_TIDRANGESCAN | SO_ALLOW_PAGEMODE;
 
 	sscan = table_beginscan_common(rel, snapshot, 0, NULL, NULL,
-								   internal_flags, flags);
+								   instrument, internal_flags, flags);
 
 	/* Set the range of TIDs to scan */
 	sscan->rs_rd->rd_tableam->scan_set_tidrange(sscan, mintid, maxtid);
@@ -1202,6 +1230,7 @@ extern void table_parallelscan_initialize(Relation rel,
  */
 extern TableScanDesc table_beginscan_parallel(Relation relation,
 											  ParallelTableScanDesc pscan,
+											  struct TableScanInstrumentation *instrument,
 											  uint32 flags);
 
 /*
@@ -1215,6 +1244,7 @@ extern TableScanDesc table_beginscan_parallel(Relation relation,
  */
 extern TableScanDesc table_beginscan_parallel_tidrange(Relation relation,
 													   ParallelTableScanDesc pscan,
+													   struct TableScanInstrumentation *instrument,
 													   uint32 flags);
 
 /*

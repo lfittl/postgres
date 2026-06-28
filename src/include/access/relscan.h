@@ -67,7 +67,9 @@ typedef struct TableScanDescData
 													 * information */
 
 	/*
-	 * Instrumentation counters maintained by all table AMs.
+	 * Instrumentation counters maintained by all table AMs.  This points at
+	 * caller-provided storage (the scan node's own storage, or a parallel
+	 * worker's slot in shared memory); the scan does not own it.
 	 */
 	struct TableScanInstrumentation *rs_instrument;
 } TableScanDescData;

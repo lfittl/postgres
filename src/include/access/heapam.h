@@ -350,6 +350,7 @@ typedef struct PruneFreezeResult
 extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
 									int nkeys, ScanKey key,
 									ParallelTableScanDesc parallel_scan,
+									struct TableScanInstrumentation *instrument,
 									uint32 flags);
 extern void heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk,
 							   BlockNumber numBlks);
