@@ -22,6 +22,7 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/relscan.h"
 #include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
@@ -409,6 +410,15 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 	node->biss_Instrument = GetWorkerInstr(node->biss_SharedInfo,
 										   IndexScanInstrumentation,
 										   ParallelWorkerNumber);
+
+	/*
+	 * Unlike a plain index scan, the bitmap index scan descriptor is created
+	 * eagerly in ExecInitBitmapIndexScan, before this runs, and it captured a
+	 * pointer to the now-freed local instrumentation.  Repoint it at the shared
+	 * slot so the AM writes there (and not into freed memory).
+	 */
+	if (node->biss_ScanDesc != NULL)
+		node->biss_ScanDesc->instrument = node->biss_Instrument;
 }
 
 /* ----------------------------------------------------------------
