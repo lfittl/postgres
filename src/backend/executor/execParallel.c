@@ -300,7 +300,7 @@ ExecInstrInitWorker(shm_toc *toc, uint64 key, bool missing_ok)
  * torn down.  Returns NULL if there was no instrumentation.
  */
 SharedWorkerInstrumentation *
-ExecInstrRetrieve(SharedWorkerInstrumentation * shared, Size elemsz)
+ExecInstrRetrieve(SharedWorkerInstrumentation *shared, Size elemsz)
 {
 	Size		size;
 	SharedWorkerInstrumentation *si;

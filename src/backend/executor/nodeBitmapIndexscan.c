@@ -399,11 +399,11 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 
 	/*
 	 * Write statistics straight into this worker's shared slot as the scan
-	 * runs, rather than into worker-local memory copied out at shutdown.
-	 * This has no write-side contention (one writer per slot) and lets the
-	 * leader observe progress mid-query.  The slot is not reset here: when
-	 * workers are relaunched (e.g. a rescanned Gather) the counts accumulate
-	 * across rounds.
+	 * runs, rather than into worker-local memory copied out at shutdown. This
+	 * has no write-side contention (one writer per slot) and lets the leader
+	 * observe progress mid-query.  The slot is not reset here: when workers
+	 * are relaunched (e.g. a rescanned Gather) the counts accumulate across
+	 * rounds.
 	 */
 	Assert(ParallelWorkerNumber < node->biss_SharedInfo->num_workers);
 	pfree(node->biss_Instrument);
@@ -414,8 +414,8 @@ ExecBitmapIndexScanInitializeWorker(BitmapIndexScanState *node,
 	/*
 	 * Unlike a plain index scan, the bitmap index scan descriptor is created
 	 * eagerly in ExecInitBitmapIndexScan, before this runs, and it captured a
-	 * pointer to the now-freed local instrumentation.  Repoint it at the shared
-	 * slot so the AM writes there (and not into freed memory).
+	 * pointer to the now-freed local instrumentation.  Repoint it at the
+	 * shared slot so the AM writes there (and not into freed memory).
 	 */
 	if (node->biss_ScanDesc != NULL)
 		node->biss_ScanDesc->instrument = node->biss_Instrument;

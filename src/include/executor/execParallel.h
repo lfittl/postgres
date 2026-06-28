@@ -50,11 +50,11 @@ extern void ParallelQueryMain(dsm_segment *seg, shm_toc *toc);
 
 /* Generic per-worker node instrumentation container helpers */
 extern void ExecInstrEstimate(ParallelContext *pcxt, Size elemsz);
-extern SharedWorkerInstrumentation * ExecInstrInitDSM(ParallelContext *pcxt,
-													  uint64 key, Size elemsz);
-extern SharedWorkerInstrumentation * ExecInstrInitWorker(shm_toc *toc,
-														 uint64 key, bool missing_ok);
-extern SharedWorkerInstrumentation * ExecInstrRetrieve(SharedWorkerInstrumentation * shared,
-													   Size elemsz);
+extern SharedWorkerInstrumentation *ExecInstrInitDSM(ParallelContext *pcxt,
+													 uint64 key, Size elemsz);
+extern SharedWorkerInstrumentation *ExecInstrInitWorker(shm_toc *toc,
+														uint64 key, bool missing_ok);
+extern SharedWorkerInstrumentation *ExecInstrRetrieve(SharedWorkerInstrumentation *shared,
+													  Size elemsz);
 
 #endif							/* EXECPARALLEL_H */

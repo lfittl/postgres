@@ -46,7 +46,7 @@ typedef struct SharedWorkerInstrumentation
 {
 	int			num_workers;
 	/* num_workers cache-line-padded slots follow; see GetWorkerInstr() */
-}			SharedWorkerInstrumentation;
+} SharedWorkerInstrumentation;
 
 /* DSM bytes needed for a container holding nworkers slots of elemsz bytes */
 static inline Size
@@ -58,7 +58,7 @@ SharedWorkerInstrSize(int nworkers, Size elemsz)
 
 /* Address of a given worker's slot (untyped) */
 static inline void *
-GetWorkerInstrSlot(SharedWorkerInstrumentation * si, Size elemsz, int worker)
+GetWorkerInstrSlot(SharedWorkerInstrumentation *si, Size elemsz, int worker)
 {
 	return (char *) si + CACHELINEALIGN(sizeof(SharedWorkerInstrumentation)) +
 		(Size) worker * CACHELINEALIGN(elemsz);
