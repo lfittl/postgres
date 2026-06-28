@@ -68,6 +68,7 @@
 
 #include "access/htup_details.h"
 #include "common/hashfn.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/nodeMemoize.h"
 #include "lib/ilist.h"
@@ -1066,8 +1067,8 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 	mstate->binary_mode = node->binary_mode;
 
 	/*
-	 * Zero the statistics counters.  Accumulate into the node's own storage by
-	 * default; a parallel worker will redirect this to its slot in shared
+	 * Zero the statistics counters.  Accumulate into the node's own storage
+	 * by default; a parallel worker will redirect this to its slot in shared
 	 * memory (see ExecMemoizeInitializeWorker).
 	 */
 	memset(&mstate->stats, 0, sizeof(MemoizeInstrumentation));
@@ -1188,16 +1189,11 @@ ExecEstimateCacheEntryOverheadBytes(double ntuples)
 void
 ExecMemoizeEstimate(MemoizeState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = mul_size(pcxt->nworkers, sizeof(MemoizeInstrumentation));
-	size = add_size(size, offsetof(SharedMemoizeInfo, sinstrument));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(MemoizeInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -1209,20 +1205,13 @@ ExecMemoizeEstimate(MemoizeState *node, ParallelContext *pcxt)
 void
 ExecMemoizeInitializeDSM(MemoizeState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedMemoizeInfo, sinstrument)
-		+ pcxt->nworkers * sizeof(MemoizeInstrumentation);
-	node->shared_info = shm_toc_allocate(pcxt->toc, size);
-	/* ensure any unfilled slots will contain zeroes */
-	memset(node->shared_info, 0, size);
-	node->shared_info->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id,
-				   node->shared_info);
+	node->shared_info = (SharedMemoizeInfo *)
+		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
+						 sizeof(MemoizeInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -1234,20 +1223,21 @@ ExecMemoizeInitializeDSM(MemoizeState *node, ParallelContext *pcxt)
 void
 ExecMemoizeInitializeWorker(MemoizeState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info =
-		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+	node->shared_info = (SharedMemoizeInfo *)
+		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 
 	/*
 	 * Accumulate statistics straight into this worker's slot in shared memory
-	 * as the scan runs, rather than copying them out at shutdown.  Seed the slot
-	 * from the node's initial counters; this also resets the slot if workers are
-	 * relaunched, so each round reports its own statistics.
+	 * as the scan runs, rather than copying them out at shutdown.  Seed the
+	 * slot from the node's initial counters; this also resets the slot if
+	 * workers are relaunched, so each round reports its own statistics.
 	 */
 	if (node->shared_info != NULL)
 	{
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
-		node->shared_info->sinstrument[ParallelWorkerNumber] = node->stats;
-		node->instr = &node->shared_info->sinstrument[ParallelWorkerNumber];
+		node->instr = GetWorkerInstr(node->shared_info, MemoizeInstrumentation,
+									 ParallelWorkerNumber);
+		*node->instr = node->stats;
 	}
 }
 
@@ -1260,15 +1250,7 @@ ExecMemoizeInitializeWorker(MemoizeState *node, ParallelWorkerContext *pwcxt)
 void
 ExecMemoizeRetrieveInstrumentation(MemoizeState *node)
 {
-	Size		size;
-	SharedMemoizeInfo *si;
-
-	if (node->shared_info == NULL)
-		return;
-
-	size = offsetof(SharedMemoizeInfo, sinstrument)
-		+ node->shared_info->num_workers * sizeof(MemoizeInstrumentation);
-	si = palloc(size);
-	memcpy(si, node->shared_info, size);
-	node->shared_info = si;
+	node->shared_info = (SharedMemoizeInfo *)
+		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+						  sizeof(MemoizeInstrumentation));
 }

@@ -1321,8 +1321,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		/*
 		 * The caller (the executor) always supplies the location where the
 		 * statistics should be accumulated -- the node's own storage, or a
-		 * parallel worker's slot in shared memory -- so the scan never owns the
-		 * instrumentation and never frees it.
+		 * parallel worker's slot in shared memory -- so the scan never owns
+		 * the instrumentation and never frees it.
 		 */
 		Assert(instrument != NULL);
 		scan->rs_base.rs_instrument = instrument;

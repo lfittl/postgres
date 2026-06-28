@@ -110,6 +110,7 @@ struct SharedExecutorInstrumentation
 	 * follows.
 	 */
 };
+
 /*
  * While the query runs, each parallel worker writes its per-node statistics
  * directly into its own slot in this array (indexed by ParallelWorkerNumber),
@@ -252,6 +253,67 @@ ExecSerializePlan(Plan *plan, EState *estate)
  * While we're at it, count the number of PlanState nodes in the tree, so
  * we know how many Instrumentation structures we need.
  */
+
+/*
+ * Generic helpers for per-worker node instrumentation containers.
+ *
+ * Many node types collect a fixed-size instrumentation struct per parallel
+ * worker in a SharedWorkerInstrumentation container (see instrument_node.h).
+ * These helpers factor out the identical estimate/allocate/lookup/retrieve
+ * plumbing; only the element size, the TOC key, and the gating conditions vary
+ * between nodes, and those stay in the per-node callers.
+ */
+
+/* Reserve DSM space (one chunk + one key) for the container. */
+void
+ExecInstrEstimate(ParallelContext *pcxt, Size elemsz)
+{
+	shm_toc_estimate_chunk(&pcxt->estimator,
+						   SharedWorkerInstrSize(pcxt->nworkers, elemsz));
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/* Allocate, zero, and publish the container under 'key'; returns it. */
+SharedWorkerInstrumentation *
+ExecInstrInitDSM(ParallelContext *pcxt, uint64 key, Size elemsz)
+{
+	Size		size = SharedWorkerInstrSize(pcxt->nworkers, elemsz);
+	SharedWorkerInstrumentation *si = shm_toc_allocate(pcxt->toc, size);
+
+	/* ensure any unfilled slots will contain zeroes */
+	memset(si, 0, size);
+	si->num_workers = pcxt->nworkers;
+	shm_toc_insert(pcxt->toc, key, si);
+	return si;
+}
+
+/* Worker side: look up the container previously published under 'key'. */
+SharedWorkerInstrumentation *
+ExecInstrInitWorker(shm_toc *toc, uint64 key, bool missing_ok)
+{
+	return (SharedWorkerInstrumentation *) shm_toc_lookup(toc, key, missing_ok);
+}
+
+/*
+ * Leader side: copy the container out of (soon to be freed) DSM into a
+ * backend-local copy, so EXPLAIN can read it after the parallel context is
+ * torn down.  Returns NULL if there was no instrumentation.
+ */
+SharedWorkerInstrumentation *
+ExecInstrRetrieve(SharedWorkerInstrumentation * shared, Size elemsz)
+{
+	Size		size;
+	SharedWorkerInstrumentation *si;
+
+	if (shared == NULL)
+		return NULL;
+
+	size = SharedWorkerInstrSize(shared->num_workers, elemsz);
+	si = palloc(size);
+	memcpy(si, shared, size);
+	return si;
+}
+
 static bool
 ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 {
@@ -873,10 +935,11 @@ ExecInitParallelPlan(PlanState *planstate, EState *estate,
 		instrumentation->num_plan_nodes = e.nnodes;
 
 		/*
-		 * Initialize each worker's slot.  Workers write into these directly as
-		 * the query runs and never reset them, so this must happen exactly once
-		 * (not on relaunch, where the slots accumulate across rounds).  The
-		 * async_mode flag is fixed up by each worker once it knows its node.
+		 * Initialize each worker's slot.  Workers write into these directly
+		 * as the query runs and never reset them, so this must happen exactly
+		 * once (not on relaunch, where the slots accumulate across rounds).
+		 * The async_mode flag is fixed up by each worker once it knows its
+		 * node.
 		 */
 		for (node = 0; node < e.nnodes; ++node)
 			for (worker = 0; worker < nworkers; ++worker)
@@ -1127,9 +1190,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		elog(ERROR, "plan node %d not found", plan_node_id);
 
 	/*
-	 * Accumulate the statistics from all workers.  The workers already flushed
-	 * their final cycle with InstrEndLoop before exiting, so no InstrEndLoop is
-	 * needed here.
+	 * Accumulate the statistics from all workers.  The workers already
+	 * flushed their final cycle with InstrEndLoop before exiting, so no
+	 * InstrEndLoop is needed here.
 	 */
 	for (n = 0; n < instrumentation->num_workers; ++n)
 		InstrAggNode(planstate->instrument,
@@ -1412,9 +1475,9 @@ ExecParallelRepointInstrumentation(PlanState *planstate,
 
 	/*
 	 * The leader initialized the slot's options but cannot know each node's
-	 * async mode, so carry that over from the local instrumentation.  We do not
-	 * otherwise reset the slot: when workers are relaunched (e.g. a rescanned
-	 * Gather) the slots accumulate across rounds.
+	 * async mode, so carry that over from the local instrumentation.  We do
+	 * not otherwise reset the slot: when workers are relaunched (e.g. a
+	 * rescanned Gather) the slots accumulate across rounds.
 	 */
 	slot->async_mode = planstate->instrument->async_mode;
 
@@ -1455,10 +1518,11 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 	switch (nodeTag(planstate))
 	{
 		case T_SeqScanState:
+
 			/*
 			 * Set up instrumentation first (even when not parallel-aware, for
-			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed at
-			 * the worker's shared I/O stats slot when it begins.
+			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed
+			 * at the worker's shared I/O stats slot when it begins.
 			 */
 			ExecSeqScanInstrumentInitWorker((SeqScanState *) planstate, pwcxt);
 			if (planstate->plan->parallel_aware)
@@ -1491,10 +1555,11 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 												pwcxt);
 			break;
 		case T_TidRangeScanState:
+
 			/*
 			 * Set up instrumentation first (even when not parallel-aware, for
-			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed at
-			 * the worker's shared I/O stats slot when it begins.
+			 * EXPLAIN ANALYZE) so that a parallel-aware scan can be pointed
+			 * at the worker's shared I/O stats slot when it begins.
 			 */
 			ExecTidRangeScanInstrumentInitWorker((TidRangeScanState *) planstate,
 												 pwcxt);
@@ -1624,9 +1689,9 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	ExecParallelInitializeWorker(queryDesc->planstate, &pwcxt);
 
 	/*
-	 * If instrumentation is enabled, point each node's instrumentation at this
-	 * worker's slot in shared memory so the executor writes statistics there
-	 * directly, with no copy needed at shutdown.
+	 * If instrumentation is enabled, point each node's instrumentation at
+	 * this worker's slot in shared memory so the executor writes statistics
+	 * there directly, with no copy needed at shutdown.
 	 */
 	if (instrumentation != NULL)
 		ExecParallelRepointInstrumentation(queryDesc->planstate, instrumentation);
@@ -1662,8 +1727,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 
 	/*
 	 * Finalize instrumentation if any instrumentation options are set.  The
-	 * statistics were written straight into shared memory during execution, so
-	 * this just flushes each node's final run cycle.
+	 * statistics were written straight into shared memory during execution,
+	 * so this just flushes each node's final run cycle.
 	 */
 	if (instrumentation != NULL)
 		ExecParallelFinishInstrumentation(queryDesc->planstate, NULL);

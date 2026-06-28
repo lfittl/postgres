@@ -225,7 +225,8 @@ ExecTidRangeScanIOStatsLocation(TidRangeScanState *node)
 	if (node->trss_sinstrument != NULL && IsParallelWorker())
 	{
 		Assert(ParallelWorkerNumber < node->trss_sinstrument->num_workers);
-		return &node->trss_sinstrument->sinstrument[ParallelWorkerNumber].stats;
+		return &GetWorkerInstr(node->trss_sinstrument, TidRangeScanInstrumentation,
+							   ParallelWorkerNumber)->stats;
 	}
 	return &node->stats;
 }
@@ -371,9 +372,9 @@ ExecEndTidRangeScan(TidRangeScanState *node)
 	TableScanDesc scan = node->ss.ss_currentScanDesc;
 
 	/*
-	 * In a parallel worker the scan wrote its I/O statistics straight into the
-	 * worker's shared-memory slot (see ExecTidRangeScanIOStatsLocation), so
-	 * there is nothing to collect here.
+	 * In a parallel worker the scan wrote its I/O statistics straight into
+	 * the worker's shared-memory slot (see ExecTidRangeScanIOStatsLocation),
+	 * so there is nothing to collect here.
 	 */
 
 	if (scan != NULL)
@@ -560,16 +561,11 @@ ExecTidRangeScanInstrumentEstimate(TidRangeScanState *node,
 								   ParallelContext *pcxt)
 {
 	EState	   *estate = node->ss.ps.state;
-	Size		size;
 
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
 		return;
 
-	size = add_size(offsetof(SharedTidRangeScanInstrumentation, sinstrument),
-					mul_size(pcxt->nworkers, sizeof(TidRangeScanInstrumentation)));
-
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(TidRangeScanInstrumentation));
 }
 
 /*
@@ -580,22 +576,15 @@ ExecTidRangeScanInstrumentInitDSM(TidRangeScanState *node,
 								  ParallelContext *pcxt)
 {
 	EState	   *estate = node->ss.ps.state;
-	SharedTidRangeScanInstrumentation *sinstrument;
-	Size		size;
 
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0 || pcxt->nworkers == 0)
 		return;
 
-	size = add_size(offsetof(SharedTidRangeScanInstrumentation, sinstrument),
-					mul_size(pcxt->nworkers, sizeof(TidRangeScanInstrumentation)));
-	sinstrument = shm_toc_allocate(pcxt->toc, size);
-	memset(sinstrument, 0, size);
-	sinstrument->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc,
-				   node->ss.ps.plan->plan_node_id +
-				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-				   sinstrument);
-	node->trss_sinstrument = sinstrument;
+	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
+		ExecInstrInitDSM(pcxt,
+						 node->ss.ps.plan->plan_node_id +
+						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+						 sizeof(TidRangeScanInstrumentation));
 }
 
 /*
@@ -610,10 +599,11 @@ ExecTidRangeScanInstrumentInitWorker(TidRangeScanState *node,
 	if ((estate->es_instrument & INSTRUMENT_IO) == 0)
 		return;
 
-	node->trss_sinstrument = shm_toc_lookup(pwcxt->toc,
-											node->ss.ps.plan->plan_node_id +
-											PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-											false);
+	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
+		ExecInstrInitWorker(pwcxt->toc,
+							node->ss.ps.plan->plan_node_id +
+							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+							false);
 }
 
 /*
@@ -622,15 +612,7 @@ ExecTidRangeScanInstrumentInitWorker(TidRangeScanState *node,
 void
 ExecTidRangeScanRetrieveInstrumentation(TidRangeScanState *node)
 {
-	SharedTidRangeScanInstrumentation *sinstrument = node->trss_sinstrument;
-	Size		size;
-
-	if (sinstrument == NULL)
-		return;
-
-	size = offsetof(SharedTidRangeScanInstrumentation, sinstrument)
-		+ sinstrument->num_workers * sizeof(TidRangeScanInstrumentation);
-
-	node->trss_sinstrument = palloc(size);
-	memcpy(node->trss_sinstrument, sinstrument, size);
+	node->trss_sinstrument = (SharedTidRangeScanInstrumentation *)
+		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->trss_sinstrument,
+						  sizeof(TidRangeScanInstrumentation));
 }

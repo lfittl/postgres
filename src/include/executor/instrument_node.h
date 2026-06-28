@@ -28,6 +28,48 @@
 #define PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET	UINT64CONST(0xD000000000000000)
 
 /* ---------------------
+ *	Generic shared container for per-worker node instrumentation
+ *
+ * Many node types collect a fixed-size instrumentation struct per parallel
+ * worker.  They all share the same shared-memory layout: a num_workers header
+ * followed by one slot per worker, which the worker writes directly during
+ * execution and the leader reads back for EXPLAIN.  This container, together
+ * with the ExecInstr* helpers in execParallel.c, factors out that common
+ * plumbing.  Each slot is padded to a cache line so concurrent writes from
+ * different workers don't share a cache line (false sharing); slots are
+ * therefore accessed via GetWorkerInstr(), never by plain array indexing.
+ *
+ * The per-node SharedXxx types below are thin typed views over this container.
+ * ---------------------
+ */
+typedef struct SharedWorkerInstrumentation
+{
+	int			num_workers;
+	/* num_workers cache-line-padded slots follow; see GetWorkerInstr() */
+}			SharedWorkerInstrumentation;
+
+/* DSM bytes needed for a container holding nworkers slots of elemsz bytes */
+static inline Size
+SharedWorkerInstrSize(int nworkers, Size elemsz)
+{
+	return CACHELINEALIGN(sizeof(SharedWorkerInstrumentation)) +
+		(Size) nworkers * CACHELINEALIGN(elemsz);
+}
+
+/* Address of a given worker's slot (untyped) */
+static inline void *
+GetWorkerInstrSlot(SharedWorkerInstrumentation * si, Size elemsz, int worker)
+{
+	return (char *) si + CACHELINEALIGN(sizeof(SharedWorkerInstrumentation)) +
+		(Size) worker * CACHELINEALIGN(elemsz);
+}
+
+/* Typed accessor for a worker's slot */
+#define GetWorkerInstr(si, typ, worker) \
+	((typ *) GetWorkerInstrSlot((SharedWorkerInstrumentation *) (si), \
+								sizeof(typ), (worker)))
+
+/* ---------------------
  *	Instrumentation information for aggregate function execution
  * ---------------------
  */
@@ -44,7 +86,7 @@ typedef struct AggregateInstrumentation
 typedef struct SharedAggInfo
 {
 	int			num_workers;
-	AggregateInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* AggregateInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedAggInfo;
 
 
@@ -113,7 +155,7 @@ typedef struct IndexScanInstrumentation
 typedef struct SharedIndexScanInstrumentation
 {
 	int			num_workers;
-	IndexScanInstrumentation winstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* IndexScanInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedIndexScanInstrumentation;
 
 
@@ -137,7 +179,7 @@ typedef struct BitmapHeapScanInstrumentation
 typedef struct SharedBitmapHeapInstrumentation
 {
 	int			num_workers;
-	BitmapHeapScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* BitmapHeapScanInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedBitmapHeapInstrumentation;
 
 
@@ -166,7 +208,7 @@ typedef struct MemoizeInstrumentation
 typedef struct SharedMemoizeInfo
 {
 	int			num_workers;
-	MemoizeInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* MemoizeInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedMemoizeInfo;
 
 
@@ -212,7 +254,7 @@ typedef struct TuplesortInstrumentation
 typedef struct SharedSortInfo
 {
 	int			num_workers;
-	TuplesortInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* TuplesortInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedSortInfo;
 
 
@@ -235,7 +277,7 @@ typedef struct HashInstrumentation
 typedef struct SharedHashInfo
 {
 	int			num_workers;
-	HashInstrumentation hinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* HashInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedHashInfo;
 
 
@@ -263,7 +305,7 @@ typedef struct IncrementalSortInfo
 typedef struct SharedIncrementalSortInfo
 {
 	int			num_workers;
-	IncrementalSortInfo sinfo[FLEXIBLE_ARRAY_MEMBER];
+	/* IncrementalSortInfo slots follow; access via GetWorkerInstr() */
 } SharedIncrementalSortInfo;
 
 
@@ -282,7 +324,7 @@ typedef struct SeqScanInstrumentation
 typedef struct SharedSeqScanInstrumentation
 {
 	int			num_workers;
-	SeqScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* SeqScanInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedSeqScanInstrumentation;
 
 
@@ -300,7 +342,7 @@ typedef struct TidRangeScanInstrumentation
 typedef struct SharedTidRangeScanInstrumentation
 {
 	int			num_workers;
-	TidRangeScanInstrumentation sinstrument[FLEXIBLE_ARRAY_MEMBER];
+	/* TidRangeScanInstrumentation slots follow; access via GetWorkerInstr() */
 } SharedTidRangeScanInstrumentation;
 
 #endif							/* INSTRUMENT_NODE_H */

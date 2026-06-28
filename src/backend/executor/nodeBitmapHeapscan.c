@@ -38,6 +38,7 @@
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "access/visibilitymap.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeBitmapHeapscan.h"
@@ -106,7 +107,8 @@ ExecBitmapHeapInstrumentation(BitmapHeapScanState *node)
 	if (node->sinstrument != NULL && IsParallelWorker())
 	{
 		Assert(ParallelWorkerNumber < node->sinstrument->num_workers);
-		return &node->sinstrument->sinstrument[ParallelWorkerNumber];
+		return GetWorkerInstr(node->sinstrument, BitmapHeapScanInstrumentation,
+							  ParallelWorkerNumber);
 	}
 	return &node->stats;
 }
@@ -592,15 +594,10 @@ void
 ExecBitmapHeapInstrumentEstimate(BitmapHeapScanState *node,
 								 ParallelContext *pcxt)
 {
-	Size		size;
-
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = add_size(offsetof(SharedBitmapHeapInstrumentation, sinstrument),
-					mul_size(pcxt->nworkers, sizeof(BitmapHeapScanInstrumentation)));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(BitmapHeapScanInstrumentation));
 }
 
 /*
@@ -610,23 +607,14 @@ void
 ExecBitmapHeapInstrumentInitDSM(BitmapHeapScanState *node,
 								ParallelContext *pcxt)
 {
-	Size		size;
-
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = add_size(offsetof(SharedBitmapHeapInstrumentation, sinstrument),
-					mul_size(pcxt->nworkers, sizeof(BitmapHeapScanInstrumentation)));
-	node->sinstrument =
-		(SharedBitmapHeapInstrumentation *) shm_toc_allocate(pcxt->toc, size);
-
-	/* Each per-worker area must start out as zeroes */
-	memset(node->sinstrument, 0, size);
-	node->sinstrument->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc,
-				   node->ss.ps.plan->plan_node_id +
-				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-				   node->sinstrument);
+	node->sinstrument = (SharedBitmapHeapInstrumentation *)
+		ExecInstrInitDSM(pcxt,
+						 node->ss.ps.plan->plan_node_id +
+						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+						 sizeof(BitmapHeapScanInstrumentation));
 }
 
 /*
@@ -640,10 +628,10 @@ ExecBitmapHeapInstrumentInitWorker(BitmapHeapScanState *node,
 		return;
 
 	node->sinstrument = (SharedBitmapHeapInstrumentation *)
-		shm_toc_lookup(pwcxt->toc,
-					   node->ss.ps.plan->plan_node_id +
-					   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-					   false);
+		ExecInstrInitWorker(pwcxt->toc,
+							node->ss.ps.plan->plan_node_id +
+							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+							false);
 }
 
 /* ----------------------------------------------------------------
@@ -655,15 +643,7 @@ ExecBitmapHeapInstrumentInitWorker(BitmapHeapScanState *node,
 void
 ExecBitmapHeapRetrieveInstrumentation(BitmapHeapScanState *node)
 {
-	SharedBitmapHeapInstrumentation *sinstrument = node->sinstrument;
-	Size		size;
-
-	if (sinstrument == NULL)
-		return;
-
-	size = offsetof(SharedBitmapHeapInstrumentation, sinstrument)
-		+ sinstrument->num_workers * sizeof(BitmapHeapScanInstrumentation);
-
-	node->sinstrument = palloc(size);
-	memcpy(node->sinstrument, sinstrument, size);
+	node->sinstrument = (SharedBitmapHeapInstrumentation *)
+		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->sinstrument,
+						  sizeof(BitmapHeapScanInstrumentation));
 }

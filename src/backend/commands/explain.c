@@ -3150,7 +3150,8 @@ show_sort_info(SortState *sortstate, ExplainState *es)
 			const char *spaceType;
 			int64		spaceUsed;
 
-			sinstrument = &sortstate->shared_info->sinstrument[n];
+			sinstrument = GetWorkerInstr(sortstate->shared_info,
+										 TuplesortInstrumentation, n);
 			if (sinstrument->sortMethod == SORT_TYPE_STILL_IN_PROGRESS)
 				continue;		/* ignore any unfilled slots */
 			sortMethod = tuplesort_method_name(sinstrument->sortMethod);
@@ -3345,7 +3346,7 @@ show_incremental_sort_info(IncrementalSortState *incrsortstate,
 		for (n = 0; n < incrsortstate->shared_info->num_workers; n++)
 		{
 			IncrementalSortInfo *incsort_info =
-				&incrsortstate->shared_info->sinfo[n];
+				GetWorkerInstr(incrsortstate->shared_info, IncrementalSortInfo, n);
 
 			/*
 			 * If a worker hasn't processed any sort groups at all, then
@@ -3421,7 +3422,8 @@ show_hash_info(HashState *hashstate, ExplainState *es)
 
 		for (i = 0; i < shared_info->num_workers; ++i)
 		{
-			HashInstrumentation *worker_hi = &shared_info->hinstrument[i];
+			HashInstrumentation *worker_hi = GetWorkerInstr(shared_info,
+															HashInstrumentation, i);
 
 			hinstrument.nbuckets = Max(hinstrument.nbuckets,
 									   worker_hi->nbuckets);
@@ -3697,7 +3699,7 @@ show_memoize_info(MemoizeState *mstate, List *ancestors, ExplainState *es)
 	{
 		MemoizeInstrumentation *si;
 
-		si = &mstate->shared_info->sinstrument[n];
+		si = GetWorkerInstr(mstate->shared_info, MemoizeInstrumentation, n);
 
 		/*
 		 * Skip workers that didn't do any work.  We needn't bother checking
@@ -3827,7 +3829,8 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 			uint64		hash_disk_used;
 			int			hash_batches_used;
 
-			sinstrument = &aggstate->shared_info->sinstrument[n];
+			sinstrument = GetWorkerInstr(aggstate->shared_info,
+										 AggregateInstrumentation, n);
 			/* Skip workers that didn't do anything */
 			if (sinstrument->hash_mem_peak == 0)
 				continue;
@@ -3916,7 +3919,8 @@ show_indexsearches_info(PlanState *planstate, ExplainState *es)
 	{
 		for (int i = 0; i < SharedInfo->num_workers; ++i)
 		{
-			IndexScanInstrumentation *winstrument = &SharedInfo->winstrument[i];
+			IndexScanInstrumentation *winstrument =
+				GetWorkerInstr(SharedInfo, IndexScanInstrumentation, i);
 
 			nsearches += winstrument->nsearches;
 		}
@@ -3960,7 +3964,9 @@ show_tidbitmap_info(BitmapHeapScanState *planstate, ExplainState *es)
 	{
 		for (int n = 0; n < planstate->sinstrument->num_workers; n++)
 		{
-			BitmapHeapScanInstrumentation *si = &planstate->sinstrument->sinstrument[n];
+			BitmapHeapScanInstrumentation *si =
+				GetWorkerInstr(planstate->sinstrument,
+							   BitmapHeapScanInstrumentation, n);
 
 			if (si->exact_pages == 0 && si->lossy_pages == 0)
 				continue;
@@ -4091,7 +4097,9 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 				{
 					for (int i = 0; i < sinstrument->num_workers; ++i)
 					{
-						BitmapHeapScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
+						BitmapHeapScanInstrumentation *winstrument =
+							GetWorkerInstr(sinstrument,
+										   BitmapHeapScanInstrumentation, i);
 
 						AccumulateIOStats(&stats, &winstrument->stats.io);
 
@@ -4115,7 +4123,8 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 				{
 					for (int i = 0; i < sinstrument->num_workers; ++i)
 					{
-						SeqScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
+						SeqScanInstrumentation *winstrument =
+							GetWorkerInstr(sinstrument, SeqScanInstrumentation, i);
 
 						AccumulateIOStats(&stats, &winstrument->stats.io);
 
@@ -4139,7 +4148,9 @@ show_scan_io_usage(ScanState *planstate, ExplainState *es)
 				{
 					for (int i = 0; i < sinstrument->num_workers; ++i)
 					{
-						TidRangeScanInstrumentation *winstrument = &sinstrument->sinstrument[i];
+						TidRangeScanInstrumentation *winstrument =
+							GetWorkerInstr(sinstrument,
+										   TidRangeScanInstrumentation, i);
 
 						AccumulateIOStats(&stats, &winstrument->stats.io);
 

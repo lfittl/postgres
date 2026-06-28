@@ -255,6 +255,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
+#include "executor/execParallel.h"
 #include "executor/execExpr.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
@@ -3316,8 +3317,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->ss.ps.ExecProcNode = ExecAgg;
 
 	/*
-	 * Accumulate hash instrumentation into the node's own storage by default; a
-	 * parallel worker redirects this to its slot in shared memory (see
+	 * Accumulate hash instrumentation into the node's own storage by default;
+	 * a parallel worker redirects this to its slot in shared memory (see
 	 * ExecAggInitializeWorker).
 	 */
 	aggstate->instr = &aggstate->stats;
@@ -4409,8 +4410,8 @@ ExecEndAgg(AggState *node)
 
 	/*
 	 * In a parallel worker the hash statistics were accumulated directly into
-	 * the worker's slot in shared memory (node->instr), so nothing needs to be
-	 * copied here.
+	 * the worker's slot in shared memory (node->instr), so nothing needs to
+	 * be copied here.
 	 */
 
 	/* Make sure we have closed any open tuplesorts */
@@ -4777,16 +4778,11 @@ AggRegisterCallback(FunctionCallInfo fcinfo,
 void
 ExecAggEstimate(AggState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = mul_size(pcxt->nworkers, sizeof(AggregateInstrumentation));
-	size = add_size(size, offsetof(SharedAggInfo, sinstrument));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(AggregateInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -4798,20 +4794,13 @@ ExecAggEstimate(AggState *node, ParallelContext *pcxt)
 void
 ExecAggInitializeDSM(AggState *node, ParallelContext *pcxt)
 {
-	Size		size;
-
 	/* don't need this if not instrumenting or no workers */
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = offsetof(SharedAggInfo, sinstrument)
-		+ pcxt->nworkers * sizeof(AggregateInstrumentation);
-	node->shared_info = shm_toc_allocate(pcxt->toc, size);
-	/* ensure any unfilled slots will contain zeroes */
-	memset(node->shared_info, 0, size);
-	node->shared_info->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id,
-				   node->shared_info);
+	node->shared_info = (SharedAggInfo *)
+		ExecInstrInitDSM(pcxt, node->ss.ps.plan->plan_node_id,
+						 sizeof(AggregateInstrumentation));
 }
 
 /* ----------------------------------------------------------------
@@ -4823,21 +4812,22 @@ ExecAggInitializeDSM(AggState *node, ParallelContext *pcxt)
 void
 ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt)
 {
-	node->shared_info =
-		shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
+	node->shared_info = (SharedAggInfo *)
+		ExecInstrInitWorker(pwcxt->toc, node->ss.ps.plan->plan_node_id, true);
 
 	/*
 	 * Accumulate hash statistics straight into this worker's slot in shared
-	 * memory as the aggregation runs, rather than copying them out at shutdown.
-	 * Carry over any values already initialized in ExecInitAgg (notably
-	 * hash_batches_used = 1); this also resets the slot if workers are
-	 * relaunched, so each round reports its own statistics.
+	 * memory as the aggregation runs, rather than copying them out at
+	 * shutdown. Carry over any values already initialized in ExecInitAgg
+	 * (notably hash_batches_used = 1); this also resets the slot if workers
+	 * are relaunched, so each round reports its own statistics.
 	 */
 	if (node->shared_info != NULL)
 	{
 		Assert(ParallelWorkerNumber < node->shared_info->num_workers);
-		node->shared_info->sinstrument[ParallelWorkerNumber] = node->stats;
-		node->instr = &node->shared_info->sinstrument[ParallelWorkerNumber];
+		node->instr = GetWorkerInstr(node->shared_info, AggregateInstrumentation,
+									 ParallelWorkerNumber);
+		*node->instr = node->stats;
 	}
 }
 
@@ -4850,15 +4840,7 @@ ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt)
 void
 ExecAggRetrieveInstrumentation(AggState *node)
 {
-	Size		size;
-	SharedAggInfo *si;
-
-	if (node->shared_info == NULL)
-		return;
-
-	size = offsetof(SharedAggInfo, sinstrument)
-		+ node->shared_info->num_workers * sizeof(AggregateInstrumentation);
-	si = palloc(size);
-	memcpy(si, node->shared_info, size);
-	node->shared_info = si;
+	node->shared_info = (SharedAggInfo *)
+		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->shared_info,
+						  sizeof(AggregateInstrumentation));
 }

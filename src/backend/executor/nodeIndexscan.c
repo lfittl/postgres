@@ -33,6 +33,7 @@
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "catalog/pg_am.h"
+#include "executor/execParallel.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeIndexscan.h"
@@ -800,9 +801,10 @@ ExecEndIndexScan(IndexScanState *node)
 	indexScanDesc = node->iss_ScanDesc;
 
 	/*
-	 * In a parallel worker iss_Instrument points directly at the worker's slot
-	 * in shared memory (see ExecIndexScanInstrumentInitWorker), so the stats are
-	 * already where the leader will read them; nothing to copy here.
+	 * In a parallel worker iss_Instrument points directly at the worker's
+	 * slot in shared memory (see ExecIndexScanInstrumentInitWorker), so the
+	 * stats are already where the leader will read them; nothing to copy
+	 * here.
 	 */
 
 	/*
@@ -1764,20 +1766,10 @@ void
 ExecIndexScanInstrumentEstimate(IndexScanState *node,
 								ParallelContext *pcxt)
 {
-	Size		size;
-
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	/*
-	 * This size calculation is trivial enough that we don't bother saving it
-	 * in the IndexScanState. We'll recalculate the needed size in
-	 * ExecIndexScanInstrumentInitDSM().
-	 */
-	size = add_size(offsetof(SharedIndexScanInstrumentation, winstrument),
-					mul_size(pcxt->nworkers, sizeof(IndexScanInstrumentation)));
-	shm_toc_estimate_chunk(&pcxt->estimator, size);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
+	ExecInstrEstimate(pcxt, sizeof(IndexScanInstrumentation));
 }
 
 /*
@@ -1787,23 +1779,14 @@ void
 ExecIndexScanInstrumentInitDSM(IndexScanState *node,
 							   ParallelContext *pcxt)
 {
-	Size		size;
-
 	if (!node->ss.ps.instrument || pcxt->nworkers == 0)
 		return;
 
-	size = add_size(offsetof(SharedIndexScanInstrumentation, winstrument),
-					mul_size(pcxt->nworkers, sizeof(IndexScanInstrumentation)));
-	node->iss_SharedInfo =
-		(SharedIndexScanInstrumentation *) shm_toc_allocate(pcxt->toc, size);
-
-	/* Each per-worker area must start out as zeroes */
-	memset(node->iss_SharedInfo, 0, size);
-	node->iss_SharedInfo->num_workers = pcxt->nworkers;
-	shm_toc_insert(pcxt->toc,
-				   node->ss.ps.plan->plan_node_id +
-				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-				   node->iss_SharedInfo);
+	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
+		ExecInstrInitDSM(pcxt,
+						 node->ss.ps.plan->plan_node_id +
+						 PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+						 sizeof(IndexScanInstrumentation));
 }
 
 /*
@@ -1817,22 +1800,24 @@ ExecIndexScanInstrumentInitWorker(IndexScanState *node,
 		return;
 
 	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
-		shm_toc_lookup(pwcxt->toc,
-					   node->ss.ps.plan->plan_node_id +
-					   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
-					   false);
+		ExecInstrInitWorker(pwcxt->toc,
+							node->ss.ps.plan->plan_node_id +
+							PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+							false);
 
 	/*
 	 * Write statistics straight into this worker's shared slot as the scan
-	 * runs, rather than into worker-local memory copied out at shutdown.  This
-	 * has no write-side contention (one writer per slot) and lets the leader
-	 * observe progress mid-query.  The slot is not reset here: when workers are
-	 * relaunched (e.g. a rescanned Gather) the counts accumulate across rounds.
+	 * runs, rather than into worker-local memory copied out at shutdown.
+	 * This has no write-side contention (one writer per slot) and lets the
+	 * leader observe progress mid-query.  The slot is not reset here: when
+	 * workers are relaunched (e.g. a rescanned Gather) the counts accumulate
+	 * across rounds.
 	 */
 	Assert(ParallelWorkerNumber < node->iss_SharedInfo->num_workers);
 	pfree(node->iss_Instrument);
-	node->iss_Instrument =
-		&node->iss_SharedInfo->winstrument[ParallelWorkerNumber];
+	node->iss_Instrument = GetWorkerInstr(node->iss_SharedInfo,
+										  IndexScanInstrumentation,
+										  ParallelWorkerNumber);
 }
 
 /* ----------------------------------------------------------------
@@ -1844,15 +1829,8 @@ ExecIndexScanInstrumentInitWorker(IndexScanState *node,
 void
 ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 {
-	SharedIndexScanInstrumentation *SharedInfo = node->iss_SharedInfo;
-	size_t		size;
-
-	if (SharedInfo == NULL)
-		return;
-
 	/* Create a copy of SharedInfo in backend-local memory */
-	size = offsetof(SharedIndexScanInstrumentation, winstrument) +
-		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
-	node->iss_SharedInfo = palloc(size);
-	memcpy(node->iss_SharedInfo, SharedInfo, size);
+	node->iss_SharedInfo = (SharedIndexScanInstrumentation *)
+		ExecInstrRetrieve((SharedWorkerInstrumentation *) node->iss_SharedInfo,
+						  sizeof(IndexScanInstrumentation));
 }
