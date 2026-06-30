@@ -14,6 +14,7 @@
 #ifndef QUERYJUMBLE_H
 #define QUERYJUMBLE_H
 
+#include "common/hashfn_unstable.h"
 #include "nodes/parsenodes.h"
 
 /*
@@ -37,11 +38,8 @@ typedef struct LocationLen
  */
 typedef struct JumbleState
 {
-	/* Jumble of current query tree */
-	unsigned char *jumble;
-
-	/* Number of bytes used in jumble[] */
-	Size		jumble_len;
+	/* Streaming hash state for the current query jumble */
+	fasthash_state jumble;
 
 	/* Array of locations of constants that should be removed */
 	LocationLen *clocations;
@@ -66,13 +64,13 @@ typedef struct JumbleState
 
 	/*
 	 * Count of the number of NULL nodes seen since last appending a value.
-	 * These are flushed out to the jumble buffer before subsequent appends
-	 * and before performing the final jumble hash.
+	 * These are flushed out to the jumble hash before subsequent appends and
+	 * before performing the final jumble hash.
 	 */
 	unsigned int pending_nulls;
 
 #ifdef USE_ASSERT_CHECKING
-	/* The total number of bytes added to the jumble buffer */
+	/* The total number of bytes added to the jumble */
 	Size		total_jumble_len;
 #endif
 } JumbleState;
