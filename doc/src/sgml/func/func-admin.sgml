@@ -187,6 +187,30 @@
       <row>
        <entry role="func_table_entry"><para role="func_signature">
         <indexterm>
+         <primary>pg_log_query_plan</primary>
+        </indexterm>
+        <function>pg_log_query_plan</function> ( <parameter>pid</parameter> <type>integer</type> )
+        <returnvalue>boolean</returnvalue>
+       </para>
+       <para>
+        Requests to log the plan of the query currently running on the
+        backend with specified process ID.
+        It will be logged at <literal>LOG</literal> message level and
+        will appear in the server log based on the log
+        configuration set (See <xref linkend="runtime-config-logging"/>
+        for more information), but will not be sent to the client
+        regardless of <xref linkend="guc-client-min-messages"/>.
+       </para>
+       <para>
+        This function is restricted to superusers by default, but other
+        users can be granted EXECUTE to run the function.
+       </para></entry>
+      </row>
+
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
          <primary>pg_reload_conf</primary>
         </indexterm>
         <function>pg_reload_conf</function> ()
