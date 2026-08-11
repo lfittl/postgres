@@ -151,6 +151,7 @@ CreateExecutorState(void)
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
+	estate->es_query_instr = NULL;
 	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
@@ -226,6 +227,15 @@ FreeExecutorState(EState *estate)
 		DestroyPartitionDirectory(estate->es_partition_directory);
 		estate->es_partition_directory = NULL;
 	}
+
+	/*
+	 * Make sure the instrumentation context gets freed. This usually gets
+	 * re-parented under the per-query context in InstrQueryStopFinalize, but
+	 * that won't happen during EXPLAIN (BUFFERS) since ExecutorFinish never
+	 * gets called, so we would otherwise leak it in TopMemoryContext.
+	 */
+	if (estate->es_query_instr && estate->es_query_instr->instr.need_stack)
+		MemoryContextDelete(estate->es_query_instr->instr_cxt);
 
 	/*
 	 * Free the per-query memory context, thereby releasing all working
@@ -913,7 +923,8 @@ ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 					  resultRelationDesc,
 					  rti,
 					  NULL,
-					  estate->es_instrument);
+					  estate->es_instrument,
+					  estate->es_query_instr);
 
 	if (estate->es_result_relations == NULL)
 		estate->es_result_relations = (ResultRelInfo **)
