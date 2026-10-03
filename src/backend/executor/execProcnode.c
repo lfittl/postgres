@@ -847,6 +847,20 @@ ExecFinalizeNodeInstrumentation_walker(PlanState *node, void *context)
 	planstate_tree_walker(node, ExecFinalizeNodeInstrumentation_walker,
 						  &node->instrument->instr);
 
+	/* IndexScan/IndexOnlyScan have a separate entry to track table access */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr, &node->instrument->instr);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr, &node->instrument->instr);
+	}
+
 	InstrFinalizeChild(&node->instrument->instr, parent);
 
 	return false;
@@ -861,6 +875,26 @@ ExecFinalizeNodeInstrumentationFlat_walker(PlanState *node, void *context)
 	Assert(node->instrument != NULL);
 
 	InstrFinalizeChild(&node->instrument->instr, (Instrumentation *) context);
+
+	/*
+	 * IndexScan/IndexOnlyScan have a separate entry to track table access,
+	 * which also needs to be accounted for in the target.  (The leader gets
+	 * the per-worker copy of this entry via SharedIndexScanInstrumentation.)
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
 
 	return planstate_tree_walker(node,
 								 ExecFinalizeNodeInstrumentationFlat_walker,
@@ -920,6 +954,38 @@ ExecFinalizeWorkerInstrumentation_walker(PlanState *node, void *context)
 		return false;
 
 	num_workers = node->worker_instrument->num_workers;
+
+	/*
+	 * Fold per-worker IndexScan/IndexOnlyScan table buffer stats into the
+	 * per-worker node stats, matching what ExecFinalizeNodeInstrumentation
+	 * does for the leader.
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		if (iss->iss_SharedInfo)
+		{
+			int			nworkers = Min(num_workers, iss->iss_SharedInfo->num_workers);
+
+			for (int n = 0; n < nworkers; n++)
+				InstrAccumStack(&node->worker_instrument->instrument[n].instr,
+								&iss->iss_SharedInfo->winstrument[n].table_instr);
+		}
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		if (ioss->ioss_SharedInfo)
+		{
+			int			nworkers = Min(num_workers, ioss->ioss_SharedInfo->num_workers);
+
+			for (int n = 0; n < nworkers; n++)
+				InstrAccumStack(&node->worker_instrument->instrument[n].instr,
+								&ioss->ioss_SharedInfo->winstrument[n].table_instr);
+		}
+	}
 
 	/* Accumulate this node's per-worker stats to parent's per-worker stats */
 	if (parent && parent->worker_instrument)
