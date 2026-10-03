@@ -821,6 +821,7 @@ ExecEndIndexScan(IndexScanState *node)
 		 */
 		winstrument->nsearches += node->iss_Instrument->nsearches;
 		Assert(node->iss_Instrument->ntabletuplefetches == 0);
+		InstrAccumStack(&winstrument->table_instr, &node->iss_Instrument->table_instr);
 	}
 
 	/*
@@ -983,7 +984,21 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation of index scans if requested */
 	if (estate->es_instrument)
-		indexstate->iss_Instrument = palloc0_object(IndexScanInstrumentation);
+	{
+		indexstate->iss_Instrument = MemoryContextAllocZero(estate->es_query_instr->instr_cxt, sizeof(IndexScanInstrumentation));
+
+		/*
+		 * Track table and index access separately. We intentionally don't
+		 * collect timing (even if enabled), since we don't need it, and
+		 * the table AM calls InstrPushStack / InstrPopStack around its table
+		 * fetches (instead of the full InstrNode*) to reduce overhead.
+		 */
+		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			InstrInitOptions(&indexstate->iss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			InstrQueryRememberChild(estate->es_query_instr, &indexstate->iss_Instrument->table_instr);
+		}
+	}
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -1853,4 +1868,11 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
+
+	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
+	{
+		InstrAccumStack(&node->iss_Instrument->table_instr,
+						&node->iss_SharedInfo->winstrument[i].table_instr);
+	}
 }
