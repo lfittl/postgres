@@ -217,12 +217,19 @@ extern PGDLLIMPORT WalUsage pgWalUsage;
  * at query end.
  *
  * In a parallel query leader this also includes the usage reported back by
- * parallel workers, since that gets accumulated into the leader's stack. Note
- * that the workers account for their own activity in their own instr_top as
- * well, which a session-level consumer that must count activity exactly once
- * (such as the cumulative statistics system) needs to take into account.
+ * parallel workers, since that gets accumulated into the leader's stack. As
+ * the workers account for their own activity in their own instr_top as well,
+ * a session-level consumer that must count activity exactly once (such as the
+ * cumulative statistics system) has to subtract instr_from_workers.
  */
 extern PGDLLIMPORT Instrumentation instr_top;
+
+/*
+ * Running total of the WAL/buffer usage imported from parallel workers into
+ * this process' instrumentation stack (and thus eventually into instr_top).
+ * Updated through InstrAccumWorkerUsage, only the usage fields are used.
+ */
+extern PGDLLIMPORT Instrumentation instr_from_workers;
 
 /*
  * The instrumentation stack state. The 'current' field points to the
@@ -289,6 +296,8 @@ extern void InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentatio
 pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, Instrumentation *dst);
 extern void InstrAccumParallelQuery(Instrumentation *instr);
+extern void InstrAccumWorkerUsage(const BufferUsage *bufusage,
+								  const WalUsage *walusage);
 
 extern NodeInstrumentation *InstrAllocNode(QueryInstrumentation *qinstr,
 										   int instrument_options,

@@ -26,6 +26,7 @@
 
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
+Instrumentation instr_from_workers;
 InstrStackState instr_stack = {
 	.stack_space = 0,
 	.stack_size = 0,
@@ -377,6 +378,20 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, Instrumentation *dst)
 }
 
 /*
+ * Record WAL/buffer usage imported from a parallel worker.
+ *
+ * Must be called wherever a worker's usage gets added to this process' stack,
+ * at the same time as that addition, so that instr_top and instr_from_workers
+ * never disagree (even if an error occurs in between imports).
+ */
+void
+InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
+{
+	BufferUsageAdd(&instr_from_workers.bufusage, bufusage);
+	WalUsageAdd(&instr_from_workers.walusage, walusage);
+}
+
+/*
  * Accumulate work done by parallel workers in the leader's stats.
  *
  * Note that what gets added here effectively depends on whether per-node
@@ -392,6 +407,7 @@ void
 InstrAccumParallelQuery(Instrumentation *instr)
 {
 	InstrAccumStack(instr_stack.current, instr);
+	InstrAccumWorkerUsage(&instr->bufusage, &instr->walusage);
 
 	WalUsageAdd(&pgWalUsage, &instr->walusage);
 }

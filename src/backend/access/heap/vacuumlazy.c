@@ -636,8 +636,6 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 				new_rel_allfrozen;
 	PGRUsage	ru0;
 	TimestampTz starttime = 0;
-	PgStat_Counter startreadtime = 0,
-				startwritetime = 0;
 	QueryInstrumentation *instr = NULL;
 	ErrorContextCallback errcallback;
 	char	  **indnames = NULL;
@@ -649,11 +647,6 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	if (instrument)
 	{
 		pg_rusage_init(&ru0);
-		if (track_io_timing)
-		{
-			startreadtime = pgStatBlockReadTime;
-			startwritetime = pgStatBlockWriteTime;
-		}
 		instr = InstrQueryAlloc(INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
 		InstrQueryStart(instr);
 	}
@@ -1175,8 +1168,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			}
 			if (track_io_timing)
 			{
-				double		read_ms = (double) (pgStatBlockReadTime - startreadtime) / 1000;
-				double		write_ms = (double) (pgStatBlockWriteTime - startwritetime) / 1000;
+				double		read_ms = INSTR_TIME_GET_MILLISEC(bufferusage.shared_blk_read_time) +
+					INSTR_TIME_GET_MILLISEC(bufferusage.local_blk_read_time);
+				double		write_ms = INSTR_TIME_GET_MILLISEC(bufferusage.shared_blk_write_time) +
+					INSTR_TIME_GET_MILLISEC(bufferusage.local_blk_write_time);
 
 				appendStringInfo(&buf, _("I/O timings: read: %.3f ms, write: %.3f ms\n"),
 								 read_ms, write_ms);

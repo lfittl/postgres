@@ -229,7 +229,10 @@ also in case of errors, since its unfinalized entries end up in its instr_top
 through the abort handling.  The leader's instr_top additionally contains
 what it imported from workers, which a session-level consumer that must count
 activity exactly once, such as the cumulative statistics system, needs to
-exclude.
+exclude.  Everything imported is recorded in instr_from_workers
+(InstrAccumWorkerUsage) for that purpose; the leader updates its stack and
+instr_from_workers together, so they stay consistent even if an error occurs
+in between.
 
 
 Memory Handling
