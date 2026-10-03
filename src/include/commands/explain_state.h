@@ -56,6 +56,7 @@ typedef struct ExplainNodeUsage
 	bool		valid;			/* entry has been computed */
 	NodeInstrumentation stats;	/* leader + workers; buffer/WAL usage in here
 								 * is this node's own only */
+	BufferUsage table_bufusage; /* index scans: table access, leader + workers */
 	BufferUsage bufusage;		/* leader + workers, including children */
 	WalUsage	walusage;		/* ditto */
 	/* per-worker details, present for nodes run by parallel workers */

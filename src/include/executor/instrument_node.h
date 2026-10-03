@@ -18,6 +18,8 @@
 #ifndef INSTRUMENT_NODE_H
 #define INSTRUMENT_NODE_H
 
+#include "executor/instrument.h"
+
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
  * instrumentation. Instrumentation and parallel-awareness are independent, so
@@ -108,6 +110,15 @@ typedef struct IndexScanInstrumentation
 
 	/* Table tuples fetched count (incremented during index-only scans) */
 	uint64		ntabletuplefetches;
+
+	/*
+	 * Buffer/WAL usage of table accesses made on behalf of the index scan,
+	 * which EXPLAIN shows as "Table Buffers".  The table AM is responsible
+	 * for pushing this entry around such accesses when it is set up (see
+	 * heapam_indexscan.c); for a table AM that does not, they are counted
+	 * towards the scan node as a whole.
+	 */
+	Instrumentation table_instr;
 } IndexScanInstrumentation;
 
 /*
