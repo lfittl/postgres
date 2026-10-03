@@ -26,6 +26,7 @@
 
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
+Instrumentation instr_from_workers;
 InstrStackState instr_stack = {
 	.stack_space = 0,
 	.stack_size = 0,
@@ -408,6 +409,9 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
 void
 InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
 {
+	BufferUsageAdd(&instr_from_workers.bufusage, bufusage);
+	WalUsageAdd(&instr_from_workers.walusage, walusage);
+
 	WalUsageAdd(&pgWalUsage, walusage);
 }
 

@@ -227,6 +227,13 @@ extern PGDLLIMPORT WalUsage pgWalUsage;
 extern PGDLLIMPORT Instrumentation instr_top;
 
 /*
+ * Running total of the WAL/buffer usage imported from parallel workers into
+ * this process' instrumentation stack (and thus eventually into instr_top).
+ * Updated through InstrAccumWorkerUsage, only the usage fields are used.
+ */
+extern PGDLLIMPORT Instrumentation instr_from_workers;
+
+/*
  * The instrumentation stack state. The 'current' field points to the
  * currently active stack entry that is getting updated as activity happens,
  * and will be accumulated to parent stacks when it gets finalized by
