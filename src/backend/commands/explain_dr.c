@@ -236,6 +236,8 @@ serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
 
+	InstrFinalizeChild(&receiver->metrics.instr, instr_stack.current);
+
 	if (receiver->finfos)
 		pfree(receiver->finfos);
 	receiver->finfos = NULL;

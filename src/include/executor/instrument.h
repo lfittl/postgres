@@ -72,34 +72,29 @@ typedef enum InstrumentOption
 /*
  * Instrumentation base class for capturing time and WAL/buffer usage
  *
- * If used directly (InstrAlloc, or a zero initialized struct followed by
- * InstrInitOptions), WAL/buffer usage is measured by diffing the global
- * pgBufferUsage/pgWalUsage counters between InstrStart and InstrStop. This
- * is independent of the instrumentation stack and needs no special handling
- * for transaction aborts.
+ * If used directly:
+ * - Allocate on the stack and zero initialize the struct
+ * - Call InstrInitOptions to set instrumentation options
+ * - Call InstrStart before the activity you want to measure
+ * - Call InstrStop / InstrStopFinalize after the activity to capture totals
  *
- * Entries with need_stack set, as used by QueryInstrumentation and the node and
- * trigger instrumentation, are instead pushed onto the instrumentation stack by
- * InstrStart, so that all activity gets recorded directly in them (the diff
- * flags are ignored). The last stop call must then be to InstrStopFinalize, to
- * ensure parent stack entries get the accumulated totals. If there is risk of
- * transaction aborts you must call InstrStopFinalize in a PG_TRY/PG_FINALLY
- * block to avoid corrupting the instrumentation stack, or use
- * QueryInstrumentation, which handles aborts using the resource owner logic.
+ * InstrStart/InstrStop may be called multiple times. The last stop call must
+ * be to InstrStopFinalize to ensure parent stack entries get the accumulated
+ * totals. If there is risk of transaction aborts you must call
+ * InstrStopFinalize in a PG_TRY/PG_FINALLY block to avoid corrupting the
+ * instrumentation stack.
+ *
+ * In a query context use QueryInstrumentation instead, which handles aborts
+ * using the resource owner logic.
  */
 typedef struct Instrumentation
 {
 	/* Parameters set at creation: */
 	bool		need_timer;		/* true if we need timer data */
-	bool		need_bufusage;	/* true if we need buffer usage data */
-	bool		need_walusage;	/* true if we need WAL usage data */
-	bool		need_stack;		/* true if WAL/buffer usage is tracked via
-								 * instr_stack instead */
+	bool		need_stack;		/* true if we need WAL/buffer usage data */
 	/* Internal state keeping: */
 	bool		on_stack;		/* true if currently on instr_stack */
 	instr_time	starttime;		/* start time of last InstrStart */
-	BufferUsage bufusage_start; /* buffer usage at start (diff mode) */
-	WalUsage	walusage_start; /* WAL usage at start (diff mode) */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
 	BufferUsage bufusage;		/* total buffer usage */
@@ -213,12 +208,6 @@ typedef struct InstrStackState
 	Instrumentation *current;	/* top of stack, or &instr_top when empty */
 } InstrStackState;
 
-/*
- * Running totals of the current backend's buffer/WAL usage. These keep being
- * updated alongside the instrumentation stack, but new code should measure
- * activity through InstrStart/InstrStop (or instr_top) instead.
- */
-extern PGDLLIMPORT BufferUsage pgBufferUsage;
 extern PGDLLIMPORT WalUsage pgWalUsage;
 
 /*
@@ -284,7 +273,6 @@ InstrPopStack(Instrumentation *instr)
 	instr->on_stack = false;
 }
 
-extern Instrumentation *InstrAlloc(int instrument_options);
 extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr);
@@ -323,26 +311,20 @@ extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings);
 
 extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
-extern void BufferUsageAccumDiff(BufferUsage *dst,
-								 const BufferUsage *add, const BufferUsage *sub);
 extern void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
 
 #define INSTR_BUFUSAGE_INCR(fld) do { \
-		pgBufferUsage.fld++; \
 		instr_stack.current->bufusage.fld++; \
 	} while(0)
 #define INSTR_BUFUSAGE_ADD(fld,val) do { \
-		pgBufferUsage.fld += (val); \
 		instr_stack.current->bufusage.fld += (val); \
 	} while(0)
 #define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
-	INSTR_TIME_ADD(pgBufferUsage.fld, val); \
 	INSTR_TIME_ADD(instr_stack.current->bufusage.fld, val); \
 	} while (0)
 #define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
-	INSTR_TIME_ACCUM_DIFF(pgBufferUsage.fld, endval, startval); \
 	INSTR_TIME_ACCUM_DIFF(instr_stack.current->bufusage.fld, endval, startval); \
 	} while (0)
 
