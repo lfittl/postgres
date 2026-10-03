@@ -495,15 +495,18 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 		/*
 		 * Accumulate per-node and trigger statistics to the query entry.
 		 *
-		 * Parallel workers skip this: their per-node stats are reported
-		 * individually via ExecParallelReportInstrumentation and imported by
-		 * the leader from there (see InstrAccumWorkerNodeUsage), so
-		 * accounting for them in the query-level stats the leader receives
-		 * as well would double-count.
+		 * Parallel workers instead add each node's own stats directly to
+		 * their session totals (instr_top), bypassing the query entry: their
+		 * per-node stats are reported individually via
+		 * ExecParallelReportInstrumentation and imported by the leader from
+		 * there (see InstrAccumWorkerNodeUsage), so accounting for them in
+		 * the query-level stats the leader receives as well would
+		 * double-count.
 		 */
-		if (!IsParallelWorker() && estate->es_instrument)
+		if (estate->es_instrument)
 		{
 			ExecFinalizeNodeInstrumentation(queryDesc->planstate,
+											IsParallelWorker() ? &instr_top :
 											instr_stack.current);
 
 			ExecFinalizeTriggerInstrumentation(estate);

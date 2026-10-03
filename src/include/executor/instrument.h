@@ -390,6 +390,7 @@ extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr);
 extern void InstrStopFinalize(Instrumentation *instr);
+extern void InstrStackFinalizeAll(void);
 extern void InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent);
 extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 
