@@ -98,6 +98,8 @@ typedef enum InstrKind
 								 * statement or planning */
 	INSTR_KIND_QUERY,			/* QueryInstrumentation */
 	INSTR_KIND_NODE,			/* NodeInstrumentation of a plan node */
+	INSTR_KIND_NODE_DETAIL,		/* part of a plan node, e.g. the table access
+								 * of an index scan */
 	INSTR_KIND_TRIGGER,			/* TriggerInstrumentation */
 } InstrKind;
 
