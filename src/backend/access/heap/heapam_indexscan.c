@@ -19,6 +19,7 @@
 #include "access/relscan.h"
 #include "access/tableam_indexscan.h"
 #include "access/visibilitymap.h"
+#include "executor/instrument.h"
 #include "pgstat.h"
 #include "storage/predicate.h"
 
@@ -434,6 +435,7 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 	HeapTuple	heapTuple;
 	bool		got_heap_tuple;
 	bool		all_dead;
+	Instrumentation *table_instr = NULL;
 
 	if (!index_only)
 	{
@@ -451,6 +453,16 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 
 		if (scan->instrument)
 			scan->instrument->ntabletuplefetches++;
+	}
+
+	/*
+	 * If requested, account buffer/WAL activity on the table separately from
+	 * that on the index, so EXPLAIN (ANALYZE, BUFFERS) can show them apart.
+	 */
+	if (scan->instrument && scan->instrument->table_instr.need_stack)
+	{
+		table_instr = &scan->instrument->table_instr;
+		InstrPushStack(table_instr);
 	}
 
 	/* We can skip the buffer-switching logic if we're on the same page. */
@@ -527,6 +539,9 @@ heapam_index_heap_fetch(IndexScanDesc scan, IndexScanHeapData *hscan,
 		if (unlikely(all_dead))
 			heapam_index_kill_item(scan);
 	}
+
+	if (table_instr)
+		InstrPopStack(table_instr);
 
 	return got_heap_tuple;
 }
