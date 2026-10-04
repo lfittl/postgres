@@ -11,9 +11,11 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "executor/executor.h"
 #include "executor/instrument.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 
 PG_MODULE_MAGIC_EXT(
@@ -25,6 +27,49 @@ PG_MODULE_MAGIC_EXT(
 
 PG_FUNCTION_INFO_V1(test_session_buffer_usage);
 PG_FUNCTION_INFO_V1(test_session_buffer_usage_reset);
+
+/*
+ * test_session_buffer_usage.track_queries
+ *
+ * When on, request query-level buffer/WAL instrumentation for every query
+ * executed in this session, the same way pg_stat_statements does.  This lets
+ * the tests exercise the QueryInstrumentation code paths (resource owner
+ * registration, abort handling, accumulation into the session totals)
+ * without depending on a contrib module.
+ */
+static bool track_queries = false;
+
+static ExecutorStart_hook_type prev_ExecutorStart = NULL;
+
+static void
+tsbu_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	if (track_queries)
+		queryDesc->query_instr_options |= INSTRUMENT_BUFFERS | INSTRUMENT_WAL;
+
+	if (prev_ExecutorStart)
+		prev_ExecutorStart(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
+
+void
+_PG_init(void)
+{
+	DefineCustomBoolVariable("test_session_buffer_usage.track_queries",
+							 "Request query-level buffer/WAL instrumentation for all queries.",
+							 NULL,
+							 &track_queries,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	MarkGUCPrefixReserved("test_session_buffer_usage");
+
+	prev_ExecutorStart = ExecutorStart_hook;
+	ExecutorStart_hook = tsbu_ExecutorStart;
+}
 
 #define HAVE_INSTR_STACK 1		/* Change to 0 when testing before stack
 								 * change */
