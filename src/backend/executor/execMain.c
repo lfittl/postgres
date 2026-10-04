@@ -1346,8 +1346,19 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 			palloc0_array(FmgrInfo, n);
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0_array(ExprState *, n);
-		if (qinstr)
+
+		/*
+		 * Per-trigger instrumentation is only needed when per-node
+		 * instrumentation (EXPLAIN ANALYZE) is requested.  Query-level
+		 * instrumentation alone (e.g. pg_stat_statements) accounts for
+		 * trigger activity through the stack entry current while the trigger
+		 * runs, so don't allocate anything in that case.
+		 */
+		if (instrument_options)
+		{
+			Assert(qinstr != NULL);
 			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(qinstr, instrument_options, n);
+		}
 	}
 	else
 	{
