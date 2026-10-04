@@ -3158,9 +3158,8 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 
 	/*
 	 * es_instrument and es_query_instr must NOT be copied. EPQ is intended to
-	 * be called from within other plan nodes, and we already track things
-	 * on those plan nodes themselves, if needed. This also avoids incorrectly
-	 * freeing the parent's instrumentation in our call to FreeExecutorState.
+	 * be called from within other plan nodes, and we already track things on
+	 * those plan nodes themselves, if needed.
 	 */
 
 	/*

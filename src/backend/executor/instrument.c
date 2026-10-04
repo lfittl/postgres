@@ -131,14 +131,15 @@ InstrStop(Instrumentation *instr)
 }
 
 /*
- * Stops instrumentation, finalizes the stack entry and accumulates to its parent.
+ * Workhorse for InstrStopFinalize and the abort cleanup.
  *
- * Note that this intentionally allows passing a stack that is not the current
- * top, as can happen with PG_FINALLY, or resource owners, which don't have a
- * guaranteed cleanup order.
+ * If 'allow_stopped' is set, the entry may already have been stopped (as
+ * happens for a QueryInstrumentation between two InstrQueryStart/InstrQueryStop
+ * pairs, e.g. between fetches from a cursor), in which case there is no timer
+ * to stop and only the accumulation to the parent remains.
  */
-void
-InstrStopFinalize(Instrumentation *instr)
+static void
+InstrStopFinalizeInternal(Instrumentation *instr, bool allow_stopped)
 {
 	/*
 	 * If our current node is on the stack, make sure we reset the stack to
@@ -169,13 +170,28 @@ InstrStopFinalize(Instrumentation *instr)
 			instr_stack.stack_size--;
 	}
 
-	InstrStop(instr);
+	if (!(allow_stopped && instr->need_timer &&
+		  INSTR_TIME_IS_ZERO(instr->starttime)))
+		InstrStop(instr);
 
 	/*
 	 * Accumulate all instrumentation to the currently active instrumentation,
 	 * so that callers get a complete picture of activity, even after an abort
 	 */
 	InstrAccumStack(instr_stack.current, instr);
+}
+
+/*
+ * Stops instrumentation, finalizes the stack entry and accumulates to its parent.
+ *
+ * Note that this intentionally allows passing a stack that is not the current
+ * top, as can happen with PG_FINALLY, or resource owners, which don't have a
+ * guaranteed cleanup order.
+ */
+void
+InstrStopFinalize(Instrumentation *instr)
+{
+	InstrStopFinalizeInternal(instr, false);
 }
 
 /*
@@ -250,8 +266,12 @@ ResOwnerReleaseInstrumentation(Datum res)
 		InstrAccumStack(&qinstr->instr, child);
 	}
 
-	/* Ensure the stack is reset as expected, and we accumulate to the parent */
-	InstrStopFinalize(&qinstr->instr);
+	/*
+	 * Ensure the stack is reset as expected, and we accumulate to the parent.
+	 * The entry stays registered between InstrQueryStop and the next
+	 * InstrQueryStart, so it may well not be running at this point.
+	 */
+	InstrStopFinalizeInternal(&qinstr->instr, true);
 
 	/*
 	 * Destroy the dedicated instrumentation context, which frees the
@@ -268,9 +288,12 @@ InstrQueryAlloc(int instrument_options)
 
 	/*
 	 * When the instrumentation stack is used, create a dedicated memory
-	 * context for this query's instrumentation allocations. This context is a
-	 * child of TopMemoryContext so it survives transaction abort —
-	 * ResourceOwner release needs to access it.
+	 * context for this query's instrumentation allocations.  It starts out as
+	 * a child of the current memory context, so that it is freed along with
+	 * the caller's state if the caller is abandoned before InstrQueryStart,
+	 * and is moved under TopMemoryContext while a ResourceOwner is
+	 * responsible for it (see InstrQueryStart), since the abort cleanup needs
+	 * to access it after the caller's memory may already be gone.
 	 *
 	 * For simpler cases (timer/rows only), use the current memory context.
 	 *
@@ -278,7 +301,7 @@ InstrQueryAlloc(int instrument_options)
 	 * allocated within this context to ensure correct clean up on abort.
 	 */
 	if (InstrNeedStack(instrument_options))
-		instr_cxt = AllocSetContextCreate(TopMemoryContext,
+		instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
 										  "Instrumentation",
 										  ALLOCSET_SMALL_SIZES);
 	else
@@ -299,12 +322,25 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 {
 	InstrStart(&qinstr->instr);
 
-	if (qinstr->instr.need_stack)
+	/*
+	 * On the first start, hand the entry over to the current ResourceOwner,
+	 * which stays responsible for it until InstrQueryStopFinalize (or abort).
+	 * It is intentionally not released at InstrQueryStop, so that an abort
+	 * between two start/stop pairs (e.g. between fetches from a cursor) still
+	 * accumulates what was measured so far.
+	 */
+	if (qinstr->instr.need_stack && qinstr->owner == NULL)
 	{
 		Assert(CurrentResourceOwner != NULL);
-		qinstr->owner = CurrentResourceOwner;
 
-		ResourceOwnerEnlarge(qinstr->owner);
+		/*
+		 * Enlarge first, as that is the only step that can fail; once the
+		 * context is under TopMemoryContext we must be sure to register it.
+		 */
+		ResourceOwnerEnlarge(CurrentResourceOwner);
+		MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
+
+		qinstr->owner = CurrentResourceOwner;
 		ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
 	}
 }
@@ -313,13 +349,6 @@ void
 InstrQueryStop(QueryInstrumentation *qinstr)
 {
 	InstrStop(&qinstr->instr);
-
-	if (qinstr->instr.need_stack)
-	{
-		Assert(qinstr->owner != NULL);
-		ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
-		qinstr->owner = NULL;
-	}
 }
 
 void

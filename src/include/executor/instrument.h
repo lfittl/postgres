@@ -117,11 +117,13 @@ typedef struct Instrumentation
  * call must be to InstrQueryStopFinalize to ensure parent stack entries get
  * the accumulated totals.
  *
- * Uses resource owner mechanism for handling aborts, as such, the caller
- * *must* not exit out of the top level transaction after having called
- * InstrQueryStart, without first calling InstrQueryStop or
- * InstrQueryStopFinalize. In the case of a transaction abort, logic equivalent
- * to InstrQueryStopFinalize will be called automatically.
+ * Uses resource owner mechanism for handling aborts: the first InstrQueryStart
+ * registers the entry with the current resource owner, and it stays registered
+ * (also across InstrQueryStop / InstrQueryStart pairs) until
+ * InstrQueryStopFinalize. In the case of an abort, logic equivalent to
+ * InstrQueryStopFinalize is run by the resource owner cleanup, so the caller
+ * must not release that resource owner without an abort before having called
+ * InstrQueryStopFinalize.
  */
 struct ResourceOwnerData;
 typedef struct QueryInstrumentation
@@ -137,9 +139,10 @@ typedef struct QueryInstrumentation
 	/*
 	 * Dedicated memory context for all instrumentation allocations belonging
 	 * to this query (node instrumentation, trigger instrumentation, etc.).
-	 * Initially a child of TopMemoryContext so it survives transaction abort
-	 * for ResourceOwner cleanup, which is then reassigned to the current
-	 * memory context on InstrQueryStopFinalize.
+	 * Initially a child of the context current at InstrQueryAlloc, moved
+	 * under TopMemoryContext by InstrQueryStart while the ResourceOwner is
+	 * responsible for it (so it survives transaction abort for the cleanup),
+	 * and reassigned to the current memory context on InstrQueryStopFinalize.
 	 */
 	MemoryContext instr_cxt;
 

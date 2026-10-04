@@ -240,14 +240,26 @@ Memory Handling
 
 Instrumentation objects that use the stack must survive until finalization
 runs, including the abort case.  To ensure this, QueryInstrumentation
-creates a dedicated "Instrumentation" MemoryContext (instr_cxt) as a child
-of TopMemoryContext.  All child instrumentation (nodes, triggers) should be
-allocated in this context.
+creates a dedicated "Instrumentation" MemoryContext (instr_cxt).  All child
+instrumentation (nodes, triggers) should be allocated in this context.
 
-On successful completion, instr_cxt is reparented to CurrentMemoryContext
-so its lifetime is tied to the caller's context.  On abort, the
-ResourceOwner cleanup frees it after accumulating the instrumentation data
-to the current stack entry after resetting the stack.
+The parent of instr_cxt follows ownership.  It is created as a child of the
+context current at InstrQueryAlloc (the per-query context in the executor),
+so that it is freed together with the caller's state if the caller is
+abandoned before anything was measured, e.g. when ExecutorStart fails.  The
+first InstrQueryStart moves it under TopMemoryContext and registers it with
+the current ResourceOwner, which stays responsible for it until
+InstrQueryStopFinalize; this is necessary because the abort cleanup runs
+after portal memory has already been released (see AtAbort_Portals), so the
+context must not depend on it.  Note that InstrQueryStop does not release
+the registration, so an abort between two start/stop pairs, e.g. between
+fetches from a cursor, still accumulates what was measured so far.
+
+On successful completion, InstrQueryStopFinalize releases the registration
+and reparents instr_cxt to CurrentMemoryContext so its lifetime is tied to
+the caller's context again.  On abort, the ResourceOwner cleanup frees it
+after accumulating the instrumentation data to the current stack entry
+after resetting the stack.
 
 When the stack is not needed (timer/rows only), Instrumentation allocations
-happen in CurrentMemoryContext instead of TopMemoryContext.
+happen in CurrentMemoryContext and no dedicated context is created.

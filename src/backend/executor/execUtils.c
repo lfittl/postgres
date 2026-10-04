@@ -229,17 +229,11 @@ FreeExecutorState(EState *estate)
 	}
 
 	/*
-	 * Make sure the instrumentation context gets freed. This usually gets
-	 * re-parented under the per-query context in InstrQueryStopFinalize, but
-	 * that won't happen during EXPLAIN (BUFFERS) since ExecutorFinish never
-	 * gets called, so we would otherwise leak it in TopMemoryContext.
-	 */
-	if (estate->es_query_instr && estate->es_query_instr->instr.need_stack)
-		MemoryContextDelete(estate->es_query_instr->instr_cxt);
-
-	/*
 	 * Free the per-query memory context, thereby releasing all working
-	 * memory, including the EState node itself.
+	 * memory, including the EState node itself.  This includes the
+	 * instrumentation context (see InstrQueryAlloc), unless it is still
+	 * registered with a resource owner, which cannot be the case here since
+	 * ExecutorFinish has run or ExecutorRun was never called.
 	 */
 	MemoryContextDelete(estate->es_query_cxt);
 }
