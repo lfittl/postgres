@@ -74,6 +74,13 @@ select explain_filter('explain (analyze, serialize, buffers, io, format yaml) se
 select explain_filter('explain (buffers, format json) select * from int8_tbl i8');
 \a
 
+-- Index scans track table buffer accesses separately; make sure EXPLAIN
+-- (BUFFERS) copes without ANALYZE, i.e. when the plan was never run
+select explain_filter('explain (buffers, costs off) select * from tenk1 where unique1 = 42');
+\a
+select explain_filter('explain (buffers, costs off, format json) select * from tenk1 where unique1 = 42');
+\a
+
 -- Check expansion of window definitions
 
 select explain_filter('explain verbose select sum(unique1) over w, sum(unique2) over (w order by hundred), sum(tenthous) over (w order by hundred) from tenk1 window w as (partition by ten)');

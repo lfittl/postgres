@@ -261,6 +261,69 @@ explain_filter
 ]
 (1 row)
 \a
+-- Index scans track table buffer accesses separately; make sure EXPLAIN
+-- (BUFFERS) copes without ANALYZE, i.e. when the plan was never run
+select explain_filter('explain (buffers, costs off) select * from tenk1 where unique1 = 42');
+             explain_filter              
+-----------------------------------------
+ Index Scan using tenk1_unique1 on tenk1
+   Index Cond: (unique1 = N)
+(2 rows)
+
+\a
+select explain_filter('explain (buffers, costs off, format json) select * from tenk1 where unique1 = 42');
+explain_filter
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "tenk1_unique1",
+      "Relation Name": "tenk1",
+      "Alias": "tenk1",
+      "Disabled": false,
+      "Index Cond": "(unique1 = N)",
+      "Table Buffers": {
+        "Shared Hit Blocks": N,
+        "Shared Read Blocks": N,
+        "Shared Dirtied Blocks": N,
+        "Shared Written Blocks": N,
+        "Local Hit Blocks": N,
+        "Local Read Blocks": N,
+        "Local Dirtied Blocks": N,
+        "Local Written Blocks": N,
+        "Temp Read Blocks": N,
+        "Temp Written Blocks": N
+      },
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    },
+    "Planning": {
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    }
+  }
+]
+(1 row)
+\a
 -- Check expansion of window definitions
 select explain_filter('explain verbose select sum(unique1) over w, sum(unique2) over (w order by hundred), sum(tenthous) over (w order by hundred) from tenk1 window w as (partition by ten)');
                                             explain_filter                                             

@@ -975,14 +975,11 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 		ExecInitExprList(node->indexorderbyorig, (PlanState *) indexstate);
 
 	/*
-	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
-	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing
-	 * references to nonexistent indexes.
+	 * Set up instrumentation of index scans if requested.  Like the node's
+	 * own instrumentation (see ExecInitNode), this must exist even when we
+	 * are only doing EXPLAIN, since EXPLAIN (BUFFERS) reads it regardless of
+	 * whether the plan was run.
 	 */
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return indexstate;
-
-	/* Set up instrumentation of index scans if requested */
 	if (estate->es_instrument)
 	{
 		indexstate->iss_Instrument = MemoryContextAllocZero(estate->es_query_instr->instr_cxt, sizeof(IndexScanInstrumentation));
@@ -999,6 +996,14 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 			InstrQueryRememberChild(estate->es_query_instr, &indexstate->iss_Instrument->table_instr);
 		}
 	}
+
+	/*
+	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
+	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing
+	 * references to nonexistent indexes.
+	 */
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+		return indexstate;
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
