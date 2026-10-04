@@ -179,23 +179,32 @@ InstrStopFinalize(Instrumentation *instr)
 }
 
 /*
- * Finalize child instrumentation by accumulating buffer/WAL usage to the
- * provided instrumentation, which may be the current entry, or one the caller
- * treats as a parent and will add to the totals later.
+ * Finalize a child entry registered with InstrQueryRememberChild, by
+ * accumulating its buffer/WAL usage to the provided instrumentation, which may
+ * be the current entry, or one the caller treats as a parent and will add to
+ * the totals later.
  *
- * Also deletes the unfinalized entry to avoid double counting in an abort
- * situation, e.g. during executor finish.
+ * The entry is removed from its parent's unfinalized list, so that the abort
+ * handling does not count it again, and marked as finalized: later calls are
+ * no-ops.  The latter matters for the plan tree walkers in execProcnode.c,
+ * since planstate_tree_walker can reach the same PlanState more than once (a
+ * SubPlan appearing in several expressions of a plan node gets one
+ * SubPlanState per expression, all pointing at the same subplan PlanState).
+ *
+ * For entries that are not registered, e.g. copies of other processes'
+ * instrumentation, use InstrAccumStack instead.
  */
 void
 InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent)
 {
-	if (instr->need_stack)
-	{
-		if (!dlist_node_is_detached(&instr->unfinalized_entry))
-			dlist_delete_thoroughly(&instr->unfinalized_entry);
+	if (!instr->need_stack || instr->finalized)
+		return;
 
-		InstrAccumStack(parent, instr);
-	}
+	Assert(!dlist_node_is_detached(&instr->unfinalized_entry));
+	dlist_delete_thoroughly(&instr->unfinalized_entry);
+
+	InstrAccumStack(parent, instr);
+	instr->finalized = true;
 }
 
 

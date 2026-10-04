@@ -94,6 +94,8 @@ typedef struct Instrumentation
 	bool		need_stack;		/* true if we need WAL/buffer usage data */
 	/* Internal state keeping: */
 	bool		on_stack;		/* true if currently on instr_stack */
+	bool		finalized;		/* true once accumulated to a parent via
+								 * InstrFinalizeChild */
 	instr_time	starttime;		/* start time of last InstrStart */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
