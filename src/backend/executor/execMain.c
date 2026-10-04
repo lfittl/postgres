@@ -1562,10 +1562,14 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);
 
-			/* dummy rangetable index */
-			InitResultRelInfo(rInfo, ancRel, 0, NULL,
-							  estate->es_instrument,
-							  estate->es_query_instr);
+			/*
+			 * Dummy rangetable index, and no trigger instrumentation: these
+			 * ResultRelInfos are only used to queue AFTER triggers (see
+			 * ExecCrossPartitionUpdateForeignKey).  When those fire, the
+			 * relation is looked up again via ExecGetTriggerResultRel, and
+			 * the ResultRelInfo found there carries the instrumentation.
+			 */
+			InitResultRelInfo(rInfo, ancRel, 0, NULL, 0, NULL);
 			ancResultRels = lappend(ancResultRels, rInfo);
 		}
 		ancResultRels = lappend(ancResultRels, rootRelInfo);
