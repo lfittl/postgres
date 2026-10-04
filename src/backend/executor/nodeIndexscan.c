@@ -989,8 +989,8 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 
 		/*
 		 * Track table and index access separately. We intentionally don't
-		 * collect timing (even if enabled), since we don't need it, and
-		 * the table AM calls InstrPushStack / InstrPopStack around its table
+		 * collect timing (even if enabled), since we don't need it, and the
+		 * table AM calls InstrPushStack / InstrPopStack around its table
 		 * fetches (instead of the full InstrNode*) to reduce overhead.
 		 */
 		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
@@ -1825,6 +1825,19 @@ ExecIndexScanInstrumentInitDSM(IndexScanState *node,
 	/* Each per-worker area must start out as zeroes */
 	memset(node->iss_SharedInfo, 0, size);
 	node->iss_SharedInfo->num_workers = pcxt->nworkers;
+
+	/*
+	 * Initialize each worker's table_instr with the same options as the
+	 * leader's own entry (see ExecInitIndexScan), so that accumulating from
+	 * it works once the worker has added its stats.
+	 */
+	if ((node->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS) != 0)
+	{
+		for (int i = 0; i < pcxt->nworkers; i++)
+			InstrInitOptions(&node->iss_SharedInfo->winstrument[i].table_instr,
+							 INSTRUMENT_BUFFERS);
+	}
+
 	shm_toc_insert(pcxt->toc,
 				   node->ss.ps.plan->plan_node_id +
 				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -1869,10 +1882,17 @@ ExecIndexScanRetrieveInstrumentation(IndexScanState *node)
 	node->iss_SharedInfo = palloc(size);
 	memcpy(node->iss_SharedInfo, SharedInfo, size);
 
-	/* Aggregate workers' table buffer/WAL usage into leader's entry */
+	/*
+	 * Aggregate workers' table buffer/WAL usage into leader's entry, which
+	 * ExecFinalizeNodeInstrumentation later rolls up into the node.  Record
+	 * the import so that session-level consumers can exclude it (see
+	 * InstrAccumWorkerUsage).
+	 */
 	for (int i = 0; i < node->iss_SharedInfo->num_workers; i++)
 	{
-		InstrAccumStack(&node->iss_Instrument->table_instr,
-						&node->iss_SharedInfo->winstrument[i].table_instr);
+		Instrumentation *winstr = &node->iss_SharedInfo->winstrument[i].table_instr;
+
+		InstrAccumStack(&node->iss_Instrument->table_instr, winstr);
+		InstrAccumWorkerUsage(&winstr->bufusage, &winstr->walusage);
 	}
 }

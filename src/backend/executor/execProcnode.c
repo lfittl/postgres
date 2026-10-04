@@ -876,6 +876,26 @@ ExecFinalizeNodeInstrumentationFlat_walker(PlanState *node, void *context)
 
 	InstrFinalizeChild(&node->instrument->instr, (Instrumentation *) context);
 
+	/*
+	 * IndexScan/IndexOnlyScan have a separate entry to track table access,
+	 * which also needs to be accounted for in the target.  (The leader gets
+	 * the per-worker copy of this entry via SharedIndexScanInstrumentation.)
+	 */
+	if (IsA(node, IndexScanState))
+	{
+		IndexScanState *iss = castNode(IndexScanState, node);
+
+		InstrFinalizeChild(&iss->iss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+	else if (IsA(node, IndexOnlyScanState))
+	{
+		IndexOnlyScanState *ioss = castNode(IndexOnlyScanState, node);
+
+		InstrFinalizeChild(&ioss->ioss_Instrument->table_instr,
+						   (Instrumentation *) context);
+	}
+
 	return planstate_tree_walker(node,
 								 ExecFinalizeNodeInstrumentationFlat_walker,
 								 context);
