@@ -183,8 +183,10 @@ SELECT test_session_buffer_usage_reset();
 EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
     INSERT INTO trig_err_tab VALUES (1);
 
--- The trigger scanned trig_work_tab but errored before InstrStopTrigger ran.
--- InstrStopFinalize in the PG_CATCH ensures buffer data is still propagated.
+-- The trigger scanned trig_work_tab but errored before InstrStopTrigger ran,
+-- so its entry was never finalized.  The query's QueryInstrumentation keeps
+-- such entries in its unfinalized list, and the resource owner cleanup on
+-- abort accumulates them, so the buffer data is still propagated.
 SELECT local_blks_hit >= s.serial_hits / 2
        AS trigger_abort_buffers_propagated
 FROM test_session_buffer_usage(), trig_serial_result s;
