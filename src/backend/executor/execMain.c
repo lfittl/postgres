@@ -3157,14 +3157,19 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	rcestate->es_queryEnv = parentestate->es_queryEnv;
 
 	/*
+	 * es_instrument and es_query_instr must NOT be copied. EPQ is intended to
+	 * be called from within other plan nodes, and we already track things
+	 * on those plan nodes themselves, if needed. This also avoids incorrectly
+	 * freeing the parent's instrumentation in our call to FreeExecutorState.
+	 */
+
+	/*
 	 * ResultRelInfos needed by subplans are initialized from scratch when the
 	 * subplans themselves are initialized.
 	 */
 	rcestate->es_result_relations = NULL;
 	/* es_trig_target_relations must NOT be copied */
 	rcestate->es_top_eflags = parentestate->es_top_eflags;
-	rcestate->es_instrument = parentestate->es_instrument;
-	rcestate->es_query_instr = parentestate->es_query_instr;
 	/* es_auxmodifytables must NOT be copied */
 
 	/*
