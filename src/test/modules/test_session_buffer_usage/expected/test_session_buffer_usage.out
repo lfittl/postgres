@@ -338,5 +338,62 @@ RESET min_parallel_table_scan_size;
 RESET max_parallel_workers_per_gather;
 RESET parallel_leader_participation;
 DROP TABLE par_abort_tab, par_abort_serial_result;
+-- Cursor fetched inside a transaction that then aborts, with query-level
+-- instrumentation on the cursor's own query (as it would be with
+-- pg_stat_statements loaded).
+--
+-- The fetches accumulate into the cursor query's QueryInstrumentation, which
+-- only reaches the session totals when it is finalized: at ExecutorFinish in
+-- the normal case, or through the resource owner cleanup on abort.  Here the
+-- portal is dropped as failed without ExecutorFinish ever running, so the
+-- buffer activity of the fetches must be recovered by the abort cleanup.
+SET test_session_buffer_usage.track_queries = on;
+CREATE TABLE cursor_abort_tab (a int, b char(200));
+INSERT INTO cursor_abort_tab SELECT i, repeat('x', 200) FROM generate_series(1, 5000) AS i;
+-- Warm shared buffers so all reads become hits
+SELECT count(*) FROM cursor_abort_tab;
+ count 
+-------
+  5000
+(1 row)
+
+-- Reference: a complete scan outside of a cursor
+SELECT test_session_buffer_usage_reset();
+ test_session_buffer_usage_reset 
+---------------------------------
+ 
+(1 row)
+
+SELECT count(*) FROM cursor_abort_tab;
+ count 
+-------
+  5000
+(1 row)
+
+CREATE TABLE cursor_abort_serial_result AS
+SELECT shared_blks_hit AS serial_delta FROM test_session_buffer_usage();
+-- Same scan through a cursor, in a transaction that aborts after the fetch
+SELECT test_session_buffer_usage_reset();
+ test_session_buffer_usage_reset 
+---------------------------------
+ 
+(1 row)
+
+BEGIN;
+DECLARE cursor_abort_cur CURSOR FOR SELECT * FROM cursor_abort_tab;
+MOVE ALL IN cursor_abort_cur;
+SELECT 1 / 0;
+ERROR:  division by zero
+ROLLBACK;
+SELECT shared_blks_hit >= s.serial_delta / 2
+       AS cursor_abort_buffers_visible
+FROM test_session_buffer_usage(), cursor_abort_serial_result s;
+ cursor_abort_buffers_visible 
+------------------------------
+ t
+(1 row)
+
+RESET test_session_buffer_usage.track_queries;
+DROP TABLE cursor_abort_tab, cursor_abort_serial_result;
 -- Cleanup
 DROP EXTENSION test_session_buffer_usage;
