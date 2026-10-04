@@ -637,13 +637,14 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	cplan = GetCachedPlan(entry->plansource, paramLI,
 						  CurrentResourceOwner, pstate->p_queryEnv);
 
-	InstrQueryStopFinalize(plan_instr);
-
 	if (es->memory)
 	{
 		MemoryContextSwitchTo(saved_ctx);
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
+
+	/* Finalize only after switching back, see ExplainOneQuery */
+	InstrQueryStopFinalize(plan_instr);
 
 	plan_list = cplan->stmt_list;
 

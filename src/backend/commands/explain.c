@@ -359,13 +359,18 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	/* plan the query */
 	plan = pg_plan_query(query, queryString, cursorOptions, params, es);
 
-	InstrQueryStopFinalize(plan_instr);
-
 	if (es->memory)
 	{
 		MemoryContextSwitchTo(saved_ctx);
 		MemoryContextMemConsumed(planner_ctx, &mem_counters);
 	}
+
+	/*
+	 * Finalize only after switching back, so that the instrumentation's
+	 * memory context gets reparented to our context rather than the planner
+	 * one, where it would be counted as planner memory.
+	 */
+	InstrQueryStopFinalize(plan_instr);
 
 	/* run it (if needed) and produce output */
 	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
