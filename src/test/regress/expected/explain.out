@@ -1089,3 +1089,55 @@ RESET enable_bitmapscan;
 RESET enable_indexonlyscan;
 DROP FUNCTION check_parallel_indexscan_buffers;
 DROP TABLE par_idx_buf_test;
+-- SubPlan referenced more than once.
+-- A SubPlan in an index condition is initialized both as a runtime key and
+-- as part of the recheck qual, so the same subplan PlanState is reachable
+-- twice from the scan node.  Its buffer usage must only be counted once in
+-- the scan node's total.  The subplan is made expensive (a full scan of a
+-- larger table per outer row) so that double counting is clearly visible.
+CREATE TEMP TABLE subplan_outer AS SELECT g AS id FROM generate_series(1, 10) g;
+CREATE INDEX ON subplan_outer (id);
+CREATE TEMP TABLE subplan_inner AS
+  SELECT g AS id, repeat('x', 500) AS pad FROM generate_series(1, 2000) g;
+ANALYZE subplan_outer, subplan_inner;
+CREATE FUNCTION check_subplan_explain_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    scan json;
+    subplan json;
+    scan_buf int;
+    subplan_buf int;
+BEGIN
+    SET LOCAL enable_hashjoin = off;
+    SET LOCAL enable_mergejoin = off;
+    SET LOCAL enable_bitmapscan = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(*) FROM subplan_outer a, subplan_outer b
+        WHERE b.id = (SELECT min(i.id) FROM subplan_inner i WHERE i.id >= a.id)'
+        INTO plan_json;
+    -- Aggregate -> Nested Loop -> [outer scan, inner index scan -> SubPlan]
+    scan := plan_json->0->'Plan'->'Plans'->0->'Plans'->1;
+    subplan := scan->'Plans'->0;
+    IF scan->>'Node Type' NOT IN ('Index Scan', 'Index Only Scan')
+       OR subplan->>'Parent Relationship' <> 'SubPlan' THEN
+        RAISE EXCEPTION 'unexpected plan shape: %', plan_json;
+    END IF;
+    scan_buf :=
+        COALESCE((scan->>'Local Hit Blocks')::int, 0) +
+        COALESCE((scan->>'Local Read Blocks')::int, 0);
+    subplan_buf :=
+        COALESCE((subplan->>'Local Hit Blocks')::int, 0) +
+        COALESCE((subplan->>'Local Read Blocks')::int, 0);
+    -- The scan node's own index accesses are small compared to the subplan
+    RETURN scan_buf >= subplan_buf AND scan_buf < subplan_buf * 1.5;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_subplan_explain_buffers() AS subplan_buffers_counted_once;
+ subplan_buffers_counted_once 
+------------------------------
+ t
+(1 row)
+
+DROP FUNCTION check_subplan_explain_buffers;
+DROP TABLE subplan_outer;
+DROP TABLE subplan_inner;
