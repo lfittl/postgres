@@ -2706,6 +2706,8 @@ RowExpr
 RowIdentityVarInfo
 RowMarkClause
 RowMarkType
+RowsOverride
+RowsOverrideKind
 RowSecurityDesc
 RowSecurityPolicy
 RtlGetLastNtStatus_t

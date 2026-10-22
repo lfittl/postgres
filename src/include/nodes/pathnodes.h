@@ -103,6 +103,71 @@
 typedef Bitmapset *Relids;
 
 /*
+ * Rows overrides
+ *
+ * Extensions can supply row count estimates for specific base or join
+ * relations by adding RowsOverride entries to PlannerInfo's rows_overrides
+ * list (see add_rows_override()).  Each entry is keyed by the set of base
+ * relids that identifies the target relation at the current query level;
+ * outer-join relids (see PlannerInfo.outer_join_rels) are ignored both when
+ * registering and when looking up an entry, so that a join relation is
+ * matched by its member base relations regardless of which outer joins it
+ * has completed.
+ * When the planner computes the standard size estimate for a relation, it
+ * looks for a matching entry and, if one is found, replaces the estimate
+ * (absolute override) or scales it (multiplicative override).  If several
+ * entries match, the one added most recently wins.
+ *
+ * The planner records the ratio of the final estimate to the standard
+ * estimate in RelOptInfo's rows_scale field.  That factor is applied to the
+ * estimates for parameterized paths of the same relation, so that an
+ * override given for a relation also affects the inner side of nested loops.
+ * It is also copied into the rows_scale field of the Plan nodes created for
+ * the relation, so that the executor and EXPLAIN can recover the standard
+ * estimate as plan_rows / rows_scale.
+ * Child relations produced by inheritance expansion or partitionwise join
+ * inherit the factor from their parent unless they have an override of their
+ * own; an absolute value given for an append relation is distributed
+ * proportionally over its children (except children that have already built
+ * their paths by then, such as subqueries that could not be flattened, which
+ * keep their own estimates).  Note that a foreign data wrapper's
+ * GetForeignRelSize callback runs after an override has been applied and may
+ * replace the estimate.
+ *
+ * Overrides must be registered before the target relation's size is
+ * estimated.  The build_simple_rel_hook is a convenient place to do so, since
+ * it runs after the range table is complete but before any relation is sized.
+ * The list is not cleared when query_planner() restarts after simplifying the
+ * join tree: range table indexes are stable across restarts, so existing
+ * entries stay valid, and registering an entry for the same relids again is
+ * harmless.  When self-join elimination merges two relations, entries that
+ * mention the removed relation are rewritten to mention the kept one.
+ * Entries for relations removed by other join simplifications simply never
+ * match anything.
+ */
+typedef enum RowsOverrideKind
+{
+	ROWS_OVERRIDE_ABSOLUTE,		/* use value as the row count estimate */
+	ROWS_OVERRIDE_MULTIPLY,		/* multiply the standard estimate by value */
+} RowsOverrideKind;
+
+typedef struct RowsOverride
+{
+	pg_node_attr(no_copy_equal, no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* relids of the base or join relation this override applies to */
+	Relids		relids;
+
+	/* how to combine value with the planner's own estimate */
+	RowsOverrideKind kind;
+
+	/* the row count or multiplier */
+	double		value;
+} RowsOverride;
+
+/*
  * When looking for a "cheapest path", this enum specifies whether we want
  * cheapest startup cost or cheapest total cost.
  */
@@ -690,6 +755,12 @@ struct PlannerInfo
 	/* PartitionPruneInfos added in this query's plan. */
 	List	   *partPruneInfos;
 
+	/*
+	 * Row count overrides supplied by extensions; list of RowsOverride.  See
+	 * the comments for RowsOverride.
+	 */
+	List	   *rows_overrides;
+
 	/* extension state */
 	void	  **extension_state pg_node_attr(read_write_ignore);
 	int			extension_state_allocated;
@@ -1025,6 +1096,8 @@ typedef struct RelOptInfo
 	 */
 	/* estimated number of result tuples */
 	Cardinality rows;
+	/* ratio of rows to the standard estimate, per rows override; 1.0 if none */
+	double		rows_scale;
 
 	/*
 	 * per-relation planner control

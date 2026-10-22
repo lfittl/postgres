@@ -608,6 +608,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 			parallel_setup_cost + parallel_tuple_cost * top_plan->plan_rows;
 		gather->plan.plan_rows = top_plan->plan_rows;
 		gather->plan.plan_width = top_plan->plan_width;
+		gather->plan.rows_scale = top_plan->rows_scale;
 		gather->plan.parallel_aware = false;
 		gather->plan.parallel_safe = false;
 
@@ -8746,6 +8747,9 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	unique_rel = makeNode(RelOptInfo);
 	memcpy(unique_rel, rel, sizeof(RelOptInfo));
 
+	/* rows overrides never apply to unique rels; see build_grouped_rel() */
+	unique_rel->rows_scale = 1.0;
+
 	/*
 	 * clear path info
 	 */
@@ -9119,6 +9123,9 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	partial_unique_rel = makeNode(RelOptInfo);
 	memcpy(partial_unique_rel, input_rel, sizeof(RelOptInfo));
+
+	/* rows overrides never apply to unique rels; see build_grouped_rel() */
+	partial_unique_rel->rows_scale = 1.0;
 
 	/*
 	 * clear path info

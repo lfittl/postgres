@@ -230,6 +230,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->reloptkind = parent ? RELOPT_OTHER_MEMBER_REL : RELOPT_BASEREL;
 	rel->relids = bms_make_singleton(relid);
 	rel->rows = 0;
+	rel->rows_scale = 1.0;
 	/* cheap startup cost is interesting iff not all tuples to be retrieved */
 	rel->consider_startup = (root->tuple_fraction > 0);
 	rel->consider_param_startup = false;	/* might get changed later */
@@ -539,9 +540,10 @@ build_grouped_rel(PlannerInfo *root, RelOptInfo *rel)
 	grouped_rel->fdw_private = NULL;
 
 	/*
-	 * clear size estimates
+	 * clear size estimates (rows overrides never apply to grouped rels)
 	 */
 	grouped_rel->rows = 0;
+	grouped_rel->rows_scale = 1.0;
 
 	return grouped_rel;
 }
@@ -868,6 +870,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->reloptkind = RELOPT_JOINREL;
 	joinrel->relids = bms_copy(joinrelids);
 	joinrel->rows = 0;
+	joinrel->rows_scale = 1.0;
 	/* cheap startup cost is interesting iff not all tuples to be retrieved */
 	joinrel->consider_startup = (root->tuple_fraction > 0);
 	joinrel->consider_param_startup = false;
@@ -1075,6 +1078,7 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->relids = adjust_child_relids(parent_joinrel->relids,
 										  nappinfos, appinfos);
 	joinrel->rows = 0;
+	joinrel->rows_scale = 1.0;
 	/* cheap startup cost is interesting iff not all tuples to be retrieved */
 	joinrel->consider_startup = (root->tuple_fraction > 0);
 	joinrel->consider_param_startup = false;
@@ -1697,6 +1701,7 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 	upperrel = makeNode(RelOptInfo);
 	upperrel->reloptkind = RELOPT_UPPER_REL;
 	upperrel->relids = bms_copy(relids);
+	upperrel->rows_scale = 1.0;
 	upperrel->pgs_mask = root->glob->default_pgs_mask;
 
 	/* cheap startup cost is interesting iff not all tuples to be retrieved */
