@@ -58,8 +58,7 @@ For example, while a query runs a Seq Scan below a NestLoop, the stack is:
 
 Entries are pushed when they start and popped when they stop.  Only entries
 that track buffer or WAL usage go on the stack; time is measured
-independently of it.  Plain Instrumentation entries, used outside of statement
-entries, still take snapshots of global counters instead.
+independently of it.
 
 Plan node counters are thus exclusive of the nodes below: they only count
 what happened while the node itself was on top, which includes statements
@@ -115,6 +114,10 @@ releases entries does not matter.  Child entries need no cleanup of their
 own, since they are only part of their statement's total.  The per-node
 breakdown of an aborted statement is lost, but its activity reaches the
 entry that was current when it started.
+
+Code that measures with a plain Instrumentation, outside of any statement
+entry, must instead stop and finalize it from a PG_FINALLY block, which
+also unwinds the stack.
 
 
 Memory

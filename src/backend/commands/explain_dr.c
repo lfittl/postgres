@@ -41,6 +41,8 @@ typedef struct SerializeDestReceiver
 	MemoryContext tmpcontext;	/* per-row temporary memory context */
 	StringInfoData buf;			/* buffer to hold the constructed message */
 	SerializeMetrics metrics;	/* collected metrics */
+	QueryInstrumentation *qinstr;	/* parent instrumentation to accumulate to */
+	Instrumentation *instr;		/* per-tuple measurement, a child of qinstr */
 } SerializeDestReceiver;
 
 /*
@@ -110,7 +112,7 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext oldcontext;
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
-	Instrumentation *instr = &myState->metrics.instr;
+	Instrumentation *instr = myState->instr;
 
 	/* Start per-tuple measurement */
 	InstrStart(instr);
@@ -219,13 +221,24 @@ serializeAnalyzeStartup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	/* The output buffer is re-used across rows, as in printtup.c */
 	initStringInfo(&receiver->buf);
 
-	/* Initialize metrics and per-tuple instrumentation */
+	/* Initialize metrics */
 	memset(&receiver->metrics, 0, sizeof(SerializeMetrics));
+
+	/*
+	 * Set up the per-tuple instrumentation as a child of the query
+	 * instrumentation, so the usage measured below is part of the query's
+	 * total, also on error.  Like all children, it must live in the query's
+	 * instrumentation context, which outlives this receiver on abort.
+	 */
+	Assert(receiver->qinstr != NULL);
 	if (receiver->es->timing)
 		instrument_options |= INSTRUMENT_TIMER;
 	if (receiver->es->buffers)
 		instrument_options |= INSTRUMENT_BUFFERS;
-	InstrInitOptions(&receiver->metrics.instr, instrument_options);
+	receiver->instr = MemoryContextAllocZero(receiver->qinstr->instr_cxt,
+											 sizeof(Instrumentation));
+	InstrInitOptions(receiver->instr, instrument_options);
+	InstrQueryRememberChild(receiver->qinstr, receiver->instr);
 }
 
 /*
@@ -235,6 +248,13 @@ static void
 serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	/*
+	 * Keep a copy of what we measured in the metrics, which outlive the
+	 * query's instrumentation context.  The entry stays registered with the
+	 * query entry, whose total includes it (see InstrQueryPassOnUsage).
+	 */
+	receiver->metrics.instr = *receiver->instr;
 
 	if (receiver->finfos)
 		pfree(receiver->finfos);
@@ -277,6 +297,23 @@ CreateExplainSerializeDestReceiver(ExplainState *es)
 	self->es = es;
 
 	return (DestReceiver *) self;
+}
+
+/*
+ * Set the query instrumentation that a serialize receiver accumulates to.
+ *
+ * Must be called after ExecutorStart has created the instrumentation and
+ * before the query runs.  A no-op for other receivers.
+ */
+void
+SetExplainSerializeQueryInstr(DestReceiver *self, QueryInstrumentation *qinstr)
+{
+	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	if (receiver->pub.mydest != DestExplainSerialize)
+		return;
+
+	receiver->qinstr = qinstr;
 }
 
 /*

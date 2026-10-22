@@ -25,7 +25,6 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
-BufferUsage pgBufferUsage;
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
 InstrStackState instr_stack = {
@@ -67,39 +66,21 @@ InstrStackGrow(void)
 }
 
 /* General purpose instrumentation handling */
-Instrumentation *
-InstrAlloc(int instrument_options)
-{
-	Instrumentation *instr = palloc0_object(Instrumentation);
-
-	InstrInitOptions(instr, instrument_options);
-	return instr;
-}
-
-void
-InstrInitOptions(Instrumentation *instr, int instrument_options)
-{
-	instr->need_bufusage = (instrument_options & INSTRUMENT_BUFFERS) != 0;
-	instr->need_walusage = (instrument_options & INSTRUMENT_WAL) != 0;
-	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
-}
-
 static inline bool
 InstrNeedStack(int instrument_options)
 {
 	return (instrument_options & (INSTRUMENT_BUFFERS | INSTRUMENT_WAL)) != 0;
 }
 
-/*
- * Common part of InstrStart and InstrStartNode: start the timer, and enter
- * the entry onto the instrumentation stack.
- *
- * The snapshot-based diffing (see struct comment in instrument.h) lives only
- * in InstrStart: node instrumentation never measures that way, so keeping the
- * checks out of here keeps them out of the per-tuple ExecProcNodeInstr path.
- */
-static inline void
-InstrStartCommon(Instrumentation *instr)
+void
+InstrInitOptions(Instrumentation *instr, int instrument_options)
+{
+	instr->need_stack = InstrNeedStack(instrument_options);
+	instr->need_timer = (instrument_options & INSTRUMENT_TIMER) != 0;
+}
+
+inline void
+InstrStart(Instrumentation *instr)
 {
 	if (instr->need_timer)
 	{
@@ -113,26 +94,9 @@ InstrStartCommon(Instrumentation *instr)
 		InstrPushStack(instr);
 }
 
-inline void
-InstrStart(Instrumentation *instr)
-{
-	InstrStartCommon(instr);
-
-	if (!instr->need_stack)
-	{
-		/* save buffer usage totals at start, if needed */
-		if (instr->need_bufusage)
-			instr->bufusage_start = pgBufferUsage;
-
-		if (instr->need_walusage)
-			instr->walusage_start = pgWalUsage;
-	}
-}
-
 /*
  * Helper for InstrStop() and InstrStopNode(), to avoid code duplication
- * despite slightly different needs about how time is accumulated.  Like
- * InstrStartCommon, this omits the snapshot-based diffing.
+ * despite slightly different needs about how time is accumulated.
  */
 static inline void
 InstrStopCommon(Instrumentation *instr, instr_time *accum_time)
@@ -160,18 +124,6 @@ void
 InstrStop(Instrumentation *instr)
 {
 	InstrStopCommon(instr, &instr->total);
-
-	if (!instr->need_stack)
-	{
-		/* Add delta of buffer usage since InstrStart to the totals */
-		if (instr->need_bufusage)
-			BufferUsageAccumDiff(&instr->bufusage,
-								 &pgBufferUsage, &instr->bufusage_start);
-
-		if (instr->need_walusage)
-			WalUsageAccumDiff(&instr->walusage,
-							  &pgWalUsage, &instr->walusage_start);
-	}
 }
 
 static void InstrQueryFinish(QueryInstrumentation *qinstr, bool allow_stopped);
@@ -412,7 +364,6 @@ InstrQueryInit(QueryInstrumentation *qinstr, int instrument_options)
 	qinstr->instrument_options = instrument_options;
 
 	InstrInitOptions(&qinstr->instr, instrument_options);
-	qinstr->instr.need_stack = InstrNeedStack(instrument_options);
 	dlist_init(&qinstr->children);
 }
 
@@ -560,14 +511,13 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
  * statement that has no query entry of its own (see InstrQueryAddWorkerUsage
  * otherwise).
  *
- * The usage goes to the global counters, and to whatever entry is current on
- * the stack, e.g. the plan node of an enclosing statement that ran this one
- * through a function, like the statement's own activity.
+ * The usage goes to whatever entry is current on the stack, e.g. the plan
+ * node of an enclosing statement that ran this one through a function, like
+ * the statement's own activity, and the WAL usage also to pgWalUsage.
  */
 void
 InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
 
 	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
@@ -580,12 +530,12 @@ InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
  *
  * The totals each worker reports cover everything it did, including its plan
  * nodes, whose per-node statistics the leader retrieves for EXPLAIN only (see
- * ExecParallelRetrieveInstrumentation).  The usage goes to the global
- * counters, and to the query entry's own counters rather than the current
- * stack entry: while the workers are shut down, that is typically the Gather
- * node, whose numbers EXPLAIN would then show the workers' plan node activity
- * in twice, once through these totals and once through the per-node
- * statistics of the nodes below it.
+ * ExecParallelRetrieveInstrumentation).  The usage goes to the query entry's
+ * own counters, and the WAL usage also to pgWalUsage.  It does not go to the
+ * current stack entry: while the workers are shut down, that is typically
+ * the Gather node, whose numbers EXPLAIN would then show the workers' plan
+ * node activity in twice, once through these totals and once through the
+ * per-node statistics of the nodes below it.
  *
  * An entry that does not track buffer/WAL usage is not on the stack, and
  * nothing passes on its counters, so the usage goes to the current entry
@@ -599,7 +549,6 @@ InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
 		? &qinstr->instr
 		: instr_stack.current;
 
-	BufferUsageAdd(&pgBufferUsage, bufusage);
 	WalUsageAdd(&pgWalUsage, walusage);
 
 	BufferUsageAdd(&target->bufusage, bufusage);
@@ -628,7 +577,6 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 {
 	memset(instr, 0, sizeof(NodeInstrumentation));
 	InstrInitOptions(&instr->instr, instrument_options);
-	instr->instr.need_stack = InstrNeedStack(instrument_options);
 	instr->async_mode = async_mode;
 }
 
@@ -636,7 +584,7 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 inline void
 InstrStartNode(NodeInstrumentation *instr)
 {
-	InstrStartCommon(&instr->instr);
+	InstrStart(&instr->instr);
 }
 
 
