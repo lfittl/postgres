@@ -939,11 +939,10 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
-
-		InstrStop(&instr);
 
 		pgss_store(query_string,
 				   parse->queryId,
