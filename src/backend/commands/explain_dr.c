@@ -236,6 +236,9 @@ serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
 
+	/* Add what we measured to the current instrumentation stack entry */
+	InstrAccumStack(instr_stack.current, &receiver->metrics.instr);
+
 	if (receiver->finfos)
 		pfree(receiver->finfos);
 	receiver->finfos = NULL;
