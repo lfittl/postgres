@@ -213,6 +213,13 @@ typedef struct Plan
 	int			plan_width;
 
 	/*
+	 * ratio of plan_rows to the estimate the planner would have made without
+	 * any rows override (see RowsOverride in pathnodes.h); 1.0 if no override
+	 * was applied to the relation this node was created for
+	 */
+	double		rows_scale;
+
+	/*
 	 * information needed for parallel query
 	 */
 	/* engage parallel-aware logic? */

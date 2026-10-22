@@ -115,6 +115,8 @@ static void set_foreign_size(PlannerInfo *root, RelOptInfo *rel,
 							 RangeTblEntry *rte);
 static void set_foreign_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								 RangeTblEntry *rte);
+static void scale_appendrel_children(PlannerInfo *root, RelOptInfo *rel,
+									 double factor);
 static void set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 								Index rti, RangeTblEntry *rte);
 static void set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
@@ -1002,6 +1004,41 @@ set_foreign_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 }
 
 /*
+ * scale_appendrel_children
+ *	  Multiply the row estimates of all live children of an appendrel (and
+ *	  recursively their children) by factor, in support of an absolute rows
+ *	  override on the appendrel.
+ *
+ * Children that have already built their paths, such as subqueries and CTEs,
+ * are left alone: their paths copied the earlier estimate, and adjusting the
+ * rel now would only make the two disagree.
+ */
+static void
+scale_appendrel_children(PlannerInfo *root, RelOptInfo *rel, double factor)
+{
+	ListCell   *l;
+
+	foreach(l, root->append_rel_list)
+	{
+		AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(l);
+		RelOptInfo *childrel;
+
+		if (appinfo->parent_relid != rel->relid)
+			continue;
+
+		childrel = find_base_rel(root, appinfo->child_relid);
+
+		if (IS_DUMMY_REL(childrel) || childrel->pathlist != NIL)
+			continue;
+
+		childrel->rows = clamp_row_est(childrel->rows * factor);
+		childrel->rows_scale *= factor;
+
+		scale_appendrel_children(root, childrel, factor);
+	}
+}
+
+/*
  * set_append_rel_size
  *	  Set size estimates for a simple "append relation"
  *
@@ -1023,6 +1060,7 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 	double		parent_size;
 	double	   *parent_attrsizes;
 	int			nattrs;
+	RowsOverride *override;
 	ListCell   *l;
 
 	/* Guard against stack overflow due to overly deep inheritance tree. */
@@ -1070,6 +1108,19 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 	parent_size = 0;
 	nattrs = rel->max_attr - rel->min_attr + 1;
 	parent_attrsizes = palloc0_array(double, nattrs);
+
+	/*
+	 * Look for a rows override for the appendrel as a whole.  A
+	 * multiplicative override, or a factor inherited from a parent appendrel,
+	 * is recorded in rows_scale right away so that the children pick it up as
+	 * they are sized.  An absolute override cannot be applied until the
+	 * children's estimates have been summed; see below.
+	 */
+	override = find_rows_override(root, rel->relids);
+	if (override != NULL && override->kind == ROWS_OVERRIDE_MULTIPLY)
+		rel->rows_scale = override->value;
+	else if (override == NULL)
+		rel->rows_scale = inherited_rows_scale(root, rel);
 
 	foreach(l, root->append_rel_list)
 	{
@@ -1293,6 +1344,22 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 		rel->reltarget->width = rint(parent_size / parent_rows);
 		for (i = 0; i < nattrs; i++)
 			rel->attr_widths[i] = rint(parent_attrsizes[i] / parent_rows);
+
+		/*
+		 * Now that the standard total is known, apply an absolute rows
+		 * override.  Append paths sum the row counts of their subpaths, so
+		 * the resulting factor is distributed over the children to keep the
+		 * two in agreement.
+		 */
+		if (override != NULL && override->kind == ROWS_OVERRIDE_ABSOLUTE)
+		{
+			double		new_rows = clamp_row_est(override->value);
+			double		factor = new_rows / parent_rows;
+
+			rel->rows = new_rows;
+			rel->rows_scale = factor;
+			scale_appendrel_children(root, rel, factor);
+		}
 
 		/*
 		 * Note that we leave rel->pages as zero; this is important to avoid

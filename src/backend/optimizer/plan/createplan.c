@@ -1939,6 +1939,7 @@ create_projection_plan(PlannerInfo *root, ProjectionPath *best_path, int flags)
 		plan->total_cost = best_path->path.total_cost;
 		plan->plan_rows = best_path->path.rows;
 		plan->plan_width = best_path->path.pathtarget->width;
+		plan->rows_scale = best_path->path.parent->rows_scale;
 		plan->parallel_safe = best_path->path.parallel_safe;
 		/* ... but don't change subplan's parallel_aware flag */
 	}
@@ -2436,6 +2437,7 @@ create_minmaxagg_plan(PlannerInfo *root, MinMaxAggPath *best_path)
 		sqplan->startup_cost = mminfo->path->startup_cost;
 		sqplan->total_cost = mminfo->pathcost;
 		sqplan->plan_rows = 1;
+		sqplan->rows_scale = 1.0;
 		sqplan->plan_width = mminfo->path->pathtarget->width;
 		sqplan->parallel_aware = false;
 		sqplan->parallel_safe = mminfo->path->parallel_safe;
@@ -3217,6 +3219,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 		plan->plan_rows =
 			clamp_row_est(apath->bitmapselectivity * apath->path.parent->tuples);
 		plan->plan_width = 0;	/* meaningless */
+		plan->rows_scale = 1.0;
 		plan->parallel_aware = false;
 		plan->parallel_safe = apath->path.parallel_safe;
 		*qual = subquals;
@@ -3281,6 +3284,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 			plan->plan_rows =
 				clamp_row_est(opath->bitmapselectivity * opath->path.parent->tuples);
 			plan->plan_width = 0;	/* meaningless */
+			plan->rows_scale = 1.0;
 			plan->parallel_aware = false;
 			plan->parallel_safe = opath->path.parallel_safe;
 		}
@@ -3328,6 +3332,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 		plan->plan_rows =
 			clamp_row_est(ipath->indexselectivity * ipath->path.parent->tuples);
 		plan->plan_width = 0;	/* meaningless */
+		plan->rows_scale = 1.0;
 		plan->parallel_aware = false;
 		plan->parallel_safe = ipath->path.parallel_safe;
 		/* Extract original index clauses, actual index quals, relevant ECs */
@@ -5421,6 +5426,7 @@ copy_generic_path_info(Plan *dest, Path *src)
 	dest->total_cost = src->total_cost;
 	dest->plan_rows = src->rows;
 	dest->plan_width = src->pathtarget->width;
+	dest->rows_scale = src->parent->rows_scale;
 	dest->parallel_aware = src->parallel_aware;
 	dest->parallel_safe = src->parallel_safe;
 }
@@ -5437,6 +5443,7 @@ copy_plan_costsize(Plan *dest, Plan *src)
 	dest->total_cost = src->total_cost;
 	dest->plan_rows = src->plan_rows;
 	dest->plan_width = src->plan_width;
+	dest->rows_scale = src->rows_scale;
 	/* Assume the inserted node is not parallel-aware. */
 	dest->parallel_aware = false;
 	/* Assume the inserted node is parallel-safe, if child plan is. */
@@ -5472,6 +5479,7 @@ label_sort_with_costsize(PlannerInfo *root, Sort *plan, double limit_tuples)
 	plan->plan.total_cost = sort_path.total_cost;
 	plan->plan.plan_rows = lefttree->plan_rows;
 	plan->plan.plan_width = lefttree->plan_width;
+	plan->plan.rows_scale = lefttree->rows_scale;
 	plan->plan.parallel_aware = false;
 	plan->plan.parallel_safe = lefttree->parallel_safe;
 }
@@ -5504,6 +5512,7 @@ label_incrementalsort_with_costsize(PlannerInfo *root, IncrementalSort *plan,
 	plan->sort.plan.total_cost = sort_path.total_cost;
 	plan->sort.plan.plan_rows = lefttree->plan_rows;
 	plan->sort.plan.plan_width = lefttree->plan_width;
+	plan->sort.plan.rows_scale = lefttree->rows_scale;
 	plan->sort.plan.parallel_aware = false;
 	plan->sort.plan.parallel_safe = lefttree->parallel_safe;
 }
@@ -6607,6 +6616,7 @@ materialize_finished_plan(Plan *subplan)
 	matplan->total_cost = matpath.total_cost + initplan_cost;
 	matplan->plan_rows = subplan->plan_rows;
 	matplan->plan_width = subplan->plan_width;
+	matplan->rows_scale = subplan->rows_scale;
 	matplan->parallel_aware = false;
 	matplan->parallel_safe = subplan->parallel_safe;
 

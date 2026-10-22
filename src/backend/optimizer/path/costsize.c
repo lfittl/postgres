@@ -205,6 +205,7 @@ static int32 get_expr_width(PlannerInfo *root, const Node *expr);
 static double relation_byte_size(double tuples, int width);
 static double page_size(double tuples, int width);
 static double get_parallel_divisor(Path *path);
+static Relids rows_override_relids(PlannerInfo *root, Relids relids);
 
 
 /*
@@ -5591,6 +5592,161 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
 
 
 /*
+ * rows_override_relids
+ *		Reduce relids to the set that identifies a relation for the purpose
+ *		of rows overrides.
+ *
+ * Join relations carry the relids of the outer joins they have completed in
+ * addition to their member base relations (see outer_join_rels).  Callers
+ * registering an override only know the base relations, and typically run
+ * before the outer-join relids have even been assigned, so overrides are
+ * matched on base relids alone.
+ */
+static Relids
+rows_override_relids(PlannerInfo *root, Relids relids)
+{
+	if (root->outer_join_rels != NULL &&
+		bms_overlap(relids, root->outer_join_rels))
+		return bms_difference(relids, root->outer_join_rels);
+	return relids;
+}
+
+/*
+ * add_rows_override
+ *		Register a row count override for the relation identified by relids.
+ *
+ * This is the interface for extensions; see the comments for RowsOverride in
+ * pathnodes.h for the semantics.  The relids set is copied.
+ */
+void
+add_rows_override(PlannerInfo *root, Relids relids,
+				  RowsOverrideKind kind, double value)
+{
+	RowsOverride *override;
+
+	relids = rows_override_relids(root, relids);
+	if (bms_is_empty(relids))
+		elog(ERROR, "rows override must apply to at least one relation");
+	if (isnan(value) || isinf(value) || value < 0.0)
+		elog(ERROR, "rows override value must be a non-negative finite number");
+	if (kind == ROWS_OVERRIDE_MULTIPLY && value == 0.0)
+		elog(ERROR, "rows override multiplier must be positive");
+
+	override = makeNode(RowsOverride);
+	override->relids = bms_copy(relids);
+	override->kind = kind;
+	override->value = value;
+
+	root->rows_overrides = lappend(root->rows_overrides, override);
+}
+
+/*
+ * find_rows_override
+ *		Return the most recently registered override for the relation
+ *		identified by relids, or NULL if there is none.
+ *
+ * Outer-join relids in the given set are ignored, so that the relids of a
+ * join relation match an override registered for its base relations.
+ */
+RowsOverride *
+find_rows_override(PlannerInfo *root, Relids relids)
+{
+	RowsOverride *result = NULL;
+	ListCell   *lc;
+
+	if (root->rows_overrides == NIL)
+		return NULL;
+
+	relids = rows_override_relids(root, relids);
+
+	foreach(lc, root->rows_overrides)
+	{
+		RowsOverride *override = lfirst_node(RowsOverride, lc);
+
+		if (bms_equal(override->relids, relids))
+			result = override;
+	}
+
+	return result;
+}
+
+/*
+ * inherited_rows_scale
+ *		Return the rows_scale factor a child relation inherits from its
+ *		topmost parent, or 1.0 if it has no parent or the parent is unknown.
+ *
+ * For child join relations the parent join relation has already been sized
+ * by the time the child is built, so its factor is final.  For child base
+ * relations the parent's factor is only known in advance for multiplicative
+ * overrides; set_append_rel_size() takes care of absolute ones after it has
+ * summed the children.
+ */
+double
+inherited_rows_scale(PlannerInfo *root, RelOptInfo *rel)
+{
+	RelOptInfo *parent;
+
+	if (rel->top_parent_relids == NULL)
+		return 1.0;
+
+	if (IS_JOIN_REL(rel))
+		parent = find_join_rel(root, rel->top_parent_relids);
+	else
+		parent = find_base_rel(root,
+							   bms_singleton_member(rel->top_parent_relids));
+
+	if (parent == NULL)
+		return 1.0;
+
+	return parent->rows_scale;
+}
+
+/*
+ * apply_rows_override
+ *		Adjust rel->rows according to any registered override, and set
+ *		rel->rows_scale accordingly.
+ *
+ * Must be called after the standard estimate has been stored in rel->rows.
+ * Grouped relations share relids with the relation they were derived from,
+ * so overrides are never applied to them.
+ */
+static void
+apply_rows_override(PlannerInfo *root, RelOptInfo *rel)
+{
+	double		standard_rows = rel->rows;
+	double		new_rows;
+	RowsOverride *override;
+
+	rel->rows_scale = 1.0;
+
+	if (root->rows_overrides == NIL || IS_GROUPED_REL(rel))
+		return;
+
+	Assert(standard_rows > 0);
+
+	override = find_rows_override(root, rel->relids);
+	if (override != NULL)
+	{
+		if (override->kind == ROWS_OVERRIDE_ABSOLUTE)
+			new_rows = override->value;
+		else
+			new_rows = standard_rows * override->value;
+	}
+	else
+	{
+		double		scale = inherited_rows_scale(root, rel);
+
+		if (scale == 1.0)
+			return;
+		new_rows = standard_rows * scale;
+	}
+
+	new_rows = clamp_row_est(new_rows);
+	rel->rows = new_rows;
+	rel->rows_scale = new_rows / standard_rows;
+}
+
+/*
  * set_baserel_size_estimates
  *		Set the size estimates for the given base relation.
  *
@@ -5600,6 +5756,7 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
  * We set the following fields of the rel node:
  *	rows: the estimated number of output tuples (after applying
  *		  restriction clauses).
+ *	rows_scale: the factor by which a rows override changed rows, if any.
  *	width: the estimated average output tuple width in bytes.
  *	baserestrictcost: estimated cost of evaluating baserestrictinfo clauses.
  */
@@ -5619,6 +5776,8 @@ set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 							   NULL);
 
 	rel->rows = clamp_row_est(nrows);
+
+	apply_rows_override(root, rel);
 
 	cost_qual_eval(&rel->baserestrictcost, rel->baserestrictinfo, root);
 
@@ -5654,6 +5813,9 @@ get_parameterized_baserel_size(PlannerInfo *root, RelOptInfo *rel,
 							   JOIN_INNER,
 							   NULL);
 	nrows = clamp_row_est(nrows);
+	/* Apply the same correction a rows override made to the base estimate */
+	if (rel->rows_scale != 1.0)
+		nrows = clamp_row_est(nrows * rel->rows_scale);
 	/* For safety, make sure result is not more than the base estimate */
 	if (nrows > rel->rows)
 		nrows = rel->rows;
@@ -5679,8 +5841,9 @@ get_parameterized_baserel_size(PlannerInfo *root, RelOptInfo *rel,
  * anyway we must keep the rowcount estimate the same for all paths for the
  * joinrel.)
  *
- * We set only the rows field here.  The reltarget field was already set by
- * build_joinrel_tlist, and baserestrictcost is not used for join rels.
+ * We set only the rows and rows_scale fields here.  The reltarget field was
+ * already set by build_joinrel_tlist, and baserestrictcost is not used for
+ * join rels.
  */
 void
 set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
@@ -5697,6 +5860,8 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										   inner_rel->rows,
 										   sjinfo,
 										   restrictlist);
+
+	apply_rows_override(root, rel);
 }
 
 /*
@@ -5740,6 +5905,9 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
 									   inner_path->rows,
 									   sjinfo,
 									   restrict_clauses);
+	/* Apply the same correction a rows override made to the base estimate */
+	if (rel->rows_scale != 1.0)
+		nrows = clamp_row_est(nrows * rel->rows_scale);
 	/* For safety, make sure result is not more than the base estimate */
 	if (nrows > rel->rows)
 		nrows = rel->rows;
