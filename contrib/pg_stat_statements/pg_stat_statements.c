@@ -1167,17 +1167,14 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		!IsA(parsetree, ExecuteStmt) &&
 		!IsA(parsetree, PrepareStmt))
 	{
-		instr_time	start;
-		instr_time	duration;
 		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
 
-		bufusage_start = pgBufferUsage;
-		walusage_start = pgWalUsage;
-		INSTR_TIME_SET_CURRENT(start);
+		/*
+		 * Request statement-level instrumentation (timing, buffers and WAL)
+		 * so that we can read the command's resource usage from desc->instr
+		 * below, the same way we read query_instr for optimizable statements.
+		 */
+		desc->instr_options |= INSTRUMENT_ALL;
 
 		nesting_level++;
 		PG_TRY();
@@ -1204,9 +1201,6 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		 */
 		pstmt = NULL;
 
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
 		 * statements of COPY, FETCH, CREATE TABLE AS, CREATE MATERIALIZED
@@ -1218,29 +1212,27 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
-
-		pgss_store(queryString,
-				   saved_queryId,
-				   saved_stmt_location,
-				   saved_stmt_len,
-				   nesting_level == 0,
-				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(duration),
-				   rows,
-				   &bufusage,
-				   &walusage,
-				   NULL,
-				   NULL,
-				   0,
-				   0,
-				   saved_planOrigin);
+		/*
+		 * standard_ProcessUtility allocates desc->instr when instrumentation
+		 * was requested; it stays NULL only if another hook took over and
+		 * skipped it, in which case we have nothing to record.
+		 */
+		if (desc->instr)
+			pgss_store(queryString,
+					   saved_queryId,
+					   saved_stmt_location,
+					   saved_stmt_len,
+					   nesting_level == 0,
+					   PGSS_EXEC,
+					   INSTR_TIME_GET_MILLISEC(desc->instr->total),
+					   rows,
+					   &desc->instr->bufusage,
+					   &desc->instr->walusage,
+					   NULL,
+					   NULL,
+					   0,
+					   0,
+					   saved_planOrigin);
 	}
 	else
 	{

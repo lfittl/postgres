@@ -57,6 +57,7 @@
 #include "commands/vacuum.h"
 #include "commands/view.h"
 #include "commands/wait.h"
+#include "executor/instrument.h"
 #include "miscadmin.h"
 #include "parser/parse_utilcmd.h"
 #include "postmaster/bgwriter.h"
@@ -69,6 +70,14 @@
 
 /* Hook for plugins to get control in ProcessUtility() */
 ProcessUtility_hook_type ProcessUtility_hook = NULL;
+
+/*
+ * The utility statement currently executing, or NULL.  Set around each
+ * ProcessUtility() call so that code with no direct handle on the descriptor
+ * (e.g. a parallel CREATE INDEX or VACUUM leader importing worker usage into
+ * the command's instrumentation) can reach it.
+ */
+UtilityStmtDesc *ActiveUtilityStmtDesc = NULL;
 
 /* local function declarations */
 static int	ClassifyUtilityCommandAsReadOnly(Node *parsetree);
@@ -500,20 +509,36 @@ CheckRestrictedOperation(const char *cmdname)
 void
 ProcessUtility(UtilityStmtDesc *desc)
 {
+	UtilityStmtDesc *save_ActiveUtilityStmtDesc;
+
 	Assert(IsA(desc->pstmt, PlannedStmt));
 	Assert(desc->pstmt->commandType == CMD_UTILITY);
 	Assert(desc->queryString != NULL);	/* required as of 8.4 */
 	Assert(desc->qc == NULL || desc->qc->commandTag == CMDTAG_UNKNOWN);
 
 	/*
+	 * Publish the descriptor as the active utility statement for the duration
+	 * of the call (saving/restoring any outer one, so nesting and errors are
+	 * handled), then run it.
+	 *
 	 * We provide a function hook variable that lets loadable plugins get
 	 * control when ProcessUtility is called.  Such a plugin would normally
 	 * call standard_ProcessUtility().
 	 */
-	if (ProcessUtility_hook)
-		(*ProcessUtility_hook) (desc);
-	else
-		standard_ProcessUtility(desc);
+	save_ActiveUtilityStmtDesc = ActiveUtilityStmtDesc;
+	ActiveUtilityStmtDesc = desc;
+	PG_TRY();
+	{
+		if (ProcessUtility_hook)
+			(*ProcessUtility_hook) (desc);
+		else
+			standard_ProcessUtility(desc);
+	}
+	PG_FINALLY();
+	{
+		ActiveUtilityStmtDesc = save_ActiveUtilityStmtDesc;
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -549,6 +574,17 @@ standard_ProcessUtility(UtilityStmtDesc *desc)
 
 	/* This can recurse, so check for excessive recursion */
 	check_stack_depth();
+
+	/*
+	 * Set up statement-level instrumentation if a consumer requested it via
+	 * desc->instr_options (see UtilityStmtDesc).  We bracket the whole
+	 * command below so the totals cover any recursively-processed
+	 * sub-commands too.
+	 */
+	if (desc->instr_options)
+		desc->instr = InstrAlloc(desc->instr_options);
+	if (desc->instr)
+		InstrStart(desc->instr);
 
 	/*
 	 * If the given node tree is read-only, make a copy to ensure that parse
@@ -1070,6 +1106,9 @@ standard_ProcessUtility(UtilityStmtDesc *desc)
 	 * #15631).
 	 */
 	CommandCounterIncrement();
+
+	if (desc->instr)
+		InstrStop(desc->instr);
 }
 
 /*

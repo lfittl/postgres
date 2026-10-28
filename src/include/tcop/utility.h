@@ -86,11 +86,26 @@ typedef struct UtilityStmtDesc
 	DestReceiver *dest;			/* where to send results, if any */
 	QueryCompletion *qc;		/* where to store command completion status,
 								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility-command counterpart of
+	 * QueryDesc's query_instr.  A consumer (e.g. pg_stat_statements) requests
+	 * it by OR-ing InstrumentOption flags into instr_options before the
+	 * command runs; standard_ProcessUtility then allocates instr and brackets
+	 * the command with it, and the consumer reads the totals afterwards. Left
+	 * at 0/NULL when nobody requested instrumentation.
+	 */
+	int			instr_options;	/* OR of InstrumentOption flags for instr */
+	struct Instrumentation *instr;	/* statement-level instrumentation, or
+									 * NULL */
 } UtilityStmtDesc;
 
 /* Hook for plugins to get control in ProcessUtility() */
 typedef void (*ProcessUtility_hook_type) (UtilityStmtDesc *desc);
 extern PGDLLIMPORT ProcessUtility_hook_type ProcessUtility_hook;
+
+/* The utility statement currently executing, or NULL (see utility.c) */
+extern PGDLLIMPORT UtilityStmtDesc *ActiveUtilityStmtDesc;
 
 extern void ProcessUtility(UtilityStmtDesc *desc);
 extern void standard_ProcessUtility(UtilityStmtDesc *desc);

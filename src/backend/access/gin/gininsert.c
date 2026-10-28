@@ -32,6 +32,7 @@
 #include "storage/proc.h"
 #include "storage/predicate.h"
 #include "tcop/tcopprot.h"
+#include "tcop/utility.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 #include "utils/builtins.h"
@@ -1124,8 +1125,10 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 	 * Next, accumulate WAL usage.  (This must wait for the workers to finish,
 	 * or we might get incomplete data.)
 	 */
-	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
+	if (ActiveUtilityStmtDesc && ActiveUtilityStmtDesc->instr)
+		for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
+			InstrAccumParallelQuery(ActiveUtilityStmtDesc->instr,
+									&ginleader->bufferusage[i], &ginleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(ginleader->snapshot))
