@@ -1187,19 +1187,18 @@ execute_sql_string(const char *sql, const char *filename)
 			}
 			else
 			{
+				UtilityStmtDesc utilityDesc = {0};
+
 				if (IsA(stmt->utilityStmt, TransactionStmt))
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("transaction control statements are not allowed within an extension script")));
 
-				ProcessUtility(stmt,
-							   sql,
-							   false,
-							   PROCESS_UTILITY_QUERY,
-							   NULL,
-							   NULL,
-							   dest,
-							   NULL);
+				utilityDesc.pstmt = stmt;
+				utilityDesc.queryString = sql;
+				utilityDesc.context = PROCESS_UTILITY_QUERY;
+				utilityDesc.dest = dest;
+				ProcessUtility(&utilityDesc);
 			}
 
 			PopActiveSnapshot();

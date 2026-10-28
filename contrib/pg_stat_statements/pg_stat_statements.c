@@ -362,11 +362,7 @@ static void pgss_ExecutorRun(QueryDesc *queryDesc,
 							 uint64 count);
 static void pgss_ExecutorFinish(QueryDesc *queryDesc);
 static void pgss_ExecutorEnd(QueryDesc *queryDesc);
-static void pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-								bool readOnlyTree,
-								ProcessUtilityContext context, ParamListInfo params,
-								QueryEnvironment *queryEnv,
-								DestReceiver *dest, QueryCompletion *qc);
+static void pgss_ProcessUtility(UtilityStmtDesc *desc);
 static void pgss_store(const char *query, int64 queryId,
 					   int query_location, int query_len,
 					   bool toplevel,
@@ -1125,12 +1121,11 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
  * ProcessUtility hook
  */
 static void
-pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-					bool readOnlyTree,
-					ProcessUtilityContext context,
-					ParamListInfo params, QueryEnvironment *queryEnv,
-					DestReceiver *dest, QueryCompletion *qc)
+pgss_ProcessUtility(UtilityStmtDesc *desc)
 {
+	PlannedStmt *pstmt = desc->pstmt;
+	const char *queryString = desc->queryString;
+	QueryCompletion *qc = desc->qc;
 	Node	   *parsetree = pstmt->utilityStmt;
 	int64		saved_queryId = pstmt->queryId;
 	int			saved_stmt_location = pstmt->stmt_location;
@@ -1188,13 +1183,9 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		PG_TRY();
 		{
 			if (prev_ProcessUtility)
-				prev_ProcessUtility(pstmt, queryString, readOnlyTree,
-									context, params, queryEnv,
-									dest, qc);
+				prev_ProcessUtility(desc);
 			else
-				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-										context, params, queryEnv,
-										dest, qc);
+				standard_ProcessUtility(desc);
 		}
 		PG_FINALLY();
 		{
@@ -1274,13 +1265,9 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		PG_TRY();
 		{
 			if (prev_ProcessUtility)
-				prev_ProcessUtility(pstmt, queryString, readOnlyTree,
-									context, params, queryEnv,
-									dest, qc);
+				prev_ProcessUtility(desc);
 			else
-				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-										context, params, queryEnv,
-										dest, qc);
+				standard_ProcessUtility(desc);
 		}
 		PG_FINALLY();
 		{

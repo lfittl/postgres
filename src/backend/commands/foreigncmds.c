@@ -1656,6 +1656,7 @@ ImportForeignSchema(ImportForeignSchemaStmt *stmt)
 			RawStmt    *rs = lfirst_node(RawStmt, lc2);
 			CreateForeignTableStmt *cstmt = (CreateForeignTableStmt *) rs->stmt;
 			PlannedStmt *pstmt;
+			UtilityStmtDesc utilityDesc = {0};
 
 			/*
 			 * Because we only allow CreateForeignTableStmt, we can skip parse
@@ -1686,9 +1687,11 @@ ImportForeignSchema(ImportForeignSchemaStmt *stmt)
 			pstmt->planOrigin = PLAN_STMT_INTERNAL;
 
 			/* Execute statement */
-			ProcessUtility(pstmt, cmd, false,
-						   PROCESS_UTILITY_SUBCOMMAND, NULL, NULL,
-						   None_Receiver, NULL);
+			utilityDesc.pstmt = pstmt;
+			utilityDesc.queryString = cmd;
+			utilityDesc.context = PROCESS_UTILITY_SUBCOMMAND;
+			utilityDesc.dest = None_Receiver;
+			ProcessUtility(&utilityDesc);
 
 			/* Be sure to advance the command counter between subcommands */
 			CommandCounterIncrement();
