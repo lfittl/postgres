@@ -67,26 +67,48 @@ typedef struct AlterTableUtilityContext
 	 COMMAND_OK_IN_PARALLEL_MODE)
 #define COMMAND_IS_NOT_READ_ONLY	0
 
+/*
+ * UtilityStmtDesc bundles everything needed to execute one utility statement,
+ * the way QueryDesc does for optimizable statements.  Collecting these into a
+ * single struct keeps ProcessUtility() and its hook from having to grow a new
+ * parameter -- and break every ProcessUtility_hook -- each time a new piece of
+ * per-statement state is needed.
+ */
+typedef struct UtilityStmtDesc
+{
+	PlannedStmt *pstmt;			/* the utility statement to execute */
+	const char *queryString;	/* source text of the command */
+	bool		readOnlyTree;	/* if true, pstmt's node tree must not be
+								 * modified */
+	ProcessUtilityContext context;	/* identifies source of the command */
+	ParamListInfo params;		/* parameters to use during execution */
+	QueryEnvironment *queryEnv; /* environment for parse analysis, etc. */
+	DestReceiver *dest;			/* where to send results, if any */
+	QueryCompletion *qc;		/* where to store command completion status,
+								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility-command counterpart of
+	 * QueryDesc's query_instr.  A consumer (e.g. pg_stat_statements) requests
+	 * it by OR-ing InstrumentOption flags into instr_options before the
+	 * command runs; standard_ProcessUtility then allocates instr and brackets
+	 * the command with it, and the consumer reads the totals afterwards. Left
+	 * at 0/NULL when nobody requested instrumentation.
+	 */
+	int			instr_options;	/* OR of InstrumentOption flags for instr */
+	struct Instrumentation *instr;	/* statement-level instrumentation, or
+									 * NULL */
+} UtilityStmtDesc;
+
 /* Hook for plugins to get control in ProcessUtility() */
-typedef void (*ProcessUtility_hook_type) (PlannedStmt *pstmt,
-										  const char *queryString,
-										  bool readOnlyTree,
-										  ProcessUtilityContext context,
-										  ParamListInfo params,
-										  QueryEnvironment *queryEnv,
-										  DestReceiver *dest, QueryCompletion *qc);
+typedef void (*ProcessUtility_hook_type) (UtilityStmtDesc *desc);
 extern PGDLLIMPORT ProcessUtility_hook_type ProcessUtility_hook;
 
-extern void ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-						   bool readOnlyTree,
-						   ProcessUtilityContext context, ParamListInfo params,
-						   QueryEnvironment *queryEnv,
-						   DestReceiver *dest, QueryCompletion *qc);
-extern void standard_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-									bool readOnlyTree,
-									ProcessUtilityContext context, ParamListInfo params,
-									QueryEnvironment *queryEnv,
-									DestReceiver *dest, QueryCompletion *qc);
+/* The utility statement currently executing, or NULL (see utility.c) */
+extern PGDLLIMPORT UtilityStmtDesc *ActiveUtilityStmtDesc;
+
+extern void ProcessUtility(UtilityStmtDesc *desc);
+extern void standard_ProcessUtility(UtilityStmtDesc *desc);
 
 extern void ProcessUtilityForAlterTable(Node *stmt,
 										AlterTableUtilityContext *context);

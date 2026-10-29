@@ -259,6 +259,9 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	if (queryDesc->query_instr_options)
 		queryDesc->query_instr = InstrAlloc(queryDesc->query_instr_options);
 
+	/* Let parallel leader code reach the query-level instrumentation */
+	estate->es_query_instr = queryDesc->query_instr;
+
 	/*
 	 * Set up an AFTER-trigger statement context, unless told not to, or
 	 * unless it's EXPLAIN-only mode (when ExecutorFinish won't be called).

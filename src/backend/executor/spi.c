@@ -2702,6 +2702,7 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 			{
 				ProcessUtilityContext context;
 				QueryCompletion qc;
+				UtilityStmtDesc utilityDesc = {0};
 
 				/*
 				 * If we're not allowing nonatomic operations, tell
@@ -2713,14 +2714,17 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 					context = PROCESS_UTILITY_QUERY;
 
 				InitializeQueryCompletion(&qc);
-				ProcessUtility(stmt,
-							   plansource->query_string,
-							   true,	/* protect plancache's node tree */
-							   context,
-							   options->params,
-							   _SPI_current->queryEnv,
-							   dest,
-							   &qc);
+
+				utilityDesc.pstmt = stmt;
+				utilityDesc.queryString = plansource->query_string;
+				utilityDesc.readOnlyTree = true;	/* protect plancache's
+													 * node tree */
+				utilityDesc.context = context;
+				utilityDesc.params = options->params;
+				utilityDesc.queryEnv = _SPI_current->queryEnv;
+				utilityDesc.dest = dest;
+				utilityDesc.qc = &qc;
+				ProcessUtility(&utilityDesc);
 
 				/* Update "processed" if stmt returned tuples */
 				if (_SPI_current->tuptable)

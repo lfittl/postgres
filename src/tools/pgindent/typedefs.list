@@ -3330,6 +3330,7 @@ UserAuth
 UserContext
 UserMapping
 UserOpts
+UtilityStmtDesc
 VMCorruptionType
 VacAttrStats
 VacAttrStatsP

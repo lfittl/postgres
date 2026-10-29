@@ -47,6 +47,7 @@
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "tcop/utility.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -989,8 +990,10 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 		/* Wait for all vacuum workers to finish */
 		WaitForParallelWorkersToFinish(pvs->pcxt);
 
-		for (int i = 0; i < pvs->pcxt->nworkers_launched; i++)
-			InstrAccumParallelQuery(&pvs->buffer_usage[i], &pvs->wal_usage[i]);
+		if (ActiveUtilityStmtDesc && ActiveUtilityStmtDesc->instr)
+			for (int i = 0; i < pvs->pcxt->nworkers_launched; i++)
+				InstrAccumParallelQuery(ActiveUtilityStmtDesc->instr,
+										&pvs->buffer_usage[i], &pvs->wal_usage[i]);
 	}
 
 	/*
