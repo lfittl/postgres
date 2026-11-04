@@ -55,6 +55,7 @@
 #include "storage/condition_variable.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "tcop/utility.h"
 #include "utils/rel.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplesort.h"
@@ -1619,8 +1620,10 @@ _bt_end_parallel(BTLeader *btleader)
 	 * Next, accumulate WAL usage.  (This must wait for the workers to finish,
 	 * or we might get incomplete data.)
 	 */
-	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
+	if (ActiveUtilityStmtDesc && ActiveUtilityStmtDesc->instr)
+		for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
+			InstrAccumParallelQuery(ActiveUtilityStmtDesc->instr,
+									&btleader->bufferusage[i], &btleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(btleader->snapshot))

@@ -37,6 +37,7 @@
 #include "storage/freespace.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
+#include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/datum.h"
 #include "utils/fmgrprotos.h"
@@ -2572,8 +2573,10 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	 * Next, accumulate WAL usage.  (This must wait for the workers to finish,
 	 * or we might get incomplete data.)
 	 */
-	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
+	if (ActiveUtilityStmtDesc && ActiveUtilityStmtDesc->instr)
+		for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
+			InstrAccumParallelQuery(ActiveUtilityStmtDesc->instr,
+									&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(brinleader->snapshot))

@@ -292,12 +292,16 @@ InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
 	WalUsageAccumDiff(walusage, &pgWalUsage, &save_pgWalUsage);
 }
 
-/* accumulate work done by workers in leader's stats */
+/*
+ * Accumulate a parallel worker's usage into the given query/command-level
+ * instrumentation.  Not added to the global pgBufferUsage/pgWalUsage, which
+ * feed per-process cluster stats each worker already reports for itself.
+ */
 void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrAccumParallelQuery(Instrumentation *dst, BufferUsage *bufusage, WalUsage *walusage)
 {
-	BufferUsageAdd(&pgBufferUsage, bufusage);
-	WalUsageAdd(&pgWalUsage, walusage);
+	BufferUsageAdd(&dst->bufusage, bufusage);
+	WalUsageAdd(&dst->walusage, walusage);
 }
 
 /* dst += add */

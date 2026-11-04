@@ -1266,11 +1266,17 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	WaitForParallelWorkersToFinish(pei->pcxt);
 
 	/*
-	 * Next, accumulate buffer/WAL usage.  (This must wait for the workers to
-	 * finish, or we might get incomplete data.)
+	 * Next, accumulate the workers' buffer/WAL usage into the query-level
+	 * instrumentation, if any was requested.  It is intentionally not folded
+	 * into the global pgBufferUsage/pgWalUsage: each worker reports its own
+	 * usage to the cluster-wide stats, so doing so here would double-count
+	 * it. (This must wait for the workers to finish, or we might get
+	 * incomplete data.)
 	 */
-	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	if (pei->planstate->state->es_query_instr)
+		for (i = 0; i < nworkers; i++)
+			InstrAccumParallelQuery(pei->planstate->state->es_query_instr,
+									&pei->buffer_usage[i], &pei->wal_usage[i]);
 
 	pei->finished = true;
 }
