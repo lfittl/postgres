@@ -53,6 +53,7 @@ typedef struct Instrumentation Instrumentation;
 typedef struct pairingheap pairingheap;
 typedef struct PlanState PlanState;
 typedef struct QueryEnvironment QueryEnvironment;
+typedef struct QueryInstrumentation QueryInstrumentation;
 typedef struct RelationData *Relation;
 typedef Relation *RelationPtr;
 typedef struct ScanKeyData ScanKeyData;
@@ -732,6 +733,7 @@ typedef struct EState
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
+	QueryInstrumentation *es_query_instr;	/* query-level instrumentation */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */
@@ -2618,6 +2620,9 @@ typedef struct GatherState
 	/* these fields are set up once: */
 	TupleTableSlot *funnel_slot;
 	struct ParallelExecutorInfo *pei;
+	/* workers' buffer/WAL usage outside of plan nodes, kept for EXPLAIN */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 	/* all remaining fields are reinitialized during a rescan: */
 	int			nworkers_launched;	/* original number of workers */
 	int			nreaders;		/* number of still-active workers */
@@ -2647,6 +2652,9 @@ typedef struct GatherMergeState
 	int			gm_nkeys;		/* number of sort columns */
 	SortSupport gm_sortkeys;	/* array of length gm_nkeys */
 	struct ParallelExecutorInfo *pei;
+	/* workers' buffer/WAL usage outside of plan nodes, kept for EXPLAIN */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 	/* all remaining fields are reinitialized during a rescan */
 	/* (but the arrays are not reallocated, just cleared) */
 	int			nworkers_launched;	/* original number of workers */

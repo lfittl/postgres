@@ -54,7 +54,7 @@ typedef struct QueryDesc
 	bool		already_executed;	/* true if previously executed */
 
 	/* This field is allocated by ExecutorStart if needed */
-	struct Instrumentation *query_instr;	/* query level instrumentation */
+	struct QueryInstrumentation *query_instr;	/* query level instrumentation */
 
 	/* Private state of extensions; see GetQueryDescExtensionId() */
 	void	  **extension_state;
