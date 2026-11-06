@@ -243,16 +243,25 @@ Regardless of whether per-node instrumentation is active, each parallel
 worker measures the buffer and WAL activity of its whole parallel section
 with a QueryInstrumentation entry (InstrStartParallelQuery), and copies the
 totals into dynamic shared memory at the end (InstrEndParallelQuery).  The
-leader accumulates these totals into its own stack, so that query-level
-consumers such as EXPLAIN and pg_stat_statements see the complete activity.
+leader imports these totals into the worker part of its query entry
+(InstrAccumParallelQuery), so that query-level consumers such as EXPLAIN and
+pg_stat_statements see the complete activity (InstrTotalUsage).  The worker
+part is kept apart from the leader's own activity and only ever passed on to
+an enclosing query entry, never to the session totals in instr_top: each
+worker reports its own activity to the cumulative statistics system itself,
+so the leader must not report it again.  Parallel index builds and parallel
+vacuum import into the innermost query entry on the stack (InstrQueryCurrent),
+e.g. the one pg_stat_statements provides for the utility statement; with no
+such entry nobody is interested in the usage and it is dropped.
 
 When per-node instrumentation is active, the worker's per-node stats are
 additionally copied into dynamic shared memory.  The leader keeps them apart
 from its own per-node stats, which only ever describe the leader's activity:
 it stores the per-worker copies on the PlanState (worker_instrument) for
 EXPLAIN to combine at display time, and imports their buffer/WAL usage into
-its query entry (InstrAccumWorkerNodeUsage).  To avoid double counting, the
-worker does not roll up its own nodes into its query entry.
+the worker part of its query entry (InstrAccumWorkerNodeUsage).  To avoid
+double counting, the worker does not roll up its own nodes into its query
+entry.
 
 
 Memory Handling

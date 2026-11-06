@@ -1274,11 +1274,20 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	WaitForParallelWorkersToFinish(pei->pcxt);
 
 	/*
-	 * Next, accumulate buffer/WAL usage.  (This must wait for the workers to
-	 * finish, or we might get incomplete data.)
+	 * Next, accumulate buffer/WAL usage into the query entry.  (This must
+	 * wait for the workers to finish, or we might get incomplete data.)
+	 *
+	 * Also keep a total for the Gather node to pick up, so that EXPLAIN can
+	 * attribute what workers did outside of plan nodes to the node that ran
+	 * them.
 	 */
 	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	{
+		InstrAccumParallelQuery(pei->planstate->state->es_query_instr,
+								&pei->buffer_usage[i], &pei->wal_usage[i]);
+		BufferUsageAdd(&pei->worker_bufusage, &pei->buffer_usage[i]);
+		WalUsageAdd(&pei->worker_walusage, &pei->wal_usage[i]);
+	}
 
 	pei->finished = true;
 }

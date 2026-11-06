@@ -5561,6 +5561,25 @@ ExplainComputeNodeUsage_walker(PlanState *planstate, void *context)
 	BufferUsageAdd(&usage->bufusage, &usage->stats.instr.bufusage);
 	WalUsageAdd(&usage->walusage, &usage->stats.instr.walusage);
 
+	/*
+	 * What workers did outside of plan nodes, e.g. at startup, is attributed
+	 * to the Gather node that ran them.
+	 */
+	if (IsA(planstate, GatherState))
+	{
+		GatherState *gs = castNode(GatherState, planstate);
+
+		BufferUsageAdd(&usage->bufusage, &gs->worker_bufusage);
+		WalUsageAdd(&usage->walusage, &gs->worker_walusage);
+	}
+	else if (IsA(planstate, GatherMergeState))
+	{
+		GatherMergeState *gms = castNode(GatherMergeState, planstate);
+
+		BufferUsageAdd(&usage->bufusage, &gms->worker_bufusage);
+		WalUsageAdd(&usage->walusage, &gms->worker_walusage);
+	}
+
 	/* Children first, so this node's entry is complete before we add it up */
 	childctx.es = ctx->es;
 	childctx.parent = usage;

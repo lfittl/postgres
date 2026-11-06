@@ -432,7 +432,7 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
 		oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
 
 		/* Log plan if duration is exceeded. */
-		msec = INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total);
+		msec = INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total);
 		if (msec >= auto_explain_log_min_duration)
 		{
 			ExplainState *es = NewExplainState();

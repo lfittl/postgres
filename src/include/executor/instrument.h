@@ -87,6 +87,11 @@ typedef enum InstrumentOption
  *
  * In a query context use QueryInstrumentation instead, which handles aborts
  * using the resource owner logic.
+ *
+ * The buffer/WAL usage only ever describes the activity of this process.
+ * What a parallel query leader imports from its workers is kept apart, on the
+ * statement-level QueryInstrumentation entries (see InstrAccumParallelQuery),
+ * so that the session totals in instr_top never include it.
  */
 typedef enum InstrKind
 {
@@ -172,6 +177,13 @@ typedef struct NestedStatementInstrumentation
  * InstrQueryTrackNested) additionally receives a NestedStatementInstrumentation
  * record, which EXPLAIN lists separately.
  *
+ * Besides the process' own activity in instr, a query entry collects what
+ * parallel workers did on behalf of the statement (worker_bufusage and
+ * worker_walusage, see InstrAccumParallelQuery).  That part is passed on to
+ * the enclosing query entry when finalized, but never reaches plain entries
+ * or the session totals, since each worker reports its activity itself.
+ * Consumers that want the complete picture use InstrTotalUsage.
+ *
  * Utility statements use entries that live on the C stack of whoever asked
  * for them (see InstrQueryInitLocal and UtilityStmtDesc), which are neither
  * tied to a resource owner nor own memory, as transaction control statements
@@ -184,6 +196,10 @@ typedef struct QueryInstrumentation
 
 	/* Original instrument_options flags used to create this instrumentation */
 	int			instrument_options;
+
+	/* Usage imported from parallel workers, see InstrAccumParallelQuery */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 
 	/* Resource owner used for cleanup for aborts between InstrStart/InstrStop */
 	struct ResourceOwnerData *owner;
@@ -302,8 +318,10 @@ extern PGDLLIMPORT WalUsage pgWalUsage;
  * rather when the current stack entry gets accumulated which typically happens
  * at query end.
  *
- * In a parallel query leader this also includes the usage reported back by
- * parallel workers, since that gets accumulated into the leader's stack.
+ * It only ever describes this process' own activity, which is what the
+ * cumulative statistics system reports.  Usage imported from parallel workers
+ * stays on the statement-level query entries (see InstrAccumParallelQuery)
+ * and never reaches it.
  */
 extern PGDLLIMPORT Instrumentation instr_top;
 
@@ -378,6 +396,8 @@ extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);
 extern void InstrQueryInitLocal(QueryInstrumentation *qinstr,
 								int instrument_options);
+extern void InstrTotalUsage(const QueryInstrumentation *qinstr,
+							BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrQueryStart(QueryInstrumentation *instr);
 extern void InstrQueryStop(QueryInstrumentation *instr);
 extern void InstrQueryStopFinalize(QueryInstrumentation *instr);
@@ -390,9 +410,9 @@ extern void InstrQuerySetStatement(QueryInstrumentation *qinstr,
 
 pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumWorkerUsage(const BufferUsage *bufusage,
-								  const WalUsage *walusage);
+extern void InstrAccumParallelQuery(QueryInstrumentation *qinstr,
+									const BufferUsage *bufusage,
+									const WalUsage *walusage);
 extern void InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr,
 									  Instrumentation *add);
 

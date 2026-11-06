@@ -2620,6 +2620,9 @@ typedef struct GatherState
 	/* these fields are set up once: */
 	TupleTableSlot *funnel_slot;
 	struct ParallelExecutorInfo *pei;
+	/* workers' buffer/WAL usage outside of plan nodes, kept for EXPLAIN */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 	/* all remaining fields are reinitialized during a rescan: */
 	int			nworkers_launched;	/* original number of workers */
 	int			nreaders;		/* number of still-active workers */
@@ -2649,6 +2652,9 @@ typedef struct GatherMergeState
 	int			gm_nkeys;		/* number of sort columns */
 	SortSupport gm_sortkeys;	/* array of length gm_nkeys */
 	struct ParallelExecutorInfo *pei;
+	/* workers' buffer/WAL usage outside of plan nodes, kept for EXPLAIN */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 	/* all remaining fields are reinitialized during a rescan */
 	/* (but the arrays are not reallocated, just cleared) */
 	int			nworkers_launched;	/* original number of workers */

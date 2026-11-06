@@ -1078,16 +1078,22 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		qstate != NULL &&
 		pgss_enabled(qstate->nesting_level))
 	{
+		BufferUsage bufusage;
+		WalUsage	walusage;
+
+		/* Include what parallel workers did on behalf of this query */
+		InstrTotalUsage(queryDesc->query_instr, &bufusage, &walusage);
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
 				   queryDesc->plannedstmt->stmt_len,
 				   qstate->nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total),
+				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->query_instr->bufusage,
-				   &queryDesc->query_instr->walusage,
+				   &bufusage,
+				   &walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1152,10 +1158,19 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		!IsA(parsetree, PrepareStmt))
 	{
 		uint64		rows;
-		Instrumentation instr = {0};
+		QueryInstrumentation instr;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
-		InstrInitOptions(&instr, INSTRUMENT_ALL);
-		InstrStart(&instr);
+		/*
+		 * Request statement-level instrumentation (timing, buffers and WAL)
+		 * for the command, which standard_ProcessUtility brackets with the
+		 * entry we provide, the same way we read query_instr for optimizable
+		 * statements.  Activity of statements run by the command and of
+		 * parallel workers it launches is accounted to it.
+		 */
+		InstrQueryInitLocal(&instr, INSTRUMENT_ALL);
+		desc->instr = &instr;
 
 		nesting_level++;
 		PG_TRY();
@@ -1167,7 +1182,6 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		}
 		PG_FINALLY();
 		{
-			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1194,16 +1208,19 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
+		/* Include what parallel workers did, e.g. for CREATE INDEX or VACUUM */
+		InstrTotalUsage(&instr, &bufusage, &walusage);
+
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
 				   saved_stmt_len,
 				   nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(instr.total),
+				   INSTR_TIME_GET_MILLISEC(instr.instr.total),
 				   rows,
-				   &instr.bufusage,
-				   &instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   NULL,
 				   NULL,
 				   0,

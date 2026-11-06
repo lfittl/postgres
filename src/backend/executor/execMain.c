@@ -292,7 +292,7 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 									   queryDesc->plannedstmt->queryId,
 									   queryDesc->sourceText);
 
-			queryDesc->query_instr = &estate->es_query_instr->instr;
+			queryDesc->query_instr = estate->es_query_instr;
 		}
 	}
 

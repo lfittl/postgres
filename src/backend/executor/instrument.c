@@ -343,10 +343,18 @@ InstrQueryAccumToEnclosing(QueryInstrumentation *qinstr)
 
 	InstrAccumStack(target, &qinstr->instr);
 
+	/*
+	 * What parallel workers did on behalf of this statement is only passed
+	 * on to an enclosing statement, never to a plain entry or the session
+	 * totals.
+	 */
 	if (target->kind != INSTR_KIND_QUERY)
 		return;
 
 	enclosing = (QueryInstrumentation *) target;
+	BufferUsageAdd(&enclosing->worker_bufusage, &qinstr->worker_bufusage);
+	WalUsageAdd(&enclosing->worker_walusage, &qinstr->worker_walusage);
+
 	if (!enclosing->track_nested || qinstr->query_text == NULL)
 		return;
 
@@ -360,8 +368,7 @@ InstrQueryAccumToEnclosing(QueryInstrumentation *qinstr)
 		rec.origin_relname = qinstr->origin_relname;
 		rec.calls = 1;
 		rec.total = qinstr->instr.total;
-		rec.bufusage = qinstr->instr.bufusage;
-		rec.walusage = qinstr->instr.walusage;
+		InstrTotalUsage(qinstr, &rec.bufusage, &rec.walusage);
 		rec.nested = qinstr->nested;
 
 		InstrMergeNestedRecord(&enclosing->nested, enclosing->nested_cxt, &rec);
@@ -485,6 +492,26 @@ InstrQueryInitLocal(QueryInstrumentation *qinstr, int instrument_options)
 	qinstr->instr.need_stack = true;
 
 	dlist_init(&qinstr->unfinalized_entries);
+}
+
+/*
+ * Total buffer/WAL usage of a statement: what this process did, plus what
+ * was imported from parallel workers.
+ */
+void
+InstrTotalUsage(const QueryInstrumentation *qinstr, BufferUsage *bufusage,
+				WalUsage *walusage)
+{
+	if (bufusage)
+	{
+		*bufusage = qinstr->instr.bufusage;
+		BufferUsageAdd(bufusage, &qinstr->worker_bufusage);
+	}
+	if (walusage)
+	{
+		*walusage = qinstr->instr.walusage;
+		WalUsageAdd(walusage, &qinstr->worker_walusage);
+	}
 }
 
 void
@@ -691,16 +718,15 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
 }
 
 /*
- * Record WAL usage imported from a parallel worker.
- */
-void
-InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
-{
-	WalUsageAdd(&pgWalUsage, walusage);
-}
-
-/*
- * Accumulate work done by parallel workers in the leader's stats.
+ * Import work done by parallel workers into the leader's statement-level
+ * stats.
+ *
+ * The usage goes to the worker part of the given query entry, typically the
+ * innermost one (see InstrQueryCurrent), and is carried along separately from
+ * the leader's own activity from there on, so the session totals in instr_top
+ * stay free of it.  With no query entry to account it to, nobody is
+ * interested in it, and it is dropped: each worker reports its activity to
+ * the cumulative statistics system itself.
  *
  * Note that what gets added here effectively depends on whether per-node
  * instrumentation is active. If it's active the parallel worker intentionally
@@ -712,35 +738,29 @@ InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
  * activity is accumulated.
  */
 void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrAccumParallelQuery(QueryInstrumentation *qinstr,
+						const BufferUsage *bufusage, const WalUsage *walusage)
 {
-	InstrAccumWorkerUsage(bufusage, walusage);
+	if (qinstr == NULL)
+		return;
 
-	/*
-	 * There is no node to attribute query-level worker usage to, so add it to
-	 * the current stack entry directly, which is the Gather node when workers
-	 * are shut down during its execution.
-	 */
-	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
-	WalUsageAdd(&instr_stack.current->walusage, walusage);
+	BufferUsageAdd(&qinstr->worker_bufusage, bufusage);
+	WalUsageAdd(&qinstr->worker_walusage, walusage);
 }
 
 /*
- * Account for a parallel worker's per-node usage in the leader's query entry.
+ * Import a parallel worker's per-node usage into the leader's query entry.
  *
  * The usage is deliberately kept out of the leader's own per-node entries,
  * which only ever describe the leader's activity; EXPLAIN combines the two
- * from the per-worker copies at display time.  It goes straight to the query
- * entry rather than the current stack entry, since the latter is the Gather
- * node while workers are being shut down.
+ * from the per-worker copies at display time.
  */
 void
 InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr, Instrumentation *add)
 {
 	Assert(qinstr != NULL);
 
-	InstrAccumStack(&qinstr->instr, add);
-	InstrAccumWorkerUsage(&add->bufusage, &add->walusage);
+	InstrAccumParallelQuery(qinstr, &add->bufusage, &add->walusage);
 }
 
 /* Node instrumentation handling */
