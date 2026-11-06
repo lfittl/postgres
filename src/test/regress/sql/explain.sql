@@ -199,6 +199,81 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
 
+-- Statements run by functions or triggers while a query executes are not
+-- accounted to the plan node that ran them, but listed separately, with the
+-- node they originated from.  The list is numbered, and a statement run by
+-- another nested statement refers to that one.
+CREATE FUNCTION explain_nested_func(int) RETURNS int AS $$
+BEGIN
+    PERFORM 1;
+    PERFORM $1 + 1;
+    RETURN $1;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Calls the above through a statement run by the executor (rather than a
+-- simple expression evaluated in place), so the statements it runs are
+-- nested two levels deep.
+CREATE FUNCTION explain_nested_outer_func(int) RETURNS int AS $$
+DECLARE
+    v int;
+BEGIN
+    SELECT explain_nested_func(x) INTO v FROM (VALUES ($1)) AS t(x);
+    RETURN v;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Run once outside of EXPLAIN, so that no catalog accesses for building the
+-- plans of the nested statements show up in the explained execution.
+SELECT explain_nested_outer_func(1);
+
+select explain_filter('explain (analyze, buffers, costs off, timing off, summary off)
+  select explain_nested_func(g) from generate_series(1, 3) g');
+
+select explain_filter('explain (analyze, buffers, costs off, timing off, summary off)
+  select explain_nested_outer_func(g) from generate_series(1, 2) g');
+
+select jsonb_pretty(explain_filter_to_json('explain (analyze, buffers off, costs off, timing off, summary off, format json)
+  select explain_nested_outer_func(g) from generate_series(1, 2) g')->0->'Nested Statements');
+
+DROP FUNCTION explain_nested_outer_func;
+DROP FUNCTION explain_nested_func;
+
+-- Utility statements run by a function are listed as well, as are the
+-- statements they run themselves, here the query of CREATE TABLE AS (whose
+-- text is that of the whole command).
+CREATE FUNCTION explain_nested_utility_func() RETURNS void AS $$
+BEGIN
+    CREATE TEMP TABLE explain_nested_ctas AS SELECT 1 AS a;
+    DROP TABLE explain_nested_ctas;
+END;
+$$ LANGUAGE plpgsql;
+
+select explain_filter('explain (analyze, buffers, costs off, timing off, summary off)
+  select explain_nested_utility_func()');
+
+-- Queries and utility statements can alternate at any depth: here the query
+-- runs a DO block, which runs a query, which runs the above.
+CREATE FUNCTION explain_nested_do_func() RETURNS void AS $$
+BEGIN
+    EXECUTE 'DO $x$ BEGIN PERFORM explain_nested_utility_func(); END $x$';
+END;
+$$ LANGUAGE plpgsql;
+
+select explain_filter('explain (analyze, buffers, costs off, timing off, summary off)
+  select explain_nested_do_func() from generate_series(1, 2) g');
+
+DROP FUNCTION explain_nested_do_func;
+DROP FUNCTION explain_nested_utility_func;
+
+-- Sum the local block accesses of all statements nested in an explained
+-- query, to check that they get reported.
+CREATE FUNCTION explain_nested_local_blocks(plan_json json) RETURNS int AS $$
+    SELECT COALESCE(SUM(COALESCE((s->>'Local Hit Blocks')::int, 0) +
+                        COALESCE((s->>'Local Read Blocks')::int, 0)), 0)::int
+    FROM json_array_elements(COALESCE(plan_json->0->'Nested Statements', '[]'::json)) s;
+$$ LANGUAGE sql;
+
 -- EXPLAIN (ANALYZE, BUFFERS) should report buffer usage from PL/pgSQL
 -- EXCEPTION blocks, even after subtransaction rollback.
 CREATE TEMP TABLE explain_exc_tab (a int, b char(20));
@@ -218,35 +293,25 @@ $$ LANGUAGE plpgsql;
 CREATE FUNCTION check_explain_exception_buffers() RETURNS boolean AS $$
 DECLARE
     plan_json json;
-    node json;
-    total_buffers int;
 BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         SELECT explain_exc_func()' INTO plan_json;
-    node := plan_json->0->'Plan';
-    total_buffers :=
-        COALESCE((node->>'Local Hit Blocks')::int, 0) +
-        COALESCE((node->>'Local Read Blocks')::int, 0);
-    RETURN total_buffers > 0;
+    RETURN explain_nested_local_blocks(plan_json) > 0;
 END;
 $$ LANGUAGE plpgsql;
 
 SELECT check_explain_exception_buffers() AS exception_buffers_visible;
 
--- Also test with nested EXPLAIN ANALYZE (two levels of instrumentation)
+-- Also test with nested EXPLAIN ANALYZE (two levels of instrumentation).
+-- The inner EXPLAIN's statement is nested in the outer one, and the failing
+-- statement is nested in that, so it shows up in the outer list as well.
 CREATE FUNCTION check_explain_exception_buffers_nested() RETURNS boolean AS $$
 DECLARE
     plan_json json;
-    node json;
-    total_buffers int;
 BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         SELECT check_explain_exception_buffers()' INTO plan_json;
-    node := plan_json->0->'Plan';
-    total_buffers :=
-        COALESCE((node->>'Local Hit Blocks')::int, 0) +
-        COALESCE((node->>'Local Read Blocks')::int, 0);
-    RETURN total_buffers > 0;
+    RETURN explain_nested_local_blocks(plan_json) > 0;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -322,18 +387,12 @@ BEGIN
     -- Non-scrollable cursor path: ExecShutdownNode runs after each ExecutorRun
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         SELECT cursor_noscroll_scan()' INTO plan_json;
-    node := plan_json->0->'Plan';
-    noscroll_buf :=
-        COALESCE((node->>'Local Hit Blocks')::int, 0) +
-        COALESCE((node->>'Local Read Blocks')::int, 0);
+    noscroll_buf := explain_nested_local_blocks(plan_json);
 
     -- Scrollable cursor path: ExecShutdownNode is skipped
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         SELECT cursor_scroll_scan()' INTO plan_json;
-    node := plan_json->0->'Plan';
-    scroll_buf :=
-        COALESCE((node->>'Local Hit Blocks')::int, 0) +
-        COALESCE((node->>'Local Read Blocks')::int, 0);
+    scroll_buf := explain_nested_local_blocks(plan_json);
 
     -- Both cursor paths should report buffer counts about as high as
     -- the direct scan (same data plus minor catalog overhead), and not
@@ -367,7 +426,10 @@ CREATE TRIGGER trig_test_trig
     BEFORE INSERT ON trig_test_tab
     FOR EACH ROW EXECUTE FUNCTION trig_test_func();
 
-CREATE FUNCTION check_trigger_explain_buffers() RETURNS boolean AS $$
+-- The trigger is reported, and so is the statement it ran, which names the
+-- trigger as its origin.
+CREATE FUNCTION check_trigger_explain_buffers()
+RETURNS TABLE(trigger_called boolean, nested_statement json) AS $$
 DECLARE
     plan_json json;
     trig json;
@@ -375,17 +437,24 @@ BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         INSERT INTO trig_test_tab VALUES (1)' INTO plan_json;
     trig := plan_json->0->'Triggers'->0;
-    RETURN COALESCE((trig->>'Calls')::int, 0) > 0;
+    RETURN QUERY
+        SELECT COALESCE((trig->>'Calls')::int, 0) > 0,
+               json_build_object('Query Text', s->'Query Text',
+                                 'Trigger Name', s->'Trigger Name',
+                                 'Relation', s->'Relation',
+                                 'Calls', s->'Calls')
+        FROM json_array_elements(plan_json->0->'Nested Statements') s;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT check_trigger_explain_buffers() AS trigger_buffers_visible;
+SELECT * FROM check_trigger_explain_buffers();
 
 DROP FUNCTION check_trigger_explain_buffers;
 DROP TRIGGER trig_test_trig ON trig_test_tab;
 DROP FUNCTION trig_test_func;
 DROP TABLE trig_test_tab;
 DROP TABLE trig_work_tab;
+DROP FUNCTION explain_nested_local_blocks;
 
 -- Parallel index scan buffer usage.
 -- Table accesses of an index scan are tracked separately from the index

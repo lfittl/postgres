@@ -65,6 +65,19 @@ typedef struct ExplainNodeUsage
 	WalUsage   *worker_walusage;	/* ditto */
 } ExplainNodeUsage;
 
+/*
+ * A statement that ran while the explained statement executed, as listed by
+ * ExplainPrintNestedStatements.  Statements are numbered in the order they
+ * are listed; a statement run by another nested statement refers to that one
+ * through parent_id, and to the main statement through parent_id 0.
+ */
+typedef struct ExplainNestedStatement
+{
+	NestedStatementInstrumentation *record;
+	int			id;
+	int			parent_id;
+} ExplainNestedStatement;
+
 typedef struct ExplainState
 {
 	StringInfo	str;			/* output buffer */
@@ -98,6 +111,10 @@ typedef struct ExplainState
 									 * indexed by plan_node_id; NULL if not
 									 * shown */
 	int			num_node_usage; /* length of node_usage */
+	List	   *nested_statements;	/* ExplainNestedStatement list, in the
+									 * order they are listed */
+	Bitmapset  *nested_origin_nodes;	/* plan_node_ids that ran nested
+										 * statements, shown with their ID */
 	/* state related to the current plan node */
 	ExplainWorkersState *workers_state; /* needed if parallel plan */
 	/* extensions */

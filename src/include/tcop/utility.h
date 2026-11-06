@@ -86,6 +86,21 @@ typedef struct UtilityStmtDesc
 	DestReceiver *dest;			/* where to send results, if any */
 	QueryCompletion *qc;		/* where to store command completion status,
 								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility command counterpart of
+	 * QueryDesc's query_instr.  A consumer (e.g. pg_stat_statements) that
+	 * wants it provides an entry set up with InstrQueryInitLocal here before
+	 * calling standard_ProcessUtility, which brackets the command with it.
+	 * Statements run by the command and parallel workers it launches (e.g.
+	 * for CREATE INDEX or VACUUM) are accounted to it.  NULL when nobody
+	 * asked, in which case standard_ProcessUtility still sets one up for a
+	 * command nested in a statement that tracks nested statements.
+	 *
+	 * The consumer owns the memory, since a command may end the transaction
+	 * and with it any resource owner or transaction-lifetime memory.
+	 */
+	struct QueryInstrumentation *instr;
 } UtilityStmtDesc;
 
 /* Hook for plugins to get control in ProcessUtility() */

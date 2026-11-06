@@ -72,6 +72,7 @@ ProcessUtility_hook_type ProcessUtility_hook = NULL;
 
 /* local function declarations */
 static int	ClassifyUtilityCommandAsReadOnly(Node *parsetree);
+static void standard_ProcessUtilityInternal(UtilityStmtDesc *desc);
 static void ProcessUtilitySlow(ParseState *pstate,
 							   PlannedStmt *pstmt,
 							   const char *queryString,
@@ -532,6 +533,61 @@ ProcessUtility(UtilityStmtDesc *desc)
  */
 void
 standard_ProcessUtility(UtilityStmtDesc *desc)
+{
+	QueryInstrumentation *instr = desc->instr;
+	QueryInstrumentation local_instr;
+	QueryInstrumentation *enclosing = InstrQueryCurrent();
+	bool		nested_tracked = enclosing && enclosing->track_nested;
+
+	/*
+	 * Bracket the command with statement-level instrumentation, so that
+	 * nested statements and parallel workers are accounted to it: the entry
+	 * a consumer provided (see UtilityStmtDesc), or one of our own if the
+	 * command runs while a statement that tracks nested statements executes
+	 * (e.g. through SPI from a function under EXPLAIN ANALYZE), so that it
+	 * can be listed like a nested query.  Mirrors what ExecutorStart does
+	 * for queries.
+	 */
+	if (instr == NULL && nested_tracked)
+	{
+		InstrQueryInitLocal(&local_instr,
+							enclosing->instrument_options &
+							(INSTRUMENT_TIMER | INSTRUMENT_BUFFERS | INSTRUMENT_WAL));
+		instr = &local_instr;
+	}
+
+	if (instr == NULL)
+	{
+		standard_ProcessUtilityInternal(desc);
+		return;
+	}
+
+	if (nested_tracked)
+	{
+		/*
+		 * Statements the command runs itself (e.g. the query of CREATE TABLE
+		 * AS) are nested in it; their records need memory that outlives the
+		 * command, which the enclosing statement's does.
+		 */
+		InstrQuerySetStatement(instr, desc->pstmt->queryId, desc->queryString);
+		InstrQueryTrackNested(instr, enclosing->nested_cxt);
+	}
+
+	/* Must be finalized even if the command fails, to keep the stack sane */
+	InstrQueryStart(instr);
+	PG_TRY();
+	{
+		standard_ProcessUtilityInternal(desc);
+	}
+	PG_FINALLY();
+	{
+		InstrQueryStopFinalize(instr);
+	}
+	PG_END_TRY();
+}
+
+static void
+standard_ProcessUtilityInternal(UtilityStmtDesc *desc)
 {
 	PlannedStmt *pstmt = desc->pstmt;
 	const char *queryString = desc->queryString;

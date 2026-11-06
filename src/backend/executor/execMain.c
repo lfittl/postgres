@@ -258,14 +258,42 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 *
 	 * Alternatively, also set it up when running EXPLAIN (ANALYZE), as we
 	 * utilize query_instr as the parent for node and trigger instrumentation.
+	 * Such a statement also collects records about the statements run while
+	 * it executes (e.g. through SPI from a function), which EXPLAIN lists
+	 * separately from the plan.  For that to work, a nested statement needs a
+	 * query entry of its own even if nobody asked for one, inheriting the
+	 * query-level options of the enclosing statement.
 	 */
 	Assert(queryDesc->query_instr == NULL);
-	if (queryDesc->query_instr_options || queryDesc->instrument_options)
 	{
-		estate->es_query_instr = InstrQueryAlloc(queryDesc->instrument_options |
-												 queryDesc->query_instr_options);
+		int			options = queryDesc->instrument_options |
+			queryDesc->query_instr_options;
+		QueryInstrumentation *enclosing = InstrQueryCurrent();
+		bool		nested_tracked = enclosing && enclosing->track_nested;
 
-		queryDesc->query_instr = &estate->es_query_instr->instr;
+		if (options == 0 && nested_tracked)
+			options = enclosing->instrument_options &
+				(INSTRUMENT_TIMER | INSTRUMENT_BUFFERS | INSTRUMENT_WAL);
+
+		if (options || nested_tracked)
+		{
+			estate->es_query_instr = InstrQueryAlloc(options);
+
+			/*
+			 * A nested statement of a tracked statement tracks its own nested
+			 * statements in turn, so that the records of the outermost
+			 * statement cover every level.
+			 */
+			if (queryDesc->instrument_options || nested_tracked)
+				InstrQueryTrackNested(estate->es_query_instr,
+									  estate->es_query_instr->instr_cxt);
+			if (nested_tracked)
+				InstrQuerySetStatement(estate->es_query_instr,
+									   queryDesc->plannedstmt->queryId,
+									   queryDesc->sourceText);
+
+			queryDesc->query_instr = &estate->es_query_instr->instr;
+		}
 	}
 
 	/*
@@ -1347,8 +1375,16 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 		 */
 		if (instrument_options)
 		{
+			TriggerInstrumentation *tginstr;
+
 			Assert(qinstr != NULL);
-			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(qinstr, instrument_options, n);
+			tginstr = InstrAllocTrigger(qinstr, instrument_options, n);
+			for (int i = 0; i < n; i++)
+			{
+				tginstr[i].tgname = resultRelInfo->ri_TrigDesc->triggers[i].tgname;
+				tginstr[i].relname = RelationGetRelationName(resultRelationDesc);
+			}
+			resultRelInfo->ri_TrigInstrument = tginstr;
 		}
 	}
 	else

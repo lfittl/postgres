@@ -166,6 +166,8 @@ static void ExplainSubPlans(List *plans, List *ancestors,
 							const char *relationship, ExplainState *es);
 static void ExplainCustomChildren(CustomScanState *css,
 								  List *ancestors, ExplainState *es);
+static void ExplainCollectNestedStatements(ExplainState *es, List *records,
+										   int parent_id);
 static void ExplainComputeNodeUsage(ExplainState *es, PlanState *planstate);
 static bool ExplainMaxPlanNodeId_walker(PlanState *planstate, void *context);
 static bool ExplainComputeNodeUsage_walker(PlanState *planstate, void *context);
@@ -652,6 +654,10 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	if (es->analyze)
 		ExplainPrintTriggers(es, queryDesc);
 
+	/* Print info about statements run by functions and triggers */
+	if (es->analyze)
+		ExplainPrintNestedStatements(es, queryDesc);
+
 	/*
 	 * Print info about JITing. Tied to es->costs because we don't want to
 	 * display this in regression tests, as it'd cause output differences
@@ -793,6 +799,8 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 	es->printed_subplans = NULL;
 	es->node_usage = NULL;
 	es->num_node_usage = 0;
+	es->nested_statements = NIL;
+	es->nested_origin_nodes = NULL;
 	es->rtable_size = list_length(es->rtable);
 	foreach(lc, es->rtable)
 	{
@@ -830,6 +838,16 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 	 */
 	if (queryDesc->planstate->instrument)
 		ExplainComputeNodeUsage(es, queryDesc->planstate);
+
+	/*
+	 * Number the statements that ran while this one executed, so that
+	 * ExplainNode can mark the nodes that ran them and
+	 * ExplainPrintNestedStatements can list them afterwards.
+	 */
+	if (es->analyze && queryDesc->estate->es_query_instr)
+		ExplainCollectNestedStatements(es,
+									   queryDesc->estate->es_query_instr->nested,
+									   0);
 
 	ExplainNode(ps, NIL, NULL, NULL, es);
 
@@ -898,6 +916,131 @@ ExplainPrintTriggers(ExplainState *es, QueryDesc *queryDesc)
 	}
 
 	ExplainCloseGroup("Triggers", "Triggers", false, es);
+}
+
+/*
+ * Number the nested statement records of a statement, depth first, and note
+ * which plan nodes of the main statement ran one.
+ */
+static void
+ExplainCollectNestedStatements(ExplainState *es, List *records, int parent_id)
+{
+	foreach_ptr(NestedStatementInstrumentation, record, records)
+	{
+		ExplainNestedStatement *stmt = palloc_object(ExplainNestedStatement);
+
+		stmt->record = record;
+		stmt->id = list_length(es->nested_statements) + 1;
+		stmt->parent_id = parent_id;
+		es->nested_statements = lappend(es->nested_statements, stmt);
+
+		/* Node IDs of nested statements refer to plans we don't print */
+		if (parent_id == 0 && record->origin_node_id >= 0)
+			es->nested_origin_nodes =
+				bms_add_member(es->nested_origin_nodes, record->origin_node_id);
+
+		ExplainCollectNestedStatements(es, record->nested, stmt->id);
+	}
+}
+
+/*
+ * ExplainPrintNestedStatements -
+ *	  list the statements run while the query executed, e.g. by functions
+ *	  it called or by its triggers, with their aggregated statistics
+ *
+ * The plan nodes only account for their own activity, so this is where the
+ * cost of such statements shows up.  Each statement names where it was run
+ * from: a plan node of the main statement (which ExplainNode marks with the
+ * same ID), a trigger, and/or another nested statement.
+ *
+ * ExplainPrintPlan must have been called first, to number the statements.
+ */
+void
+ExplainPrintNestedStatements(ExplainState *es, QueryDesc *queryDesc)
+{
+	if (es->nested_statements == NIL)
+		return;
+
+	ExplainOpenGroup("Nested Statements", "Nested Statements", false, es);
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		ExplainIndentText(es);
+		appendStringInfoString(es->str, "Nested Statements:\n");
+		es->indent++;
+	}
+
+	foreach_ptr(ExplainNestedStatement, stmt, es->nested_statements)
+	{
+		NestedStatementInstrumentation *record = stmt->record;
+
+		ExplainOpenGroup("Nested Statement", NULL, true, es);
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			StringInfoData origin;
+
+			ExplainIndentText(es);
+			appendStringInfo(es->str, "Statement %d: %s\n",
+							 stmt->id, record->query_text);
+			es->indent++;
+
+			initStringInfo(&origin);
+			if (stmt->parent_id > 0)
+				appendStringInfo(&origin, "Statement %d", stmt->parent_id);
+			if (record->origin_node_id >= 0)
+				appendStringInfo(&origin, "%sNode ID %d",
+								 origin.len > 0 ? ", " : "",
+								 record->origin_node_id);
+			if (record->origin_tgname)
+				appendStringInfo(&origin, "%sTrigger %s on %s",
+								 origin.len > 0 ? ", " : "",
+								 record->origin_tgname,
+								 record->origin_relname);
+			if (origin.len > 0)
+				ExplainPropertyText("Origin", origin.data, es);
+			pfree(origin.data);
+		}
+		else
+		{
+			ExplainPropertyInteger("Statement ID", NULL, stmt->id, es);
+			ExplainPropertyInteger("Parent Statement ID", NULL,
+								   stmt->parent_id, es);
+			if (record->origin_node_id >= 0)
+				ExplainPropertyInteger("Node ID", NULL,
+									   record->origin_node_id, es);
+			if (record->origin_tgname)
+			{
+				ExplainPropertyText("Trigger Name", record->origin_tgname, es);
+				ExplainPropertyText("Relation", record->origin_relname, es);
+			}
+			ExplainPropertyText("Query Text", record->query_text, es);
+			if (es->verbose && record->queryId != INT64CONST(0) &&
+				compute_query_id != COMPUTE_QUERY_ID_REGRESS)
+				ExplainPropertyInteger("Query Identifier", NULL,
+									   record->queryId, es);
+		}
+
+		ExplainPropertyInteger("Calls", NULL, record->calls, es);
+		if (es->timing)
+			ExplainPropertyFloat("Time", "ms",
+								 INSTR_TIME_GET_MILLISEC(record->total), 3,
+								 es);
+		if (es->buffers)
+			show_buffer_usage(es, &record->bufusage, NULL);
+		if (es->wal)
+			show_wal_usage(es, &record->walusage);
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			es->indent--;
+
+		ExplainCloseGroup("Nested Statement", NULL, true, es);
+	}
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		es->indent--;
+
+	ExplainCloseGroup("Nested Statements", "Nested Statements", false, es);
 }
 
 /*
@@ -1919,6 +2062,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	isdisabled = plan_is_disabled(plan);
 	if (es->format != EXPLAIN_FORMAT_TEXT || isdisabled)
 		ExplainPropertyBool("Disabled", isdisabled, es);
+
+	/* Identify the node if a nested statement refers to it */
+	if (bms_is_member(plan->plan_node_id, es->nested_origin_nodes))
+		ExplainPropertyInteger("Node ID", NULL, plan->plan_node_id, es);
 
 	/* prepare per-worker general execution details */
 	if (es->workers_state && es->verbose)

@@ -24,8 +24,12 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
+static void InstrQueryAccumToEnclosing(QueryInstrumentation *qinstr);
+static inline void InstrQueryRestoreOrigin(QueryInstrumentation *qinstr);
+
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
+Instrumentation *instr_current_origin = NULL;
 InstrStackState instr_stack = {
 	.stack_space = 0,
 	.stack_size = 0,
@@ -171,10 +175,24 @@ InstrStopFinalizeInternal(Instrumentation *instr, bool allow_stopped)
 		InstrStop(instr);
 
 	/*
-	 * Accumulate all instrumentation to the currently active instrumentation,
-	 * so that callers get a complete picture of activity, even after an abort
+	 * Accumulate all instrumentation to the enclosing instrumentation, so that
+	 * callers get a complete picture of activity, even after an abort.
+	 *
+	 * A query entry skips over the plan node or trigger entries that ran it,
+	 * and may produce a nested statement record, see
+	 * InstrQueryAccumToEnclosing.  If it is still running (an abort got here
+	 * before InstrQueryStop), the origin it displaced needs to be restored.
 	 */
-	InstrAccumStack(instr_stack.current, instr);
+	if (instr->kind == INSTR_KIND_QUERY)
+	{
+		QueryInstrumentation *qinstr = (QueryInstrumentation *) instr;
+
+		if (qinstr->running)
+			InstrQueryRestoreOrigin(qinstr);
+		InstrQueryAccumToEnclosing(qinstr);
+	}
+	else
+		InstrAccumStack(instr_stack.current, instr);
 }
 
 /*
@@ -221,6 +239,134 @@ InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent)
 
 
 /* Query instrumentation handling */
+
+/*
+ * While a statement runs, instr_current_origin points to the plan node or
+ * trigger entry of that statement that is executing, so that a statement
+ * started from there (e.g. through a function) can be attributed to it.
+ * InstrQueryStart displaces it for the statement's own nodes and InstrQueryStop
+ * restores it, so an outer statement's nodes never show through an inner one.
+ */
+static inline void
+InstrQueryRestoreOrigin(QueryInstrumentation *qinstr)
+{
+	instr_current_origin = qinstr->saved_origin;
+	qinstr->running = false;
+}
+
+/*
+ * Find the nearest entry on the stack, searching down from the top, that a
+ * query entry accumulates to: another query entry, or a plain one.  Plan node
+ * and trigger entries are skipped, so that their stats only ever describe
+ * their own activity rather than the statements they ran.  Returns instr_top
+ * if there is no such entry.
+ */
+static Instrumentation *
+InstrNearestEnclosingEntry(void)
+{
+	for (int i = instr_stack.stack_size - 1; i >= 0; i--)
+	{
+		Instrumentation *entry = instr_stack.entries[i];
+
+		if (entry->kind == INSTR_KIND_QUERY || entry->kind == INSTR_KIND_PLAIN)
+			return entry;
+	}
+
+	return &instr_top;
+}
+
+/*
+ * Merge a nested statement record into a list of records, aggregating with an
+ * existing record for the same statement and origin if there is one.  The
+ * list and any new records live in 'cxt', which belongs to the statement that
+ * collects the records; the source may be in memory that is about to go away.
+ */
+static void
+InstrMergeNestedRecord(List **records, MemoryContext cxt,
+					   const NestedStatementInstrumentation *src)
+{
+	NestedStatementInstrumentation *dst = NULL;
+	MemoryContext oldcxt;
+
+	foreach_ptr(NestedStatementInstrumentation, rec, *records)
+	{
+		if (rec->origin_node_id != src->origin_node_id ||
+			strcmp(rec->query_text, src->query_text) != 0)
+			continue;
+		if ((rec->origin_tgname == NULL) != (src->origin_tgname == NULL))
+			continue;
+		if (rec->origin_tgname != NULL &&
+			(strcmp(rec->origin_tgname, src->origin_tgname) != 0 ||
+			 strcmp(rec->origin_relname, src->origin_relname) != 0))
+			continue;
+
+		dst = rec;
+		break;
+	}
+
+	oldcxt = MemoryContextSwitchTo(cxt);
+
+	if (dst == NULL)
+	{
+		dst = palloc0_object(NestedStatementInstrumentation);
+		dst->queryId = src->queryId;
+		dst->query_text = pstrdup(src->query_text);
+		dst->origin_node_id = src->origin_node_id;
+		if (src->origin_tgname)
+		{
+			dst->origin_tgname = pstrdup(src->origin_tgname);
+			dst->origin_relname = pstrdup(src->origin_relname);
+		}
+		*records = lappend(*records, dst);
+	}
+
+	dst->calls += src->calls;
+	INSTR_TIME_ADD(dst->total, src->total);
+	BufferUsageAdd(&dst->bufusage, &src->bufusage);
+	WalUsageAdd(&dst->walusage, &src->walusage);
+
+	foreach_ptr(NestedStatementInstrumentation, child, src->nested)
+		InstrMergeNestedRecord(&dst->nested, cxt, child);
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Accumulate a finalized query entry to its enclosing entry, and record it as
+ * a nested statement there if that entry collects such records.
+ */
+static void
+InstrQueryAccumToEnclosing(QueryInstrumentation *qinstr)
+{
+	Instrumentation *target = InstrNearestEnclosingEntry();
+	QueryInstrumentation *enclosing;
+
+	InstrAccumStack(target, &qinstr->instr);
+
+	if (target->kind != INSTR_KIND_QUERY)
+		return;
+
+	enclosing = (QueryInstrumentation *) target;
+	if (!enclosing->track_nested || qinstr->query_text == NULL)
+		return;
+
+	{
+		NestedStatementInstrumentation rec = {0};
+
+		rec.queryId = qinstr->queryId;
+		rec.query_text = qinstr->query_text;
+		rec.origin_node_id = qinstr->origin_node_id;
+		rec.origin_tgname = qinstr->origin_tgname;
+		rec.origin_relname = qinstr->origin_relname;
+		rec.calls = 1;
+		rec.total = qinstr->instr.total;
+		rec.bufusage = qinstr->instr.bufusage;
+		rec.walusage = qinstr->instr.walusage;
+		rec.nested = qinstr->nested;
+
+		InstrMergeNestedRecord(&enclosing->nested, enclosing->nested_cxt, &rec);
+	}
+}
 
 /*
  * Use ResourceOwner mechanism to correctly reset instr_stack on abort.
@@ -283,34 +429,62 @@ InstrQueryAlloc(int instrument_options)
 	MemoryContext instr_cxt;
 
 	/*
-	 * When the instrumentation stack is used, create a dedicated memory
-	 * context for this query's instrumentation allocations.  It starts out as
-	 * a child of the current memory context, so that it is freed along with
-	 * the caller's state if the caller is abandoned before InstrQueryStart,
-	 * and is moved under TopMemoryContext while a ResourceOwner is
-	 * responsible for it (see InstrQueryStart), since the abort cleanup needs
-	 * to access it after the caller's memory may already be gone.
-	 *
-	 * For simpler cases (timer/rows only), use the current memory context.
+	 * Create a dedicated memory context for this query's instrumentation
+	 * allocations.  It starts out as a child of the current memory context,
+	 * so that it is freed along with the caller's state if the caller is
+	 * abandoned before InstrQueryStart, and is moved under TopMemoryContext
+	 * while a ResourceOwner is responsible for it (see InstrQueryStart), since
+	 * the abort cleanup needs to access it after the caller's memory may
+	 * already be gone.
 	 *
 	 * All child instrumentation allocations (nodes, triggers, etc) must be
 	 * allocated within this context to ensure correct clean up on abort.
 	 */
-	if (InstrNeedStack(instrument_options))
-		instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
-										  "Instrumentation",
-										  ALLOCSET_SMALL_SIZES);
-	else
-		instr_cxt = CurrentMemoryContext;
+	instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
+									  "Instrumentation",
+									  ALLOCSET_SMALL_SIZES);
 
 	instr = MemoryContextAllocZero(instr_cxt, sizeof(QueryInstrumentation));
 	instr->instrument_options = instrument_options;
 	instr->instr_cxt = instr_cxt;
+	instr->origin_node_id = -1;
 
 	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.kind = INSTR_KIND_QUERY;
+
+	/*
+	 * Query entries always go on the stack, regardless of the options, so
+	 * that nested statements can find the statement that ran them (see
+	 * InstrQueryCurrent and InstrQueryAccumToEnclosing).
+	 */
+	instr->instr.need_stack = true;
+
 	dlist_init(&instr->unfinalized_entries);
 
 	return instr;
+}
+
+/*
+ * Set up a query entry that lives in caller-provided memory, typically on the
+ * C stack around a utility statement, and is finalized by the caller rather
+ * than through a resource owner.  The caller must ensure InstrQueryStopFinalize
+ * runs even on error, e.g. from a PG_FINALLY block.  Such an entry can be the
+ * enclosing statement of nested statements and receive worker usage; to
+ * collect nested statement records it needs to be given memory that outlives
+ * it, see InstrQueryTrackNested.
+ */
+void
+InstrQueryInitLocal(QueryInstrumentation *qinstr, int instrument_options)
+{
+	memset(qinstr, 0, sizeof(QueryInstrumentation));
+	qinstr->instrument_options = instrument_options;
+	qinstr->origin_node_id = -1;
+
+	InstrInitOptions(&qinstr->instr, instrument_options);
+	qinstr->instr.kind = INSTR_KIND_QUERY;
+	qinstr->instr.need_stack = true;
+
+	dlist_init(&qinstr->unfinalized_entries);
 }
 
 void
@@ -321,22 +495,71 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 	 * which stays responsible for it until InstrQueryStopFinalize (or abort).
 	 * It is intentionally not released at InstrQueryStop, so that an abort
 	 * between two start/stop pairs (e.g. between fetches from a cursor) still
-	 * accumulates what was measured so far.
+	 * accumulates what was measured so far.  Entries in caller-provided
+	 * memory (see InstrQueryInitLocal) are the caller's responsibility.
 	 */
-	if (qinstr->instr.need_stack && qinstr->owner == NULL)
+	if (!qinstr->started)
 	{
-		Assert(CurrentResourceOwner != NULL);
+		Instrumentation *origin = instr_current_origin;
+
+		if (qinstr->instr_cxt != NULL)
+		{
+			Assert(CurrentResourceOwner != NULL);
+			Assert(qinstr->owner == NULL);
+
+			/*
+			 * Enlarge first, as that is the only step that can fail; once the
+			 * context is under TopMemoryContext we must be sure to register
+			 * it.
+			 */
+			ResourceOwnerEnlarge(CurrentResourceOwner);
+			MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
+
+			qinstr->owner = CurrentResourceOwner;
+			ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+		}
+		qinstr->started = true;
 
 		/*
-		 * Enlarge first, as that is the only step that can fail; once the
-		 * context is under TopMemoryContext we must be sure to register it.
+		 * Remember where in the enclosing statement this one is run from, for
+		 * the nested statement record.  The plan node or trigger that is
+		 * current now may be gone by the time the record is made (e.g. a
+		 * cursor closed after the statement that opened it finished), so
+		 * copy what we need.
 		 */
-		ResourceOwnerEnlarge(CurrentResourceOwner);
-		MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
+		if (qinstr->query_text != NULL && origin != NULL)
+		{
+			if (origin->kind == INSTR_KIND_NODE)
+				qinstr->origin_node_id = ((NodeInstrumentation *) origin)->plan_node_id;
+			else if (origin->kind == INSTR_KIND_TRIGGER)
+			{
+				TriggerInstrumentation *tginstr = (TriggerInstrumentation *) origin;
 
-		qinstr->owner = CurrentResourceOwner;
-		ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+				/*
+				 * An entry in caller-provided memory finishes within the
+				 * enclosing statement, so it can refer to the names directly.
+				 */
+				if (tginstr->tgname != NULL && qinstr->instr_cxt != NULL)
+				{
+					qinstr->origin_tgname =
+						MemoryContextStrdup(qinstr->instr_cxt, tginstr->tgname);
+					qinstr->origin_relname =
+						MemoryContextStrdup(qinstr->instr_cxt, tginstr->relname);
+				}
+				else if (tginstr->tgname != NULL)
+				{
+					qinstr->origin_tgname = unconstify(char *, tginstr->tgname);
+					qinstr->origin_relname = unconstify(char *, tginstr->relname);
+				}
+			}
+		}
 	}
+
+	/* This statement's own nodes and triggers are the origin from here on */
+	Assert(!qinstr->running);
+	qinstr->saved_origin = instr_current_origin;
+	instr_current_origin = NULL;
+	qinstr->running = true;
 
 	InstrStart(&qinstr->instr);
 }
@@ -345,6 +568,9 @@ void
 InstrQueryStop(QueryInstrumentation *qinstr)
 {
 	InstrStop(&qinstr->instr);
+
+	Assert(qinstr->running);
+	InstrQueryRestoreOrigin(qinstr);
 }
 
 void
@@ -352,11 +578,9 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 {
 	InstrStopFinalize(&qinstr->instr);
 
-	if (!qinstr->instr.need_stack)
-	{
-		Assert(qinstr->owner == NULL);
+	/* Entries in caller-provided memory have nothing further to release */
+	if (qinstr->instr_cxt == NULL)
 		return;
-	}
 
 	Assert(qinstr->owner != NULL);
 	ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
@@ -368,6 +592,62 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 	 * rather than TopMemoryContext.
 	 */
 	MemoryContextSetParent(qinstr->instr_cxt, CurrentMemoryContext);
+}
+
+/*
+ * The innermost query entry that is currently running, or NULL.  While a
+ * statement executes, this is the entry of the statement that any statement
+ * started now would be nested in.
+ */
+QueryInstrumentation *
+InstrQueryCurrent(void)
+{
+	for (int i = instr_stack.stack_size - 1; i >= 0; i--)
+	{
+		Instrumentation *entry = instr_stack.entries[i];
+
+		if (entry->kind == INSTR_KIND_QUERY)
+			return (QueryInstrumentation *) entry;
+	}
+
+	return NULL;
+}
+
+/*
+ * Have the entry collect records about the statements run while it executes
+ * (see NestedStatementInstrumentation), for EXPLAIN to list.  The records are
+ * kept in nested_cxt: the entry's own context, or for an entry in
+ * caller-provided memory that of the enclosing statement collecting them,
+ * which outlives it.
+ */
+void
+InstrQueryTrackNested(QueryInstrumentation *qinstr, MemoryContext nested_cxt)
+{
+	Assert(nested_cxt != NULL);
+
+	qinstr->track_nested = true;
+	qinstr->nested_cxt = nested_cxt;
+}
+
+/*
+ * Describe the statement an entry belongs to, so that it can be recorded as a
+ * nested statement by the enclosing entry.  Only needed when that one tracks
+ * nested statements.  The text is copied, since the caller's copy may be gone
+ * by the time the record is made, except for an entry in caller-provided
+ * memory, which finishes while the caller's text is still around.
+ */
+void
+InstrQuerySetStatement(QueryInstrumentation *qinstr, int64 queryId,
+					   const char *query_text)
+{
+	qinstr->queryId = queryId;
+	if (query_text == NULL)
+		return;
+
+	if (qinstr->instr_cxt != NULL)
+		qinstr->query_text = MemoryContextStrdup(qinstr->instr_cxt, query_text);
+	else
+		qinstr->query_text = unconstify(char *, query_text);
 }
 
 /*
@@ -395,8 +675,12 @@ InstrStartParallelQuery(void)
 }
 
 /*
- * Report usage after parallel worker shutdown, to be handed to the leader
- * (which accumulates it into its own stack, see InstrAccumParallelQuery).
+ * Report usage after parallel worker shutdown.
+ *
+ * The usage is both handed to the leader (which imports it, see
+ * InstrAccumParallelQuery) and, through the finalization, added to the
+ * worker's own session totals in instr_top, so that each process' instr_top
+ * fully accounts for what the process itself did.
  */
 void
 InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
@@ -464,11 +748,12 @@ InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr, Instrumentation *add)
 /* Allocate new node instrumentation structure */
 NodeInstrumentation *
 InstrAllocNode(QueryInstrumentation *qinstr, int instrument_options,
-			   bool async_mode)
+			   bool async_mode, int plan_node_id)
 {
 	NodeInstrumentation *instr = MemoryContextAlloc(qinstr->instr_cxt, sizeof(NodeInstrumentation));
 
 	InstrInitNode(instr, instrument_options, async_mode);
+	instr->plan_node_id = plan_node_id;
 
 	InstrQueryRememberChild(qinstr, &instr->instr);
 
@@ -481,7 +766,9 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 {
 	memset(instr, 0, sizeof(NodeInstrumentation));
 	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.kind = INSTR_KIND_NODE;
 	instr->async_mode = async_mode;
+	instr->plan_node_id = -1;
 }
 
 /* Entry to a plan node. If you modify this, check InstrNodeSetupExecProcNode. */
@@ -572,8 +859,11 @@ ExecProcNodeInstr(PlanState *node, bool need_timer, bool need_stack)
 {
 	NodeInstrumentation *instr = node->instrument;
 	Instrumentation *prev = instr_stack.current;
+	Instrumentation *prev_origin = instr_current_origin;
 	TupleTableSlot *result;
 
+	/* a statement the node runs is attributed to it, see instr_current_origin */
+	instr_current_origin = &instr->instr;
 	if (need_stack)
 		InstrPushStack(&instr->instr);
 	if (need_timer)
@@ -585,6 +875,7 @@ ExecProcNodeInstr(PlanState *node, bool need_timer, bool need_stack)
 		InstrStopTimer(&instr->instr, &instr->counter);
 	if (need_stack)
 		InstrPopStackTo(prev);
+	instr_current_origin = prev_origin;
 
 	InstrCountNodeTuples(instr, TupIsNull(result) ? 0.0 : 1.0);
 
@@ -707,6 +998,7 @@ InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 	for (i = 0; i < n; i++)
 	{
 		InstrInitOptions(&tginstr[i].instr, instrument_options);
+		tginstr[i].instr.kind = INSTR_KIND_TRIGGER;
 		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
 	}
 
@@ -716,6 +1008,10 @@ InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 void
 InstrStartTrigger(TriggerInstrumentation *tginstr)
 {
+	/* a statement the trigger runs is attributed to it, see instr_current_origin */
+	tginstr->saved_origin = instr_current_origin;
+	instr_current_origin = &tginstr->instr;
+
 	InstrStart(&tginstr->instr);
 }
 
@@ -729,6 +1025,8 @@ InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings)
 	 */
 	InstrStop(&tginstr->instr);
 	tginstr->firings += firings;
+
+	instr_current_origin = tginstr->saved_origin;
 }
 
 void

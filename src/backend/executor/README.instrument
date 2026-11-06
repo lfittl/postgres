@@ -121,12 +121,41 @@ regular execution via ExecutorFinish, its counters are added directly to
 Query A's entry, not to the NestLoop above it.
 
 Plan node counters thus stay exclusive of child nodes: they only reflect the
-activity that happened while the node itself was on top of the stack (which
-includes statements the node ran, e.g. through a function).  This keeps them
-identical for the leader and for parallel workers, whose nodes get copied to
-the leader (see below), and matches what happens on abort.  EXPLAIN ANALYZE
-computes the inclusive numbers it shows by summing each subtree at display
-time, see ExplainComputeNodeUsage() in explain.c.
+activity that happened while the node itself was on top of the stack.  This
+keeps them identical for the leader and for parallel workers, whose nodes get
+copied to the leader (see below), and matches what happens on abort.  EXPLAIN
+ANALYZE computes the inclusive numbers it shows by summing each subtree at
+display time, see ExplainComputeNodeUsage() in explain.c.
+
+Nested Statements
+-----------------
+
+A statement run while another one executes, e.g. through SPI from a function
+or a trigger, or a utility command run from PL/pgSQL, is a nested statement.
+Its QueryInstrumentation does not accumulate to the plan node or trigger
+entry that ran it, but to the nearest enclosing query or plain entry (see
+InstrQueryAccumToEnclosing), so that plan node counters only ever describe
+the node's own activity.  Every entry carries a kind (InstrKind) to tell
+these apart; query entries are always on the stack while started, whatever
+options were requested, so that the enclosing statement can be found.
+
+A statement that has per-node instrumentation (EXPLAIN ANALYZE, auto_explain)
+tracks its nested statements: each one gets a query entry even if nobody
+asked for one, and when it is finalized a NestedStatementInstrumentation
+record with its text, call count, time and total usage is merged into the
+enclosing entry's list, aggregated by statement and origin, with the records
+of its own nested statements underneath.  EXPLAIN lists these after the plan,
+naming the plan node or trigger each statement was run from.  The origin is
+taken from instr_current_origin, a pointer maintained by the instrumented
+ExecProcNode wrappers and the trigger start/stop functions and scoped to the
+running statement by InstrQueryStart/InstrQueryStop; it is kept separate
+from the stack, which plan nodes only join when buffer/WAL usage is wanted.
+
+Utility statements run their nested statements under an entry that lives on
+the C stack (InstrQueryInitLocal), provided by a consumer through
+UtilityStmtDesc or set up by standard_ProcessUtility itself when the command
+is nested in a statement that tracks nested statements.  Such an entry owns
+no memory, so its records live in the context of the enclosing statement.
 
 Note these relationships are partially implicit, especially when it comes
 to NodeInstrumentation. Each QueryInstrumentation maintains a list of its

@@ -436,6 +436,7 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
 		{
 			InstrInitOptions(&indexstate->ioss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			indexstate->ioss_Instrument->table_instr.kind = INSTR_KIND_NODE_DETAIL;
 			InstrQueryRememberChild(estate->es_query_instr, &indexstate->ioss_Instrument->table_instr);
 		}
 	}

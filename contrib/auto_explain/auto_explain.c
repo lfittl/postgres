@@ -457,6 +457,8 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
 			ExplainPrintPlan(es, queryDesc);
 			if (es->analyze && auto_explain_log_triggers)
 				ExplainPrintTriggers(es, queryDesc);
+			if (es->analyze)
+				ExplainPrintNestedStatements(es, queryDesc);
 			if (es->costs)
 				ExplainPrintJITSummary(es, queryDesc);
 			if (explain_per_plan_hook)

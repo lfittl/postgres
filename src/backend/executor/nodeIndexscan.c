@@ -993,6 +993,7 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
 		{
 			InstrInitOptions(&indexstate->iss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			indexstate->iss_Instrument->table_instr.kind = INSTR_KIND_NODE_DETAIL;
 			InstrQueryRememberChild(estate->es_query_instr, &indexstate->iss_Instrument->table_instr);
 		}
 	}

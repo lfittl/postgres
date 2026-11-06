@@ -1027,7 +1027,10 @@ EXPLAIN ANALYZE SELECT * FROM polygon_tbl WHERE f1 @&gt; polygon '(0.5,2.0)';
     provides additional detail about I/O operations performed during the
     planning and execution of the given query.  The buffer numbers displayed
     show the count of the non-distinct buffers hit, read, dirtied, and written
-    for the given node and all of its child nodes.  The
+    for the given node and all of its child nodes.  They do not include the
+    buffers used by statements the node ran indirectly, such as queries
+    issued by a function it called; those are reported separately, as
+    described below.  The
     <literal>ANALYZE</literal> option implicitly enables the
     <literal>BUFFERS</literal> option.  If this
     is undesired, <literal>BUFFERS</literal> may be explicitly disabled:
@@ -1151,6 +1154,59 @@ EXPLAIN UPDATE gtest_parent SET f1 = CURRENT_DATE WHERE f2 = 101;
     Note that deferred constraint triggers will not be executed
     until end of transaction and are thus not considered at all by
     <command>EXPLAIN ANALYZE</command>.
+   </para>
+
+   <para>
+    A query can cause other statements to run while it executes, for
+    example when it calls a function that issues queries of its own, when
+    a trigger it fires does so, or when a <application>PL/pgSQL</application>
+    function runs a utility command.  <command>EXPLAIN ANALYZE</command>
+    lists such <firstterm>nested statements</firstterm> after the plan,
+    together with how often each one ran, the time it took, and its buffer
+    and WAL usage if those options are enabled:
+
+<screen>
+EXPLAIN ANALYZE SELECT unique1, count_hundred(hundred) FROM tenk1 WHERE unique1 &lt; 3;
+
+                                                       QUERY PLAN
+-------------------------------------------------------------------&zwsp;------------------------------------------------------
+ Index Scan using tenk1_unique1 on tenk1  (cost=0.29..9.09 rows=3 width=12) (actual time=0.040..0.104 rows=3.00 loops=1)
+   Node ID: 0
+   Index Cond: (unique1 &lt; 3)
+   Index Searches: 1
+   Table Buffers: shared hit=1
+   Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=5 read=2
+ Planning Time: 0.060 ms
+ Nested Statements:
+   Statement 1: SELECT count(*) FROM tenk1 WHERE hundred = $1
+     Origin: Node ID 0
+     Calls: 3
+     Time: 0.052 ms
+     Buffers: shared hit=168
+ Execution Time: 0.109 ms
+</screen>
+
+    Here <function>count_hundred</function> is an SQL function that counts
+    the rows of <structname>tenk1</structname> with a given
+    <structfield>hundred</structfield> value.  Its query ran three times, once
+    per row the Index Scan produced, and accessed 168 buffers in total, while
+    the Index Scan itself needed only 3.  The <literal>Origin</literal> line
+    names where a nested statement was run from: the plan node that called
+    the function, which is marked with the matching <literal>Node ID</literal>
+    in the plan, a trigger, or another nested statement if the statements
+    are nested more than one level deep.  Executions of the same statement
+    from the same origin are added up.
+   </para>
+
+   <para>
+    The buffer and WAL counts of a plan node do not include those of the
+    nested statements it ran, so that the node's own activity remains
+    visible.  Its <literal>actual time</literal> does include the time the
+    nested statements took, since they ran while the node was executing;
+    the <literal>Time</literal> shown for a nested statement can be used to
+    tell the two apart.
    </para>
 
    <para>

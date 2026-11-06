@@ -416,7 +416,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 	if (estate->es_instrument)
 		result->instrument = InstrAllocNode(estate->es_query_instr,
 											estate->es_instrument,
-											result->async_capable);
+											result->async_capable,
+											node->plan_node_id);
 
 	return result;
 }
@@ -814,18 +815,21 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 /*
  * ExecFinalizeNodeInstrumentation
  *
- * Accumulate each node's own buffer/WAL usage directly to the target,
- * typically the query-level entry.
+ * Accumulate each node's own buffer/WAL usage directly to the target, which is
+ * the query-level entry in a regular backend and the session totals
+ * (instr_top) in a parallel worker.
  *
  * Nodes are intentionally not rolled up into their parents: per-node stats
- * stay exclusive of child nodes, i.e. they only reflect activity that
- * happened while the node itself was the top of the instrumentation stack
- * (which includes statements it ran, e.g. through a function).  This keeps
- * the per-node counters identical in the leader and in parallel workers
- * (whose nodes get copied to the leader through shared memory), and matches
- * what the abort path in ResOwnerReleaseInstrumentation does.  EXPLAIN
- * computes the inclusive numbers it displays by summing subtrees at display
- * time.
+ * stay exclusive, i.e. they only reflect activity that happened while the
+ * node itself was the top of the instrumentation stack.  Statements the node
+ * ran (e.g. through a function) are not included either, since their query
+ * entries accumulate past the node to the enclosing statement, see
+ * InstrQueryAccumToEnclosing.  This keeps the per-node counters identical in
+ * the leader and in parallel workers (whose nodes get copied to the leader
+ * through shared memory), and matches what the abort path in
+ * ResOwnerReleaseInstrumentation does.  EXPLAIN computes the inclusive
+ * numbers it displays by summing subtrees at display time, and lists the
+ * nested statements separately.
  *
  * This must run after the cleanup done by ExecShutdownNode, and not rely on any
  * resources cleaned up by it. We also expect shutdown actions to have occurred,

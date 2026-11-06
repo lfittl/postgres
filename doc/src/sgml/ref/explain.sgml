@@ -119,6 +119,10 @@ ROLLBACK;
     <listitem>
      <para>
       Carry out the command and show actual run times and other statistics.
+      Besides the per-node statistics, this reports the time spent in
+      triggers, and lists the statements that were run while the command
+      executed, for example by functions it called, with their own
+      statistics (see <xref linkend="using-explain-analyze"/>).
       This parameter defaults to <literal>FALSE</literal>.
      </para>
     </listitem>
@@ -201,7 +205,11 @@ ROLLBACK;
       previously-dirtied blocks evicted from cache by this backend during
       query processing.
       The number of blocks shown for an
-      upper-level node includes those used by all its child nodes.  In text
+      upper-level node includes those used by all its child nodes, but not
+      those used by statements the node ran indirectly, for example through
+      a function it called or a trigger it fired; those are listed separately
+      under <literal>Nested Statements</literal> (see
+      <xref linkend="using-explain-analyze"/>).  In text
       format, only non-zero values are printed.  Buffers information is
       included by default when <literal>ANALYZE</literal> is used but
       otherwise is not included by default.  When this parameter is

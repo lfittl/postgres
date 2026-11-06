@@ -14,6 +14,7 @@
 #define INSTRUMENT_H
 
 #include "lib/ilist.h"
+#include "nodes/pg_list.h"
 #include "portability/instr_time.h"
 
 
@@ -87,15 +88,29 @@ typedef enum InstrumentOption
  * In a query context use QueryInstrumentation instead, which handles aborts
  * using the resource owner logic.
  */
+typedef enum InstrKind
+{
+	INSTR_KIND_PLAIN = 0,		/* standalone entry, e.g. around a utility
+								 * statement or planning */
+	INSTR_KIND_QUERY,			/* QueryInstrumentation */
+	INSTR_KIND_NODE,			/* NodeInstrumentation of a plan node */
+	INSTR_KIND_NODE_DETAIL,		/* part of a plan node, e.g. the table access
+								 * of an index scan */
+	INSTR_KIND_TRIGGER,			/* TriggerInstrumentation */
+} InstrKind;
+
 typedef struct Instrumentation
 {
 	/* Parameters set at creation: */
 	bool		need_timer;		/* true if we need timer data */
-	bool		need_stack;		/* true if we need WAL/buffer usage data */
+	bool		need_stack;		/* true if we need WAL/buffer usage data, i.e.
+								 * the entry goes on the stack while running
+								 * (always set for query entries) */
 	/* Internal state keeping: */
 	bool		on_stack;		/* true if currently on instr_stack */
 	bool		finalized;		/* true once accumulated to a parent via
 								 * InstrFinalizeChild */
+	InstrKind	kind;			/* what this entry describes */
 	instr_time	starttime;		/* start time of last InstrStart */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
@@ -104,6 +119,29 @@ typedef struct Instrumentation
 	/* Abort handling: link in parent QueryInstrumentation's unfinalized list */
 	dlist_node	unfinalized_entry;
 } Instrumentation;
+
+/*
+ * Statistics about a statement run while another statement was executing,
+ * e.g. through SPI from a function or a trigger, as collected by the
+ * enclosing QueryInstrumentation for EXPLAIN (see InstrQueryTrackNested).
+ * Executions of the same statement from the same origin are aggregated.
+ */
+typedef struct NestedStatementInstrumentation
+{
+	int64		queryId;		/* query identifier, if computed */
+	char	   *query_text;		/* source text of the statement */
+	/* Where in the enclosing statement it was run from: */
+	int			origin_node_id;	/* plan_node_id of the running plan node, or
+								 * -1 if unknown */
+	char	   *origin_tgname;	/* trigger that ran it, or NULL */
+	char	   *origin_relname; /* relation of that trigger */
+	/* Aggregated over all executions: */
+	int64		calls;			/* number of executions */
+	instr_time	total;			/* total runtime */
+	BufferUsage bufusage;		/* total buffer usage, including workers */
+	WalUsage	walusage;		/* total WAL usage, including workers */
+	List	   *nested;			/* statements it ran itself, same type */
+} NestedStatementInstrumentation;
 
 /*
  * Query-related instrumentation tracking.
@@ -124,6 +162,20 @@ typedef struct Instrumentation
  * InstrQueryStopFinalize is run by the resource owner cleanup, so the caller
  * must not release that resource owner without an abort before having called
  * InstrQueryStopFinalize.
+ *
+ * Query entries are always on the instrumentation stack while started, so
+ * that a statement run while another one executes (a nested statement) can
+ * find its enclosing statement.  When finalized, a query entry accumulates to
+ * the nearest enclosing query or plain entry rather than to the plan node or
+ * trigger that ran it, so that per-node stats only describe the node's own
+ * activity.  An enclosing entry that tracks nested statements (see
+ * InstrQueryTrackNested) additionally receives a NestedStatementInstrumentation
+ * record, which EXPLAIN lists separately.
+ *
+ * Utility statements use entries that live on the C stack of whoever asked
+ * for them (see InstrQueryInitLocal and UtilityStmtDesc), which are neither
+ * tied to a resource owner nor own memory, as transaction control statements
+ * release both while running.
  */
 struct ResourceOwnerData;
 typedef struct QueryInstrumentation
@@ -137,12 +189,36 @@ typedef struct QueryInstrumentation
 	struct ResourceOwnerData *owner;
 
 	/*
+	 * Nested statement tracking.  track_nested is set when records should be
+	 * collected from nested statements into 'nested'.  The remaining fields
+	 * describe this statement for the record it produces in its enclosing
+	 * statement's list, and are only set up when that one tracks nested
+	 * statements (see InstrQuerySetStatement).
+	 */
+	bool		track_nested;	/* collect records from nested statements */
+	MemoryContext nested_cxt;	/* where the records live: instr_cxt, or for
+								 * an entry without one the context of the
+								 * enclosing statement that collects them */
+	bool		started;		/* InstrQueryStart has been called */
+	bool		running;		/* between InstrQueryStart and InstrQueryStop */
+	Instrumentation *saved_origin;	/* instr_current_origin to restore at
+									 * InstrQueryStop */
+	int64		queryId;		/* query identifier, if computed */
+	char	   *query_text;		/* copy of the statement's source text */
+	int			origin_node_id;	/* plan node of the enclosing statement that
+								 * ran this one, or -1 */
+	char	   *origin_tgname;	/* trigger that ran this one, or NULL */
+	char	   *origin_relname; /* relation of that trigger */
+	List	   *nested;			/* NestedStatementInstrumentation records */
+
+	/*
 	 * Dedicated memory context for all instrumentation allocations belonging
 	 * to this query (node instrumentation, trigger instrumentation, etc.).
 	 * Initially a child of the context current at InstrQueryAlloc, moved
 	 * under TopMemoryContext by InstrQueryStart while the ResourceOwner is
 	 * responsible for it (so it survives transaction abort for the cleanup),
 	 * and reassigned to the current memory context on InstrQueryStopFinalize.
+	 * NULL for entries set up with InstrQueryInitLocal.
 	 */
 	MemoryContext instr_cxt;
 
@@ -167,6 +243,7 @@ typedef struct NodeInstrumentation
 	Instrumentation instr;
 	/* Parameters set at node creation: */
 	bool		async_mode;		/* true if node is in async mode */
+	int			plan_node_id;	/* plan_node_id of the node, or -1 */
 	/* Info about current plan cycle: */
 	bool		running;		/* true if we've completed first tuple */
 	instr_time	counter;		/* accumulated runtime for this node */
@@ -196,6 +273,10 @@ typedef struct TriggerInstrumentation
 	Instrumentation instr;
 	int64		firings;		/* number of times the instrumented trigger
 								 * was fired */
+	const char *tgname;			/* trigger name, for nested statement records */
+	const char *relname;		/* its relation's name */
+	Instrumentation *saved_origin;	/* instr_current_origin to restore at
+									 * InstrStopTrigger */
 } TriggerInstrumentation;
 
 /*
@@ -225,6 +306,18 @@ extern PGDLLIMPORT WalUsage pgWalUsage;
  * parallel workers, since that gets accumulated into the leader's stack.
  */
 extern PGDLLIMPORT Instrumentation instr_top;
+
+/*
+ * The plan node or trigger entry of the innermost running statement that is
+ * executing right now, or NULL.  Maintained by the instrumented ExecProcNode
+ * wrappers and InstrStartTrigger/InstrStopTrigger, and scoped to the running
+ * statement by InstrQueryStart/InstrQueryStop, so that a nested statement can
+ * record where it was run from (see NestedStatementInstrumentation).  Kept
+ * separately from the stack, which only tracks entries collecting buffer/WAL
+ * usage, since this is needed whichever options are on and is much cheaper to
+ * maintain than a stack entry.
+ */
+extern PGDLLIMPORT Instrumentation *instr_current_origin;
 
 /*
  * The instrumentation stack state. The 'current' field points to the
@@ -283,10 +376,17 @@ extern void InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent);
 extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 
 extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);
+extern void InstrQueryInitLocal(QueryInstrumentation *qinstr,
+								int instrument_options);
 extern void InstrQueryStart(QueryInstrumentation *instr);
 extern void InstrQueryStop(QueryInstrumentation *instr);
 extern void InstrQueryStopFinalize(QueryInstrumentation *instr);
 extern void InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentation *instr);
+extern QueryInstrumentation *InstrQueryCurrent(void);
+extern void InstrQueryTrackNested(QueryInstrumentation *qinstr,
+								  MemoryContext nested_cxt);
+extern void InstrQuerySetStatement(QueryInstrumentation *qinstr,
+								   int64 queryId, const char *query_text);
 
 pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage);
@@ -298,7 +398,7 @@ extern void InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr,
 
 extern NodeInstrumentation *InstrAllocNode(QueryInstrumentation *qinstr,
 										   int instrument_options,
-										   bool async_mode);
+										   bool async_mode, int plan_node_id);
 extern void InstrInitNode(NodeInstrumentation *instr, int instrument_options,
 						  bool async_mode);
 extern void InstrStartNode(NodeInstrumentation *instr);
