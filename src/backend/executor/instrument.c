@@ -24,6 +24,9 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
+static void InstrQueryFinalizeTruncated(QueryInstrumentation *qinstr);
+static void InstrQueryPassOnWorkerUsage(QueryInstrumentation *qinstr);
+
 WalUsage	pgWalUsage;
 Instrumentation instr_top;
 InstrStackState instr_stack = {
@@ -150,12 +153,32 @@ InstrStopFinalizeInternal(Instrumentation *instr, bool allow_stopped)
 		if (idx < 0)
 			elog(ERROR, "instrumentation entry not found on stack");
 
-		/* Clear on_stack for any intermediate entries we're skipping over */
-		for (int i = instr_stack.stack_size - 1; i > idx; i--)
-			instr_stack.entries[i]->on_stack = false;
-
+		/*
+		 * Pop the entries above us, innermost first.  These belong to code
+		 * that has been (or is being) abandoned due to an error, so they will
+		 * not be stopped normally.  Query entries among them are finalized
+		 * right here, while the entry each of them accumulates to is still
+		 * right below it on the stack, so that what a failed nested statement
+		 * did stays attributed to the statement that ran it.  Leaving them to
+		 * the abort cleanup would accumulate them to whatever entry survives,
+		 * since the cleanup releases entries in no particular order and only
+		 * after we are gone.
+		 *
+		 * The entries are still valid at this point: registered query entries
+		 * live under TopMemoryContext until their cleanup runs, and an entry
+		 * in caller-provided memory is only ever above us while its own
+		 * PG_FINALLY is still pending (or at FATAL, when nothing unwinds).
+		 */
 		while (instr_stack.stack_size > idx + 1)
-			instr_stack.stack_size--;
+		{
+			Instrumentation *entry = instr_stack.entries[--instr_stack.stack_size];
+
+			instr_stack.current = instr_stack.entries[instr_stack.stack_size - 1];
+			entry->on_stack = false;
+
+			if (entry->kind == INSTR_KIND_QUERY)
+				InstrQueryFinalizeTruncated((QueryInstrumentation *) entry);
+		}
 	}
 
 	if (!(allow_stopped && instr->need_timer &&
@@ -163,10 +186,33 @@ InstrStopFinalizeInternal(Instrumentation *instr, bool allow_stopped)
 		InstrStop(instr);
 
 	/*
-	 * Accumulate all instrumentation to the currently active instrumentation,
-	 * so that callers get a complete picture of activity, even after an abort
+	 * Accumulate all instrumentation to the enclosing instrumentation, so
+	 * that callers get a complete picture of activity, even after an abort.
+	 *
+	 * What parallel workers did on behalf of a statement takes a separate
+	 * route to the enclosing statement, see InstrQueryPassOnWorkerUsage.
 	 */
 	InstrAccumStack(instr_stack.current, instr);
+
+	if (instr->kind == INSTR_KIND_QUERY)
+		InstrQueryPassOnWorkerUsage((QueryInstrumentation *) instr);
+}
+
+/*
+ * Finalize a running query entry that an outer entry just popped off the
+ * stack, see InstrStopFinalizeInternal.  This does everything the abort
+ * cleanup would, except releasing the memory, which stays with the resource
+ * owner (for an entry in caller-provided memory there is nothing to release).
+ */
+static void
+InstrQueryFinalizeTruncated(QueryInstrumentation *qinstr)
+{
+	Assert(!qinstr->instr.on_stack);
+	Assert(!qinstr->instr.finalized);
+
+	InstrQueryFinalizeChildren(qinstr, &qinstr->instr);
+	InstrStopFinalizeInternal(&qinstr->instr, false);
+	qinstr->instr.finalized = true;
 }
 
 /*
@@ -248,6 +294,30 @@ InstrQueryFinalizeChildren(QueryInstrumentation *qinstr, Instrumentation *target
 }
 
 /*
+ * Pass what parallel workers did on behalf of a finalized query entry on to
+ * the statement it is nested in.
+ *
+ * Unlike the entry's own counters, which go to the current entry like those
+ * of any other entry, the worker part must never reach a plan node, trigger
+ * or plain entry: those accumulate to the session totals in instr_top
+ * eventually, which only ever describe the process' own activity, since each
+ * worker reports what it did itself.  So it is imported into the innermost
+ * query entry on the stack instead, see InstrAccumParallelQuery, which also
+ * takes care of attributing it to the plan node that ran this statement, for
+ * EXPLAIN.
+ */
+static void
+InstrQueryPassOnWorkerUsage(QueryInstrumentation *qinstr)
+{
+	/* Common case: no parallel workers were involved */
+	if (!qinstr->has_worker_usage)
+		return;
+
+	InstrAccumParallelQuery(InstrQueryCurrent(),
+							&qinstr->worker_bufusage, &qinstr->worker_walusage);
+}
+
+/*
  * Use ResourceOwner mechanism to correctly reset instr_stack on abort.
  */
 static void ResOwnerReleaseInstrumentation(Datum res);
@@ -278,15 +348,25 @@ ResOwnerReleaseInstrumentation(Datum res)
 	QueryInstrumentation *qinstr = (QueryInstrumentation *) DatumGetPointer(res);
 	MemoryContext instr_cxt = qinstr->instr_cxt;
 
-	/* Accumulate data from all unfinalized child entries (nodes, triggers) */
-	InstrQueryFinalizeChildren(qinstr, &qinstr->instr);
-
 	/*
-	 * Ensure the stack is reset as expected, and we accumulate to the parent.
-	 * The entry stays registered between InstrQueryStop and the next
-	 * InstrQueryStart, so it may well not be running at this point.
+	 * An entry that an outer entry popped off the stack when it was finalized
+	 * has been finalized along with it (see InstrStopFinalizeInternal), and
+	 * only its memory remains to be released.
 	 */
-	InstrStopFinalizeInternal(&qinstr->instr, true);
+	if (qinstr->instr.finalized)
+		Assert(!qinstr->instr.on_stack);
+	else
+	{
+		/* Accumulate the unfinalized child entries (nodes, triggers) */
+		InstrQueryFinalizeChildren(qinstr, &qinstr->instr);
+
+		/*
+		 * Ensure the stack is reset as expected, and we accumulate to the
+		 * parent.  The entry stays registered between InstrQueryStop and the
+		 * next InstrQueryStart, so it may well not be running at this point.
+		 */
+		InstrStopFinalizeInternal(&qinstr->instr, true);
+	}
 
 	/*
 	 * Destroy the dedicated instrumentation context, which frees the
@@ -302,31 +382,35 @@ InstrQueryAlloc(int instrument_options)
 	MemoryContext instr_cxt;
 
 	/*
-	 * When the instrumentation stack is used, create a dedicated memory
-	 * context for this query's instrumentation allocations.  It starts out as
-	 * a child of the current memory context, so that it is freed along with
-	 * the caller's state if the caller is abandoned before InstrQueryStart,
-	 * and is moved under TopMemoryContext while a ResourceOwner is
-	 * responsible for it (see InstrQueryStart), since the abort cleanup needs
-	 * to access it after the caller's memory may already be gone.
-	 *
-	 * For simpler cases (timer/rows only), use the current memory context.
+	 * Create a dedicated memory context for this query's instrumentation
+	 * allocations.  It starts out as a child of the current memory context,
+	 * so that it is freed along with the caller's state if the caller is
+	 * abandoned before InstrQueryStart, and is moved under TopMemoryContext
+	 * while a ResourceOwner is responsible for it (see InstrQueryStart),
+	 * since the abort cleanup needs to access it after the caller's memory
+	 * may already be gone.
 	 *
 	 * All child instrumentation allocations (nodes, triggers, etc) must be
 	 * allocated within this context to ensure correct clean up on abort.
 	 */
-	if (InstrNeedStack(instrument_options))
-		instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
-										  "Instrumentation",
-										  ALLOCSET_SMALL_SIZES);
-	else
-		instr_cxt = CurrentMemoryContext;
+	instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
+									  "Instrumentation",
+									  ALLOCSET_SMALL_SIZES);
 
 	instr = MemoryContextAllocZero(instr_cxt, sizeof(QueryInstrumentation));
 	instr->instrument_options = instrument_options;
 	instr->instr_cxt = instr_cxt;
 
 	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.kind = INSTR_KIND_QUERY;
+
+	/*
+	 * Query entries always go on the stack, regardless of the options, so
+	 * that the statement that is running can always be found (see
+	 * InstrQueryCurrent).
+	 */
+	instr->instr.need_stack = true;
+
 	dlist_init(&instr->unfinalized_entries);
 
 	return instr;
@@ -336,7 +420,8 @@ InstrQueryAlloc(int instrument_options)
  * Set up a query entry that lives in caller-provided memory, such as the one
  * embedded in a UtilityStmtDesc, and is finalized by the caller rather than
  * through a resource owner.  The caller must ensure InstrQueryStopFinalize
- * runs even on error, e.g. from a PG_FINALLY block.
+ * runs even on error, e.g. from a PG_FINALLY block.  Such an entry can be the
+ * enclosing statement of nested statements and receive worker usage.
  */
 void
 InstrQueryInitLocal(QueryInstrumentation *qinstr, int instrument_options)
@@ -345,7 +430,30 @@ InstrQueryInitLocal(QueryInstrumentation *qinstr, int instrument_options)
 	qinstr->instrument_options = instrument_options;
 
 	InstrInitOptions(&qinstr->instr, instrument_options);
+	qinstr->instr.kind = INSTR_KIND_QUERY;
+	qinstr->instr.need_stack = true;
+
 	dlist_init(&qinstr->unfinalized_entries);
+}
+
+/*
+ * Total buffer/WAL usage of a statement: what this process did, plus what
+ * was imported from parallel workers.
+ */
+void
+InstrTotalUsage(const QueryInstrumentation *qinstr, BufferUsage *bufusage,
+				WalUsage *walusage)
+{
+	if (bufusage)
+	{
+		*bufusage = qinstr->instr.bufusage;
+		BufferUsageAdd(bufusage, &qinstr->worker_bufusage);
+	}
+	if (walusage)
+	{
+		*walusage = qinstr->instr.walusage;
+		WalUsageAdd(walusage, &qinstr->worker_walusage);
+	}
 }
 
 void
@@ -359,20 +467,25 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 	 * accumulates what was measured so far.  Entries in caller-provided
 	 * memory (see InstrQueryInitLocal) are the caller's responsibility.
 	 */
-	if (qinstr->instr.need_stack && qinstr->instr_cxt != NULL &&
-		qinstr->owner == NULL)
+	if (!qinstr->started)
 	{
-		Assert(CurrentResourceOwner != NULL);
+		if (qinstr->instr_cxt != NULL)
+		{
+			Assert(CurrentResourceOwner != NULL);
+			Assert(qinstr->owner == NULL);
 
-		/*
-		 * Enlarge first, as that is the only step that can fail; once the
-		 * context is under TopMemoryContext we must be sure to register it.
-		 */
-		ResourceOwnerEnlarge(CurrentResourceOwner);
-		MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
+			/*
+			 * Enlarge first, as that is the only step that can fail; once the
+			 * context is under TopMemoryContext we must be sure to register
+			 * it.
+			 */
+			ResourceOwnerEnlarge(CurrentResourceOwner);
+			MemoryContextSetParent(qinstr->instr_cxt, TopMemoryContext);
 
-		qinstr->owner = CurrentResourceOwner;
-		ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+			qinstr->owner = CurrentResourceOwner;
+			ResourceOwnerRememberInstrumentation(qinstr->owner, qinstr);
+		}
+		qinstr->started = true;
 	}
 
 	InstrStart(&qinstr->instr);
@@ -389,12 +502,6 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 {
 	InstrStopFinalize(&qinstr->instr);
 
-	if (!qinstr->instr.need_stack)
-	{
-		Assert(qinstr->owner == NULL);
-		return;
-	}
-
 	/* Entries in caller-provided memory have nothing further to release */
 	if (qinstr->instr_cxt == NULL)
 		return;
@@ -409,6 +516,27 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 	 * rather than TopMemoryContext.
 	 */
 	MemoryContextSetParent(qinstr->instr_cxt, CurrentMemoryContext);
+}
+
+/*
+ * The innermost query entry that is currently running, i.e. the entry of the
+ * innermost enclosing statement for which instrumentation was requested.
+ * Statements that nobody asked to instrument have no entry, so this is NULL
+ * outside of any instrumented statement, e.g. in autovacuum, or for a nested
+ * statement whose top-level statement is not tracked by anything.
+ */
+QueryInstrumentation *
+InstrQueryCurrent(void)
+{
+	for (int i = instr_stack.stack_size - 1; i >= 0; i--)
+	{
+		Instrumentation *entry = instr_stack.entries[i];
+
+		if (entry->kind == INSTR_KIND_QUERY)
+			return (QueryInstrumentation *) entry;
+	}
+
+	return NULL;
 }
 
 /*
@@ -436,8 +564,12 @@ InstrStartParallelQuery(void)
 }
 
 /*
- * Report usage after parallel worker shutdown, to be handed to the leader
- * (which accumulates it into its own stack, see InstrAccumParallelQuery).
+ * Report usage after parallel worker shutdown.
+ *
+ * The usage is both handed to the leader (which imports it, see
+ * InstrAccumParallelQuery) and, through the finalization, added to the
+ * worker's own session totals in instr_top, so that each process' instr_top
+ * fully accounts for what the process itself did.
  */
 void
 InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage)
@@ -448,56 +580,70 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
 }
 
 /*
- * Record WAL usage imported from a parallel worker.
+ * Import work done by parallel workers into the leader's statement-level
+ * stats.
+ *
+ * The usage is the complete activity of a worker, as reported through
+ * InstrEndParallelQuery, and goes to the worker part of the query entry of
+ * the statement that launched the workers (the executor's es_query_instr).
+ * From there on it is carried along separately from the leader's own
+ * activity, so the session totals in instr_top stay free of it.  Nothing is
+ * attributed to a plan node here: with per-node instrumentation, the leader
+ * shows what the workers did on each node from the per-worker copies it
+ * retrieves (see ExecParallelRetrieveInstrumentation), which are also part of
+ * these totals, and there is no other node this activity belongs to.
  */
 void
-InstrAccumWorkerUsage(const BufferUsage *bufusage, const WalUsage *walusage)
+InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
+						 const BufferUsage *bufusage, const WalUsage *walusage)
 {
-	WalUsageAdd(&pgWalUsage, walusage);
+	if (qinstr == NULL)
+		return;
+
+	qinstr->has_worker_usage = true;
+	BufferUsageAdd(&qinstr->worker_bufusage, bufusage);
+	WalUsageAdd(&qinstr->worker_walusage, walusage);
 }
 
 /*
- * Accumulate work done by parallel workers in the leader's stats.
+ * Import work done by parallel workers on behalf of a statement that has no
+ * query entry of its own: a query nobody asked to instrument, a parallel
+ * index build or vacuum run by a utility command, or a query entry passing
+ * on its worker part when finalized.
  *
- * Note that what gets added here effectively depends on whether per-node
- * instrumentation is active. If it's active the parallel worker intentionally
- * does not roll up its nodes into the query-level stats, because the leader
- * imports the per-node stats separately (see InstrAccumWorkerNodeUsage).
- * Instead, this only accumulates any extra activity outside of nodes.
+ * The usage goes to the given query entry, which is the innermost one on the
+ * stack (InstrQueryCurrent), i.e. the statement the current one is nested in.
+ * If there is none (e.g. in autovacuum, or when nothing tracks the top-level
+ * statement), nobody is interested in the usage and it is dropped: each
+ * worker reports its activity to the cumulative statistics system itself.
  *
- * Otherwise this is responsible for making sure that the complete query
- * activity is accumulated.
+ * For EXPLAIN, the usage is additionally attributed to the plan node that is
+ * current on the stack, if any, i.e. the node that ran the nested statement
+ * whose workers these are.  That is the node the statement's own counters go
+ * to as well.  A trigger or plain entry (e.g. planning) being current means
+ * no node is responsible, matching where those counters go.  This runs during
+ * abort cleanup too, where no memory can be allocated, which is why the
+ * node's worker part is allocated up front.
  */
 void
-InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage)
+InstrAccumParallelQuery(QueryInstrumentation *qinstr,
+						const BufferUsage *bufusage, const WalUsage *walusage)
 {
-	InstrAccumWorkerUsage(bufusage, walusage);
+	if (qinstr == NULL)
+		return;
 
-	/*
-	 * There is no node to attribute query-level worker usage to, so add it to
-	 * the current stack entry directly, which is the Gather node when workers
-	 * are shut down during its execution.
-	 */
-	BufferUsageAdd(&instr_stack.current->bufusage, bufusage);
-	WalUsageAdd(&instr_stack.current->walusage, walusage);
-}
+	InstrQueryAddWorkerUsage(qinstr, bufusage, walusage);
 
-/*
- * Account for a parallel worker's per-node usage in the leader's query entry.
- *
- * The usage is deliberately kept out of the leader's own per-node entries,
- * which only ever describe the leader's activity; EXPLAIN combines the two
- * from the per-worker copies at display time.  It goes straight to the query
- * entry rather than the current stack entry, since the latter is the Gather
- * node while workers are being shut down.
- */
-void
-InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr, Instrumentation *add)
-{
-	Assert(qinstr != NULL);
+	if (instr_stack.current->kind == INSTR_KIND_NODE)
+	{
+		NodeInstrumentation *node = (NodeInstrumentation *) instr_stack.current;
 
-	InstrAccumStack(&qinstr->instr, add);
-	InstrAccumWorkerUsage(&add->bufusage, &add->walusage);
+		if (node->worker_usage != NULL)
+		{
+			BufferUsageAdd(&node->worker_usage->bufusage, bufusage);
+			WalUsageAdd(&node->worker_usage->walusage, walusage);
+		}
+	}
 }
 
 /* Node instrumentation handling */
@@ -511,6 +657,15 @@ InstrAllocNode(QueryInstrumentation *qinstr, int instrument_options,
 
 	InstrInitNode(instr, instrument_options, async_mode);
 
+	/*
+	 * With buffer/WAL instrumentation, also allocate the node's worker part
+	 * (see InstrAccumParallelQuery), up front since it may be filled during
+	 * abort cleanup, where no memory can be allocated.
+	 */
+	if (instr->instr.need_stack)
+		instr->worker_usage = MemoryContextAllocZero(qinstr->instr_cxt,
+													 sizeof(InstrWorkerUsage));
+
 	InstrQueryRememberChild(qinstr, &instr->instr);
 
 	return instr;
@@ -522,6 +677,7 @@ InstrInitNode(NodeInstrumentation *instr, int instrument_options, bool async_mod
 {
 	memset(instr, 0, sizeof(NodeInstrumentation));
 	InstrInitOptions(&instr->instr, instrument_options);
+	instr->instr.kind = INSTR_KIND_NODE;
 	instr->async_mode = async_mode;
 }
 
@@ -662,6 +818,7 @@ InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 	for (i = 0; i < n; i++)
 	{
 		InstrInitOptions(&tginstr[i].instr, instrument_options);
+		tginstr[i].instr.kind = INSTR_KIND_TRIGGER;
 		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
 	}
 

@@ -380,3 +380,51 @@ DROP TRIGGER trig_test_trig ON trig_test_tab;
 DROP FUNCTION trig_test_func;
 DROP TABLE trig_test_tab;
 DROP TABLE trig_work_tab;
+
+-- Parallel workers launched by a nested statement.
+-- What the workers of a statement run by a function did is attributed to the
+-- plan node that ran the function, like the function's own activity.  With
+-- the leader not participating, the workers do all the scanning, so the node
+-- must show at least one block access per page of the table (given a
+-- sequential scan, which is forced so that the page count is a known
+-- quantity).
+CREATE TABLE par_nested_tab AS SELECT * FROM tenk1;
+VACUUM ANALYZE par_nested_tab;
+
+CREATE FUNCTION nested_parallel_count() RETURNS bigint AS $$
+BEGIN
+    RETURN (SELECT count(*) FROM par_nested_tab);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION check_nested_parallel_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    node_buf int;
+    pages int;
+BEGIN
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_indexonlyscan = off;
+    SET LOCAL enable_bitmapscan = off;
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT nested_parallel_count()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    node_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+    pages := pg_relation_size('par_nested_tab') / current_setting('block_size')::int;
+    RETURN node_buf >= pages;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT check_nested_parallel_buffers() AS nested_parallel_buffers_on_node;
+
+DROP FUNCTION check_nested_parallel_buffers;
+DROP FUNCTION nested_parallel_count;
+DROP TABLE par_nested_tab;
