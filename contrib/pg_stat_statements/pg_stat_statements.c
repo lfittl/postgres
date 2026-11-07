@@ -1153,10 +1153,13 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		!IsA(parsetree, PrepareStmt))
 	{
 		uint64		rows;
-		Instrumentation instr = {0};
 
-		InstrInitOptions(&instr, INSTRUMENT_ALL);
-		InstrStart(&instr);
+		/*
+		 * Request statement-level instrumentation (timing, buffers and WAL)
+		 * for the command, the same way we do for optimizable statements via
+		 * query_instr_options.
+		 */
+		desc->instr_options |= INSTRUMENT_ALL;
 
 		nesting_level++;
 		PG_TRY();
@@ -1183,8 +1186,6 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		 */
 		pstmt = NULL;
 
-		InstrStop(&instr);
-
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
 		 * statements of COPY, FETCH, CREATE TABLE AS, CREATE MATERIALIZED
@@ -1202,10 +1203,10 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 				   saved_stmt_len,
 				   nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(instr.total),
+				   INSTR_TIME_GET_MILLISEC(desc->instr.total),
 				   rows,
-				   &instr.bufusage,
-				   &instr.walusage,
+				   &desc->instr.bufusage,
+				   &desc->instr.walusage,
 				   NULL,
 				   NULL,
 				   0,

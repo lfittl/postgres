@@ -14,6 +14,7 @@
 #ifndef UTILITY_H
 #define UTILITY_H
 
+#include "executor/instrument.h"
 #include "tcop/cmdtag.h"
 #include "tcop/tcopprot.h"
 
@@ -86,6 +87,26 @@ typedef struct UtilityStmtDesc
 	DestReceiver *dest;			/* where to send results, if any */
 	QueryCompletion *qc;		/* where to store command completion status,
 								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility command counterpart of
+	 * QueryDesc's query_instr_options and query_instr.  A consumer (e.g.
+	 * pg_stat_statements) that wants timing, buffer or WAL usage ORs the
+	 * InstrumentOption flags into instr_options before calling
+	 * standard_ProcessUtility and reads instr afterwards.
+	 *
+	 * The entry is owned by standard_ProcessUtility, which sets it up, runs
+	 * the command inside it and stops it before returning, so it only ever
+	 * describes the command's own processing.  Work a ProcessUtility hook
+	 * does before or after calling standard_ProcessUtility is not included,
+	 * the same way the executor's query entry excludes what ExecutorStart
+	 * and ExecutorEnd hooks do.  Likewise, if a hook handles the command
+	 * itself without calling standard_ProcessUtility, or passes it a
+	 * different descriptor, the entry stays empty, just as query_instr stays
+	 * NULL when standard_ExecutorStart is not reached.
+	 */
+	int			instr_options;	/* OR of InstrumentOption flags for instr */
+	Instrumentation instr;		/* set up by standard_ProcessUtility */
 } UtilityStmtDesc;
 
 /* Hook for plugins to get control in ProcessUtility() */
