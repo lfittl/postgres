@@ -72,6 +72,7 @@ ProcessUtility_hook_type ProcessUtility_hook = NULL;
 
 /* local function declarations */
 static int	ClassifyUtilityCommandAsReadOnly(Node *parsetree);
+static void standard_ProcessUtilityInternal(UtilityStmtDesc *desc);
 static void ProcessUtilitySlow(ParseState *pstate,
 							   PlannedStmt *pstmt,
 							   const char *queryString,
@@ -532,6 +533,39 @@ ProcessUtility(UtilityStmtDesc *desc)
  */
 void
 standard_ProcessUtility(UtilityStmtDesc *desc)
+{
+	QueryInstrumentation *instr = &desc->instr;
+
+	/*
+	 * If a consumer asked for instrumentation (see UtilityStmtDesc), bracket
+	 * the command with its statement-level entry, so that statements it runs
+	 * are accounted to it and the consumer can read it afterwards.  Otherwise
+	 * run the command without one, like ExecutorStart does for queries: its
+	 * activity is then accounted to whatever entry is current, if any.
+	 */
+	if (desc->instr_options == 0)
+	{
+		standard_ProcessUtilityInternal(desc);
+		return;
+	}
+
+	InstrQueryInitLocal(instr, desc->instr_options);
+
+	/* Must be finalized even if the command fails, to keep the stack sane */
+	InstrQueryStart(instr);
+	PG_TRY();
+	{
+		standard_ProcessUtilityInternal(desc);
+	}
+	PG_FINALLY();
+	{
+		InstrQueryStopFinalize(instr);
+	}
+	PG_END_TRY();
+}
+
+static void
+standard_ProcessUtilityInternal(UtilityStmtDesc *desc)
 {
 	PlannedStmt *pstmt = desc->pstmt;
 	const char *queryString = desc->queryString;

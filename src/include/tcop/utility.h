@@ -14,6 +14,7 @@
 #ifndef UTILITY_H
 #define UTILITY_H
 
+#include "executor/instrument.h"
 #include "tcop/cmdtag.h"
 #include "tcop/tcopprot.h"
 
@@ -86,6 +87,35 @@ typedef struct UtilityStmtDesc
 	DestReceiver *dest;			/* where to send results, if any */
 	QueryCompletion *qc;		/* where to store command completion status,
 								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility command counterpart of
+	 * QueryDesc's query_instr_options and query_instr.  A consumer (e.g.
+	 * pg_stat_statements) that wants timing, buffer or WAL usage ORs the
+	 * InstrumentOption flags into instr_options before calling
+	 * standard_ProcessUtility and reads instr afterwards.
+	 *
+	 * If instr_options is set, standard_ProcessUtility brackets the command
+	 * with the entry, so that statements run by the command are accounted to
+	 * it.  Otherwise the command runs without an entry and is accounted to
+	 * whatever entry is current, if any.  The entry is embedded here rather
+	 * than allocated, since a command may end the transaction and with it any
+	 * resource owner or transaction-lifetime memory, while the descriptor
+	 * lives in the caller's stack frame for the whole command.
+	 *
+	 * The entry is owned by standard_ProcessUtility, which sets it up, runs
+	 * the command inside it and finalizes it before returning, so it only
+	 * ever describes the command's own processing.  Work a ProcessUtility
+	 * hook does before or after calling standard_ProcessUtility is accounted
+	 * to whatever entry is current around the hook instead, the same way the
+	 * executor's query entry excludes what ExecutorStart and ExecutorEnd
+	 * hooks do.  Likewise, if a hook handles the command itself without
+	 * calling standard_ProcessUtility, or passes it a different descriptor,
+	 * the entry stays empty, just as query_instr stays NULL when
+	 * standard_ExecutorStart is not reached.
+	 */
+	int			instr_options;	/* OR of InstrumentOption flags for instr */
+	QueryInstrumentation instr; /* set up by standard_ProcessUtility */
 } UtilityStmtDesc;
 
 /* Hook for plugins to get control in ProcessUtility() */
