@@ -294,8 +294,6 @@ typedef struct InstrStackState
 	Instrumentation *current;	/* top of stack, or &instr_top when empty */
 } InstrStackState;
 
-extern PGDLLIMPORT WalUsage pgWalUsage;
-
 /*
  * The top instrumentation represents a running total of the current backend
  * WAL/buffer usage information. This will not be updated immediately, but
@@ -362,6 +360,7 @@ extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr);
 extern void InstrStopFinalize(Instrumentation *instr);
+extern void InstrStackFinalizeAll(void);
 extern void InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent);
 extern void InstrQueryFinalizeChildren(QueryInstrumentation *qinstr,
 									   Instrumentation *target);
@@ -422,11 +421,9 @@ extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 	} while (0)
 
 #define INSTR_WALUSAGE_INCR(fld) do { \
-		pgWalUsage.fld++; \
 		instr_stack.current->walusage.fld++; \
 	} while (0)
 #define INSTR_WALUSAGE_ADD(fld,val) do { \
-		pgWalUsage.fld += (val); \
 		instr_stack.current->walusage.fld += (val); \
 	} while (0)
 
