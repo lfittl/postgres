@@ -228,6 +228,12 @@ There are two mechanisms for achieving abort safety:
   even after an error, the base Instrumentation can be used with a
   PG_TRY/PG_FINALLY block that calls InstrStopFinalize().
 
+A FATAL error exits the process without unwinding the C stack, so the
+PG_FINALLY path never runs for entries still open at that point.  Since their
+stack frames are left in place, InstrStackFinalizeAll() accumulates whatever
+is still on the stack into instr_top right before the session totals are
+reported for the last time (see pgstat_shutdown_hook).
+
 Both mechanisms add overhead, so neither is suitable for high-frequency
 instrumentation like per-node measurements in the executor.  Instead,
 plan node and trigger children rely on their parent QueryInstrumentation
@@ -279,6 +285,12 @@ already include their activity, and the leader imports nothing from the
 per-node copies.  For the same reason a query's own workers are not
 attributed to its Gather node: their activity shows on the nodes they ran,
 through the per-worker copies.
+
+A worker's instr_top thus accounts for everything the worker did, also in
+case of errors, since its unfinalized entries end up in its instr_top through
+the abort handling.  The leader's instr_top never includes what it imported
+from workers, so the cumulative statistics system, which must count activity
+exactly once, can report each process' instr_top as is.
 
 Memory Handling
 ===============

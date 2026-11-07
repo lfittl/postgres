@@ -2165,7 +2165,7 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, TimeLineID tli, bool opportunistic)
 
 					/*
 					 * Required for the flush of pending stats WAL data, per
-					 * update of pgWalUsage.
+					 * update of the WAL usage counters.
 					 */
 					pgstat_report_fixed = true;
 				}

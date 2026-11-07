@@ -27,7 +27,6 @@
 static void InstrQueryFinalizeTruncated(QueryInstrumentation *qinstr);
 static void InstrQueryPassOnWorkerUsage(QueryInstrumentation *qinstr);
 
-WalUsage	pgWalUsage;
 Instrumentation instr_top;
 InstrStackState instr_stack = {
 	.stack_space = 0,
@@ -234,6 +233,24 @@ void
 InstrStopFinalize(Instrumentation *instr)
 {
 	InstrStopFinalizeInternal(instr, false);
+}
+
+/*
+ * Finalize whatever is still on the stack into instr_top, at process exit.
+ *
+ * A FATAL error exits without unwinding the C stack, so the PG_FINALLY blocks
+ * that would normally finalize plain Instrumentation entries never run.  Such
+ * entries still live in their (abandoned) stack frames, so their activity can
+ * be accumulated before the session totals are reported for the last time.
+ * QueryInstrumentation entries have been released by the transaction abort
+ * that precedes this, and after a clean exit the stack is empty anyway.
+ */
+void
+InstrStackFinalizeAll(void)
+{
+	while (instr_stack.stack_size > 0)
+		InstrStopFinalizeInternal(instr_stack.entries[instr_stack.stack_size - 1],
+								  true);
 }
 
 /*
