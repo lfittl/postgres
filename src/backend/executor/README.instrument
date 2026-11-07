@@ -91,6 +91,11 @@ statement.  Statements that nobody asked to instrument have no entry: their
 activity goes straight to the current entry while they run, with the same
 end result.
 
+Utility statements are measured by their consumer, e.g. pg_stat_statements,
+with a statement entry that lives in the consumer's stack frame rather than
+being tied to a resource owner, since the command may end the transaction
+while running.  The consumer must finalize it from a PG_FINALLY block.
+
 
 Abort Safety
 ------------

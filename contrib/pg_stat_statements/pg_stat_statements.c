@@ -1163,10 +1163,22 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		!IsA(parsetree, PrepareStmt))
 	{
 		uint64		rows;
-		Instrumentation instr = {0};
+		QueryInstrumentation instr;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
-		InstrInitOptions(&instr, INSTRUMENT_ALL);
-		InstrStart(&instr);
+		/*
+		 * Measure the command with a statement-level entry of our own,
+		 * bracketing the rest of the ProcessUtility hook chain, so that what
+		 * the command does is accounted to it even if a later hook executes
+		 * the command itself instead of calling standard_ProcessUtility.  The
+		 * entry lives in our stack frame rather than being tied to a resource
+		 * owner, since the command may end the transaction while running
+		 * (transaction control statements, CALL with COMMIT), and therefore
+		 * has to be finalized even on error.
+		 */
+		InstrQueryInit(&instr, INSTRUMENT_ALL);
+		InstrQueryStart(&instr);
 
 		nesting_level++;
 		PG_TRY();
@@ -1182,6 +1194,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrQueryStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1197,8 +1210,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 */
 		pstmt = NULL;
 
-		InstrStop(&instr);
-
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
 		 * statements of COPY, FETCH, CREATE TABLE AS, CREATE MATERIALIZED
@@ -1210,16 +1221,18 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
+		InstrTotalUsage(&instr, &bufusage, &walusage);
+
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
 				   saved_stmt_len,
 				   nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(instr.total),
+				   INSTR_TIME_GET_MILLISEC(instr.instr.total),
 				   rows,
-				   &instr.bufusage,
-				   &instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   NULL,
 				   NULL,
 				   0,
