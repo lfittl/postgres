@@ -114,6 +114,11 @@ typedef struct Instrumentation
 /*
  * Query-related instrumentation tracking.
  *
+ * A QueryInstrumentation is the entry for a statement, whether a query or a
+ * utility command, or for a comparable unit of work such as a parallel
+ * worker's run or VACUUM of one relation.  It is referred to as a query entry
+ * throughout, as opposed to the plan node, trigger and plain entries.
+ *
  * Usage:
  * - Allocate on the heap using InstrQueryAlloc (required for abort handling)
  * - Call InstrQueryStart before the activity you want to measure
@@ -130,6 +135,10 @@ typedef struct Instrumentation
  * InstrQueryStopFinalize is run by the resource owner cleanup, so the caller
  * must not release that resource owner without an abort before having called
  * InstrQueryStopFinalize.
+ *
+ * Utility statements are measured with an entry in caller-provided memory
+ * (see InstrQueryInit), which is neither tied to a resource owner nor owns
+ * memory, as transaction control statements release both while running.
  */
 struct ResourceOwnerData;
 typedef struct QueryInstrumentation
@@ -149,6 +158,7 @@ typedef struct QueryInstrumentation
 	 * under TopMemoryContext by InstrQueryStart while the ResourceOwner is
 	 * responsible for it (so it survives transaction abort for the cleanup),
 	 * and reassigned to the current memory context on InstrQueryStopFinalize.
+	 * NULL for entries set up with InstrQueryInit.
 	 */
 	MemoryContext instr_cxt;
 
@@ -297,6 +307,8 @@ extern void InstrQueryFinalizeChildren(QueryInstrumentation *qinstr,
 extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 
 extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);
+extern void InstrQueryInit(QueryInstrumentation *qinstr,
+						   int instrument_options);
 extern void InstrQueryStart(QueryInstrumentation *instr);
 extern void InstrQueryStop(QueryInstrumentation *instr);
 extern void InstrQueryStopFinalize(QueryInstrumentation *instr);

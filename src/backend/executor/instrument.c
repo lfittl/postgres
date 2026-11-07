@@ -370,15 +370,33 @@ InstrQueryAlloc(int instrument_options)
 	else
 		instr_cxt = CurrentMemoryContext;
 
-	instr = MemoryContextAllocZero(instr_cxt, sizeof(QueryInstrumentation));
-	instr->instrument_options = instrument_options;
+	instr = MemoryContextAlloc(instr_cxt, sizeof(QueryInstrumentation));
+	InstrQueryInit(instr, instrument_options);
 	instr->instr_cxt = instr_cxt;
 
-	InstrInitOptions(&instr->instr, instrument_options);
-	instr->instr.need_stack = InstrNeedStack(instrument_options);
-	dlist_init(&instr->unfinalized_entries);
-
 	return instr;
+}
+
+/*
+ * Initialize a query entry in caller-provided memory.
+ *
+ * Unlike an entry from InstrQueryAlloc, which builds on this, such an entry
+ * owns no memory context and is not handed to a resource owner by
+ * InstrQueryStart, so it is finalized by the caller.  This is meant for
+ * measuring a utility statement from the caller's stack frame, since the
+ * statement may end the transaction while running and with it any resource
+ * owner or transaction-lifetime memory.  The caller must ensure
+ * InstrQueryStopFinalize runs even on error, e.g. from a PG_FINALLY block.
+ */
+void
+InstrQueryInit(QueryInstrumentation *qinstr, int instrument_options)
+{
+	memset(qinstr, 0, sizeof(QueryInstrumentation));
+	qinstr->instrument_options = instrument_options;
+
+	InstrInitOptions(&qinstr->instr, instrument_options);
+	qinstr->instr.need_stack = InstrNeedStack(instrument_options);
+	dlist_init(&qinstr->unfinalized_entries);
 }
 
 void
@@ -389,9 +407,11 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 	 * which stays responsible for it until InstrQueryStopFinalize (or abort).
 	 * It is intentionally not released at InstrQueryStop, so that an abort
 	 * between two start/stop pairs (e.g. between fetches from a cursor) still
-	 * accumulates what was measured so far.
+	 * accumulates what was measured so far.  Entries in caller-provided
+	 * memory (see InstrQueryInit) are the caller's responsibility.
 	 */
-	if (qinstr->instr.need_stack && qinstr->owner == NULL)
+	if (qinstr->instr.need_stack && qinstr->instr_cxt != NULL &&
+		qinstr->owner == NULL)
 	{
 		Assert(CurrentResourceOwner != NULL);
 
@@ -425,6 +445,10 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 		Assert(qinstr->owner == NULL);
 		return;
 	}
+
+	/* Entries in caller-provided memory have nothing further to release */
+	if (qinstr->instr_cxt == NULL)
+		return;
 
 	Assert(qinstr->owner != NULL);
 	ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
