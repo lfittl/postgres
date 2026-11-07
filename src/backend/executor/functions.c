@@ -1408,14 +1408,17 @@ postquel_getnext(execution_state *es, SQLFunctionCachePtr fcache)
 
 	if (es->qd->operation == CMD_UTILITY)
 	{
-		ProcessUtility(es->qd->plannedstmt,
-					   fcache->func->src,
-					   true,	/* protect function cache's parsetree */
-					   PROCESS_UTILITY_QUERY,
-					   es->qd->params,
-					   es->qd->queryEnv,
-					   es->qd->dest,
-					   NULL);
+		UtilityStmtDesc utilityDesc = {0};
+
+		utilityDesc.pstmt = es->qd->plannedstmt;
+		utilityDesc.queryString = fcache->func->src;
+		utilityDesc.readOnlyTree = true;	/* protect function cache's
+											 * parsetree */
+		utilityDesc.context = PROCESS_UTILITY_QUERY;
+		utilityDesc.params = es->qd->params;
+		utilityDesc.queryEnv = es->qd->queryEnv;
+		utilityDesc.dest = es->qd->dest;
+		ProcessUtility(&utilityDesc);
 		result = true;			/* never stops early */
 	}
 	else
