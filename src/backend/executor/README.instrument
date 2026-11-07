@@ -128,6 +128,32 @@ the leader (see below), and matches what happens on abort.  EXPLAIN ANALYZE
 computes the inclusive numbers it shows by summing each subtree at display
 time, see ExplainComputeNodeUsage() in explain.c.
 
+Statement Entries
+-----------------
+
+A statement for which somebody asked for instrumentation has a
+QueryInstrumentation entry: ExecutorStart sets one up for a query when
+instrument_options or query_instr_options are set, and standard_ProcessUtility
+for a utility command when instr_options is set (embedded in the
+UtilityStmtDesc, see InstrQueryInitLocal; such an entry lives in the caller's
+stack frame and owns no memory, since a command may end the transaction and
+with it any resource owner or transaction-lifetime memory).  Query entries are
+always on the stack while started, whatever options were requested, so that
+the innermost query entry on the stack is the innermost instrumented statement
+that is executing (InstrQueryCurrent).  Every entry carries a kind (InstrKind)
+to tell query entries apart from plan node, trigger and plain entries.
+
+A statement run while another one executes, e.g. through SPI from a function
+or a trigger, or a utility command run from PL/pgSQL, is a nested statement.
+If it has an entry, that entry accumulates to whatever entry is current when
+it is finalized, typically the plan node or trigger entry that ran it, so that
+the enclosing statement sees its activity like any other.  A nested statement
+without an entry, the common case e.g. under pg_stat_statements with track =
+top, is cheaper still: its activity goes straight to the current entry while
+it runs, and what its parallel workers did is imported into the innermost
+enclosing query entry (see ExecParallelFinish).  Either way the enclosing
+statement sees the same totals.
+
 Note these relationships are partially implicit, especially when it comes
 to NodeInstrumentation. Each QueryInstrumentation maintains a list of its
 unfinalized child nodes.  The parent of a QueryInstrumentation itself is
@@ -177,10 +203,14 @@ but the instrumentation active when the query was started (instr_top in the
 above example) survives the abort, and its counters include the activity.
 
 If multiple QueryInstrumentations are active on the stack (e.g. nested
-portals), the abort handler of each uses InstrStopFinalize() to accumulate
-the statistics to the parent entry of either the entry being released, or a
-previously released entry if it was higher up in the stack, so they compose
-correctly regardless of release order.
+statements), the first one to be finalized, by its PG_FINALLY block or by
+the abort handler, pops every entry above it off the stack and finalizes
+the query entries among them right then, innermost first, while the entry
+each of them accumulates to is still right below it.  This keeps the
+counters of statements that failed attached to the statement that ran them,
+regardless of the order in which the abort handler later releases the
+entries: an entry finalized this way is marked as such, and its release only
+frees the memory.
 
 There are two mechanisms for achieving abort safety:
 
@@ -215,17 +245,40 @@ Regardless of whether per-node instrumentation is active, each parallel
 worker measures the buffer and WAL activity of its whole parallel section
 with a QueryInstrumentation entry (InstrStartParallelQuery), and copies the
 totals into dynamic shared memory at the end (InstrEndParallelQuery).  The
-leader accumulates these totals into its own stack, so that query-level
-consumers such as EXPLAIN and pg_stat_statements see the complete activity.
+leader imports these totals into the worker part of its query entry
+(InstrAccumParallelQuery), so that query-level consumers such as EXPLAIN and
+pg_stat_statements see the complete activity (InstrTotalUsage).  The worker
+part is kept apart from the leader's own activity and only ever passed on to
+an enclosing query entry (InstrQueryPassOnWorkerUsage), never to a plan node,
+trigger or plain entry, and never to the session totals in instr_top: each
+worker reports its own activity to the cumulative statistics system itself,
+so the leader must not report it again.  A query without an entry of its own,
+as well as parallel index builds and parallel vacuum, import into the
+innermost query entry on the stack (InstrQueryCurrent), i.e. the entry of the
+innermost enclosing statement for which instrumentation was requested, e.g.
+the utility statement running the index build, which a consumer like
+pg_stat_statements reads from the UtilityStmtDesc; if there is none (e.g. in
+autovacuum) nobody is interested in the usage and it is dropped.
+
+Since the counters of plan node entries never receive worker usage, a plan
+node with buffer/WAL instrumentation keeps a separate worker part of its own
+(NodeInstrumentation.worker_usage), for display only.  When the usage of a
+statement without an entry of its own is imported, it is also added to the
+worker part of the plan node that is current on the stack, if any: what the
+workers launched by a nested statement did thus goes to the plan node that
+ran that statement, i.e. the node its own counters went to.  EXPLAIN adds the
+worker part to the node's own counters at display time.
 
 When per-node instrumentation is active, the worker's per-node stats are
-additionally copied into dynamic shared memory.  The leader keeps them apart
-from its own per-node stats, which only ever describe the leader's activity:
-it stores the per-worker copies on the PlanState (worker_instrument) for
-EXPLAIN to combine at display time, and imports their buffer/WAL usage into
-its query entry (InstrAccumWorkerNodeUsage).  To avoid double counting, the
-worker does not roll up its own nodes into its query entry.
-
+additionally copied into dynamic shared memory, for display only.  The leader
+keeps them apart from its own per-node stats, which only ever describe the
+leader's activity, and stores the per-worker copies on the PlanState
+(worker_instrument) for EXPLAIN to combine at display time.  The worker rolls
+its nodes up into its query entry like any query, so the totals it reports
+already include their activity, and the leader imports nothing from the
+per-node copies.  For the same reason a query's own workers are not
+attributed to its Gather node: their activity shows on the nodes they ran,
+through the per-worker copies.
 
 Memory Handling
 ===============

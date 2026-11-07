@@ -1078,6 +1078,12 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		qstate != NULL &&
 		pgss_enabled(qstate->nesting_level))
 	{
+		BufferUsage bufusage;
+		WalUsage	walusage;
+
+		/* Include what parallel workers did on behalf of this query */
+		InstrTotalUsage(queryDesc->query_instr, &bufusage, &walusage);
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
@@ -1086,8 +1092,8 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->query_instr->instr.bufusage,
-				   &queryDesc->query_instr->instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1152,11 +1158,14 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 		!IsA(parsetree, PrepareStmt))
 	{
 		uint64		rows;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
 		/*
 		 * Request statement-level instrumentation (timing, buffers and WAL)
 		 * for the command, the same way we do for optimizable statements via
-		 * query_instr_options.
+		 * query_instr_options.  Activity of statements run by the command and
+		 * of parallel workers it launches is accounted to desc->instr.
 		 */
 		desc->instr_options |= INSTRUMENT_ALL;
 
@@ -1196,6 +1205,9 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
+		/* Include what parallel workers did, e.g. for CREATE INDEX or VACUUM */
+		InstrTotalUsage(&desc->instr, &bufusage, &walusage);
+
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
@@ -1204,8 +1216,8 @@ pgss_ProcessUtility(UtilityStmtDesc *desc)
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(desc->instr.instr.total),
 				   rows,
-				   &desc->instr.instr.bufusage,
-				   &desc->instr.instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   NULL,
 				   NULL,
 				   0,

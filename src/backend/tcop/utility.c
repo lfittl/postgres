@@ -539,9 +539,10 @@ standard_ProcessUtility(UtilityStmtDesc *desc)
 	/*
 	 * If a consumer asked for instrumentation (see UtilityStmtDesc), bracket
 	 * the command with its statement-level entry, so that statements it runs
-	 * are accounted to it and the consumer can read it afterwards.  Otherwise
-	 * run the command without one, like ExecutorStart does for queries: its
-	 * activity is then accounted to whatever entry is current, if any.
+	 * and parallel workers it launches are accounted to it and the consumer
+	 * can read it afterwards.  Otherwise run the command without one, like
+	 * ExecutorStart does for queries: its activity is then accounted to
+	 * whatever entry is current, if any.
 	 */
 	if (desc->instr_options == 0)
 	{

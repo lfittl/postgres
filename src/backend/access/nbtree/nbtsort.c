@@ -1620,7 +1620,8 @@ _bt_end_parallel(BTLeader *btleader)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
+		InstrAccumParallelQuery(InstrQueryCurrent(),
+								&btleader->bufferusage[i], &btleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(btleader->snapshot))

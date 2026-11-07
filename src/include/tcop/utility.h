@@ -96,7 +96,8 @@ typedef struct UtilityStmtDesc
 	 * standard_ProcessUtility and reads instr afterwards.
 	 *
 	 * If instr_options is set, standard_ProcessUtility brackets the command
-	 * with the entry, so that statements run by the command are accounted to
+	 * with the entry, so that statements run by the command and parallel
+	 * workers it launches (e.g. for CREATE INDEX or VACUUM) are accounted to
 	 * it.  Otherwise the command runs without an entry and is accounted to
 	 * whatever entry is current, if any.  The entry is embedded here rather
 	 * than allocated, since a command may end the transaction and with it any

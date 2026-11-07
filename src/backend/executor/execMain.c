@@ -251,19 +251,24 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	estate->es_jit_flags = queryDesc->plannedstmt->jitFlags;
 
 	/*
-	 * Set up query-level instrumentation if extensions have requested it via
-	 * query_instr_options. Ensure an extension has not allocated query_instr
-	 * itself.
+	 * Set up the query-level instrumentation entry, if anybody asked for
+	 * instrumentation: it is the parent of the node and trigger
+	 * instrumentation of EXPLAIN (ANALYZE), it receives what parallel workers
+	 * did on behalf of the query, and it is the innermost query entry on the
+	 * instrumentation stack while the query runs (see InstrQueryCurrent).
+	 * Extensions request timing, buffer or WAL usage via query_instr_options
+	 * and read query_instr afterwards; ensure none has allocated it itself.
 	 *
-	 * Alternatively, also set it up when running EXPLAIN (ANALYZE), as we
-	 * utilize query_instr as the parent for node and trigger instrumentation.
+	 * A query without an entry (e.g. a statement nested in a top-level one
+	 * that pg_stat_statements tracks) is accounted to whatever entry is
+	 * current while it runs, including what its parallel workers did (see
+	 * ExecParallelFinish), so nothing is lost by not setting one up.
 	 */
 	Assert(queryDesc->query_instr == NULL);
-	if (queryDesc->query_instr_options || queryDesc->instrument_options)
+	if (queryDesc->instrument_options || queryDesc->query_instr_options)
 	{
 		estate->es_query_instr = InstrQueryAlloc(queryDesc->instrument_options |
 												 queryDesc->query_instr_options);
-
 		queryDesc->query_instr = estate->es_query_instr;
 	}
 
@@ -463,18 +468,9 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	if (estate->es_query_instr)
 	{
-		/*
-		 * Accumulate per-node and trigger statistics to the query entry.
-		 *
-		 * Parallel workers skip this: their per-node stats are reported
-		 * individually via ExecParallelReportInstrumentation and imported by
-		 * the leader from there (see InstrAccumWorkerNodeUsage), so
-		 * accounting for them in the query-level stats the leader receives
-		 * as well would double-count.
-		 */
-		if (!IsParallelWorker())
-			InstrQueryFinalizeChildren(estate->es_query_instr,
-									   &estate->es_query_instr->instr);
+		/* Accumulate per-node and trigger statistics to the query entry */
+		InstrQueryFinalizeChildren(estate->es_query_instr,
+								   &estate->es_query_instr->instr);
 
 		InstrQueryStopFinalize(estate->es_query_instr);
 	}
