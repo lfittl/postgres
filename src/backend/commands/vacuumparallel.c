@@ -990,7 +990,8 @@ parallel_vacuum_process_all_indexes(ParallelVacuumState *pvs, int num_index_scan
 		WaitForParallelWorkersToFinish(pvs->pcxt);
 
 		for (int i = 0; i < pvs->pcxt->nworkers_launched; i++)
-			InstrAccumParallelQuery(&pvs->buffer_usage[i], &pvs->wal_usage[i]);
+			InstrAccumParallelQuery(InstrQueryCurrent(),
+									&pvs->buffer_usage[i], &pvs->wal_usage[i]);
 	}
 
 	/*

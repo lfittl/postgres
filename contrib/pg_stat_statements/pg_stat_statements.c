@@ -1082,6 +1082,12 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		qstate != NULL &&
 		pgss_enabled(qstate->nesting_level))
 	{
+		BufferUsage bufusage;
+		WalUsage	walusage;
+
+		/* Include what parallel workers did on behalf of this query */
+		InstrTotalUsage(queryDesc->query_instr, &bufusage, &walusage);
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
@@ -1090,8 +1096,8 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->query_instr->instr.bufusage,
-				   &queryDesc->query_instr->instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1158,16 +1164,21 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		uint64		rows;
 		QueryInstrumentation instr;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
 		/*
 		 * Measure the command with a statement-level entry of our own,
 		 * bracketing the rest of the ProcessUtility hook chain, so that what
 		 * the command does is accounted to it even if a later hook executes
-		 * the command itself instead of calling standard_ProcessUtility.  The
-		 * entry lives in our stack frame rather than being tied to a resource
-		 * owner, since the command may end the transaction while running
-		 * (transaction control statements, CALL with COMMIT), and therefore
-		 * has to be finalized even on error.
+		 * the command itself instead of calling standard_ProcessUtility.
+		 * Activity of statements run by the command and of parallel workers
+		 * it launches is accounted to this entry as well, being the innermost
+		 * statement-level entry on the stack.  The entry lives in our stack
+		 * frame rather than being tied to a resource owner, since the command
+		 * may end the transaction while running (transaction control
+		 * statements, CALL with COMMIT), and therefore has to be finalized
+		 * even on error.
 		 */
 		InstrQueryInit(&instr, INSTRUMENT_ALL);
 		InstrQueryStart(&instr);
@@ -1213,6 +1224,9 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
+		/* Include what parallel workers did, e.g. for CREATE INDEX or VACUUM */
+		InstrTotalUsage(&instr, &bufusage, &walusage);
+
 		pgss_store(queryString,
 				   saved_queryId,
 				   saved_stmt_location,
@@ -1221,8 +1235,8 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   PGSS_EXEC,
 				   INSTR_TIME_GET_MILLISEC(instr.instr.total),
 				   rows,
-				   &instr.instr.bufusage,
-				   &instr.instr.walusage,
+				   &bufusage,
+				   &walusage,
 				   NULL,
 				   NULL,
 				   0,

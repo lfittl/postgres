@@ -768,10 +768,10 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 	 * Treat the node as running while we shut it down, but only if it's run
 	 * at least once already.  We don't expect much CPU consumption during
 	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
-	 * down workers at this stage.  If so, their buffer usage will get
-	 * propagated into the current instrumentation stack entry at this point,
-	 * and we want to make sure that it gets associated with the Gather node.
-	 * We skip this if the node has never been executed, so as to avoid
+	 * down workers at this stage, and we want the leader's own activity while
+	 * doing so to be associated with the Gather node.  (The workers' own
+	 * usage is imported into the query entry, see ExecParallelFinish.)  We
+	 * skip this if the node has never been executed, so as to avoid
 	 * incorrectly making it appear that it has.
 	 */
 	if (node->instrument && node->instrument->running)

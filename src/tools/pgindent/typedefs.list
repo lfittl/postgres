@@ -1357,7 +1357,9 @@ InjectionPointSharedState
 InjectionPointsCtl
 InlineCodeBlock
 InsertStmt
+InstrKind
 InstrStackState
+InstrWorkerUsage
 Instrumentation
 Int128AggState
 Int8TransTypeData

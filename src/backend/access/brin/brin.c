@@ -2573,7 +2573,8 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
+		InstrAccumParallelQuery(InstrQueryCurrent(),
+								&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(brinleader->snapshot))
