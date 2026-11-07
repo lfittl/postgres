@@ -802,6 +802,8 @@ ExplainExtensionOption
 ExplainForeignModify_function
 ExplainForeignScan_function
 ExplainFormat
+ExplainNodeUsage
+ExplainNodeUsageContext
 ExplainOneQuery_hook_type
 ExplainOptionGUCCheckHandler
 ExplainOptionHandler
@@ -1351,6 +1353,9 @@ InjectionPointSharedState
 InjectionPointsCtl
 InlineCodeBlock
 InsertStmt
+InstrKind
+InstrStackState
+InstrWorkerUsage
 Instrumentation
 Int128AggState
 Int8TransTypeData
@@ -2480,6 +2485,7 @@ QueryCompletion
 QueryDesc
 QueryEnvironment
 QueryInfo
+QueryInstrumentation
 QueryItem
 QueryItemType
 QueryMode
@@ -3330,6 +3336,7 @@ UserAuth
 UserContext
 UserMapping
 UserOpts
+UtilityStmtDesc
 VMCorruptionType
 VacAttrStats
 VacAttrStatsP
