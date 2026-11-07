@@ -1104,7 +1104,6 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 {
 	NodeInstrumentation *instrument;
 	int			i;
-	int			n;
 	int			ibytes;
 	int			plan_node_id = planstate->plan->plan_node_id;
 	MemoryContext oldcontext;
@@ -1116,14 +1115,13 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	if (i >= instrumentation->num_plan_nodes)
 		elog(ERROR, "plan node %d not found", plan_node_id);
 
-	/* Accumulate the statistics from all workers. */
 	instrument = GetInstrumentationArray(instrumentation);
 	instrument += i * instrumentation->num_workers;
-	for (n = 0; n < instrumentation->num_workers; ++n)
-		InstrAggNode(planstate->instrument, &instrument[n]);
 
 	/*
-	 * Also store the per-worker detail.
+	 * Store the per-worker detail, for EXPLAIN to combine with the leader's
+	 * own per-node entry at display time.  The leader's entry is left alone:
+	 * it only describes the leader's activity.
 	 *
 	 * Worker instrumentation should be allocated in the same context as the
 	 * regular instrumentation information, which is the per-query context.
