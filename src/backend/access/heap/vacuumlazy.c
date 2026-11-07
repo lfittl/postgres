@@ -1005,8 +1005,10 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
-			BufferUsage bufferusage = instr->instr.bufusage;
-			WalUsage	walusage = instr->instr.walusage;
+			BufferUsage bufferusage;
+			WalUsage	walusage;
+
+			InstrTotalUsage(instr, &bufferusage, &walusage);
 
 			TimestampDifference(starttime, endtime, &secs_dur, &usecs_dur);
 

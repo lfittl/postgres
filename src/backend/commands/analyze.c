@@ -784,8 +784,10 @@ do_analyze_rel(Relation onerel, const VacuumParams *params,
 			int64		total_blks_hit;
 			int64		total_blks_read;
 			int64		total_blks_dirtied;
-			BufferUsage bufusage = instr->instr.bufusage;
-			WalUsage	walusage = instr->instr.walusage;
+			BufferUsage bufusage;
+			WalUsage	walusage;
+
+			InstrTotalUsage(instr, &bufusage, &walusage);
 
 			total_blks_hit = bufusage.shared_blks_hit +
 				bufusage.local_blks_hit;

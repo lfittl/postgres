@@ -86,16 +86,35 @@ typedef enum InstrumentOption
  *
  * In a query context use QueryInstrumentation instead, which handles aborts
  * using the resource owner logic.
+ *
+ * The buffer/WAL usage only ever describes the activity of this process.
+ * What a parallel query leader imports from its workers is kept apart, on the
+ * statement-level QueryInstrumentation entries (see InstrAccumParallelQuery),
+ * so that the session totals in instr_top never include it.
  */
+typedef enum InstrKind
+{
+	INSTR_KIND_PLAIN = 0,		/* standalone entry, e.g. around a utility
+								 * statement or planning */
+	INSTR_KIND_QUERY,			/* QueryInstrumentation */
+	INSTR_KIND_NODE,			/* NodeInstrumentation of a plan node */
+	INSTR_KIND_TRIGGER,			/* TriggerInstrumentation */
+} InstrKind;
+
 typedef struct Instrumentation
 {
 	/* Parameters set at creation: */
 	bool		need_timer;		/* true if we need timer data */
-	bool		need_stack;		/* true if we need WAL/buffer usage data */
+	bool		need_stack;		/* true if we need WAL/buffer usage data, i.e.
+								 * the entry goes on the stack while running
+								 * (always set for query entries) */
 	/* Internal state keeping: */
 	bool		on_stack;		/* true if currently on instr_stack */
 	bool		finalized;		/* true once accumulated to a parent via
-								 * InstrFinalizeChild */
+								 * InstrFinalizeChild, or for a query entry
+								 * popped off the stack by an outer entry's
+								 * finalization on abort */
+	InstrKind	kind;			/* what this entry describes */
 	instr_time	starttime;		/* start time of last InstrStart */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
@@ -104,6 +123,13 @@ typedef struct Instrumentation
 	/* Abort handling: link in parent QueryInstrumentation's unfinalized list */
 	dlist_node	unfinalized_entry;
 } Instrumentation;
+
+/* Buffer/WAL usage of parallel workers, see QueryInstrumentation */
+typedef struct InstrWorkerUsage
+{
+	BufferUsage bufusage;
+	WalUsage	walusage;
+} InstrWorkerUsage;
 
 /*
  * Query-related instrumentation tracking.
@@ -130,6 +156,31 @@ typedef struct Instrumentation
  * must not release that resource owner without an abort before having called
  * InstrQueryStopFinalize.
  *
+ * A statement gets a query entry when somebody asked for instrumentation (see
+ * ExecutorStart, and InstrQueryInit for utility statements, which a consumer
+ * such as pg_stat_statements sets up itself), and query entries are always on
+ * the instrumentation stack while started.  So while a statement runs,
+ * the innermost query entry on the stack is the entry of the innermost
+ * instrumented statement (see InstrQueryCurrent), which is where work done by
+ * parallel workers is imported.  A statement run while another one executes
+ * (a nested statement, e.g. through SPI from a function) accumulates to
+ * whatever entry is current when it is finalized, typically the plan node or
+ * trigger entry that ran it, so that the enclosing statement sees its
+ * activity like any other; a nested statement without an entry of its own
+ * writes to that entry directly while it runs.
+ *
+ * Besides the process' own activity in instr, a query entry collects what
+ * parallel workers did on behalf of the statement (worker_bufusage and
+ * worker_walusage, see InstrAccumParallelQuery).  That part is passed on to
+ * the enclosing query entry when finalized, but never reaches plain entries,
+ * plan node entries or the session totals, since each worker reports its
+ * activity itself and plan node entries accumulate to the session totals in
+ * turn.  Consumers that want the complete picture use InstrTotalUsage.  For
+ * EXPLAIN to still show the activity of a nested statement's workers on the
+ * plan node that ran the statement, a plan node entry with buffer/WAL
+ * instrumentation keeps a separate worker part of its own, for display only
+ * (see NodeInstrumentation.worker_usage).
+ *
  * Utility statements are measured with an entry in caller-provided memory
  * (see InstrQueryInit), which is neither tied to a resource owner nor owns
  * memory, as transaction control statements release both while running.
@@ -142,8 +193,15 @@ typedef struct QueryInstrumentation
 	/* Original instrument_options flags used to create this instrumentation */
 	int			instrument_options;
 
+	/* Usage imported from parallel workers, see InstrAccumParallelQuery */
+	bool		has_worker_usage;	/* anything imported yet? */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
+
 	/* Resource owner used for cleanup for aborts between InstrStart/InstrStop */
 	struct ResourceOwnerData *owner;
+
+	bool		started;		/* InstrQueryStart has been called */
 
 	/*
 	 * Dedicated memory context for all instrumentation allocations belonging
@@ -177,6 +235,17 @@ typedef struct NodeInstrumentation
 	Instrumentation instr;
 	/* Parameters set at node creation: */
 	bool		async_mode;		/* true if node is in async mode */
+
+	/*
+	 * What the parallel workers launched by a statement this node ran (e.g.
+	 * through a function) did, for EXPLAIN only (see
+	 * InstrAccumParallelQuery).  Kept apart from the node's own counters in
+	 * instr, which only ever describe this process' activity and are
+	 * accumulated to the session totals.  Only allocated for nodes with
+	 * buffer/WAL instrumentation, NULL otherwise.
+	 */
+	InstrWorkerUsage *worker_usage;
+
 	/* Info about current plan cycle: */
 	bool		running;		/* true if we've completed first tuple */
 	instr_time	counter;		/* accumulated runtime for this node */
@@ -193,7 +262,10 @@ typedef struct NodeInstrumentation
 
 /*
  * Care must be taken with any pointers contained within this struct, as this
- * gets copied across processes during parallel query execution.
+ * gets copied across processes during parallel query execution.  The entries
+ * are only ever filled through InstrAggNode, which copies the counters but
+ * not the pointers (unfinalized_entry, worker_usage), so those stay NULL in
+ * every copy and must never be dereferenced on one.
  */
 typedef struct WorkerNodeInstrumentation
 {
@@ -231,8 +303,10 @@ extern PGDLLIMPORT WalUsage pgWalUsage;
  * rather when the current stack entry gets accumulated which typically happens
  * at query end.
  *
- * In a parallel query leader this also includes the usage reported back by
- * parallel workers, since that gets accumulated into the leader's stack.
+ * It only ever describes this process' own activity, which is what the
+ * cumulative statistics system reports.  Usage imported from parallel workers
+ * stays on the statement-level query entries (see InstrAccumParallelQuery)
+ * and never reaches it.
  */
 extern PGDLLIMPORT Instrumentation instr_top;
 
@@ -297,18 +371,22 @@ extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);
 extern void InstrQueryInit(QueryInstrumentation *qinstr,
 						   int instrument_options);
+extern void InstrTotalUsage(const QueryInstrumentation *qinstr,
+							BufferUsage *bufusage, WalUsage *walusage);
 extern void InstrQueryStart(QueryInstrumentation *instr);
 extern void InstrQueryStop(QueryInstrumentation *instr);
 extern void InstrQueryStopFinalize(QueryInstrumentation *instr);
 extern void InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentation *instr);
+extern QueryInstrumentation *InstrQueryCurrent(void);
 
 pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
 extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumWorkerUsage(const BufferUsage *bufusage,
-								  const WalUsage *walusage);
-extern void InstrAccumWorkerNodeUsage(QueryInstrumentation *qinstr,
-									  Instrumentation *add);
+extern void InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
+									 const BufferUsage *bufusage,
+									 const WalUsage *walusage);
+extern void InstrAccumParallelQuery(QueryInstrumentation *qinstr,
+									const BufferUsage *bufusage,
+									const WalUsage *walusage);
 
 extern NodeInstrumentation *InstrAllocNode(QueryInstrumentation *qinstr,
 										   int instrument_options,

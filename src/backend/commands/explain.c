@@ -5341,6 +5341,21 @@ ExplainComputeNodeUsage_walker(PlanState *planstate, void *context)
 	usage->bufusage = usage->stats.instr.bufusage;
 	usage->walusage = usage->stats.instr.walusage;
 
+	/*
+	 * Worker activity attributed to this node: what the workers launched by
+	 * statements the node ran (e.g. through a function) did.  The node entry
+	 * keeps this apart from its own counters, which only ever describe the
+	 * leader's activity.  (A Gather's own workers show on the nodes they ran,
+	 * through the per-worker copies added above.)
+	 */
+	if (planstate->instrument->worker_usage != NULL)
+	{
+		BufferUsageAdd(&usage->bufusage,
+					   &planstate->instrument->worker_usage->bufusage);
+		WalUsageAdd(&usage->walusage,
+					&planstate->instrument->worker_usage->walusage);
+	}
+
 	/* Children first, so this node's entry is complete before we add it up */
 	childctx.es = ctx->es;
 	childctx.parent = usage;

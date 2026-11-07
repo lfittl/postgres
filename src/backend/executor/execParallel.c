@@ -1104,7 +1104,6 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 {
 	NodeInstrumentation *instrument;
 	int			i;
-	int			n;
 	int			ibytes;
 	int			plan_node_id = planstate->plan->plan_node_id;
 	MemoryContext oldcontext;
@@ -1116,22 +1115,15 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	if (i >= instrumentation->num_plan_nodes)
 		elog(ERROR, "plan node %d not found", plan_node_id);
 
-	/*
-	 * The worker's per-node activity is not part of the query-level stats
-	 * that InstrAccumParallelQuery receives (the worker accumulates its nodes
-	 * to its session totals instead, see ExecutorFinish), so this is the
-	 * point where it gets imported into the query entry.  The leader's own
-	 * per-node entry is left alone: it only describes the leader's activity,
-	 * and EXPLAIN combines it with the per-worker detail stored below.
-	 */
 	instrument = GetInstrumentationArray(instrumentation);
 	instrument += i * instrumentation->num_workers;
-	for (n = 0; n < instrumentation->num_workers; ++n)
-		InstrAccumWorkerNodeUsage(planstate->state->es_query_instr,
-								  &instrument[n].instr);
 
 	/*
-	 * Store the per-worker detail.
+	 * Store the per-worker detail, for EXPLAIN to combine with the leader's
+	 * own per-node entry at display time.  The leader's entry is left alone:
+	 * it only describes the leader's activity.  The buffer/WAL usage in here
+	 * is already part of the totals each worker reported (see
+	 * ExecParallelFinish), so nothing is imported into the query entry.
 	 *
 	 * Ensure worker instrumentation is allocated in the per-query context. We
 	 * don't need to place this in the instrumentation context since no more
@@ -1241,6 +1233,7 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 {
 	int			nworkers = pei->pcxt->nworkers_launched;
 	int			i;
+	QueryInstrumentation *qinstr;
 
 	/* Make this be a no-op if called twice in a row. */
 	if (pei->finished)
@@ -1274,11 +1267,32 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	WaitForParallelWorkersToFinish(pei->pcxt);
 
 	/*
-	 * Next, accumulate buffer/WAL usage.  (This must wait for the workers to
-	 * finish, or we might get incomplete data.)
+	 * Next, accumulate buffer/WAL usage into the query entry.  (This must
+	 * wait for the workers to finish, or we might get incomplete data.)  The
+	 * totals each worker reports cover everything it did, including what its
+	 * plan nodes did; the per-node copies retrieved later are for EXPLAIN's
+	 * display only.
+	 *
+	 * A query that nobody asked to instrument has no entry of its own; its
+	 * workers' usage then goes to the innermost query entry on the stack,
+	 * e.g. the top-level statement pg_stat_statements tracks, which is where
+	 * a nested statement's own activity ends up as well, and EXPLAIN
+	 * attributes it to the plan node of that statement that ran this query.
 	 */
-	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	qinstr = pei->planstate->state->es_query_instr;
+	if (qinstr != NULL)
+	{
+		for (i = 0; i < nworkers; i++)
+			InstrQueryAddWorkerUsage(qinstr,
+									 &pei->buffer_usage[i], &pei->wal_usage[i]);
+	}
+	else
+	{
+		qinstr = InstrQueryCurrent();
+		for (i = 0; i < nworkers; i++)
+			InstrAccumParallelQuery(qinstr,
+									&pei->buffer_usage[i], &pei->wal_usage[i]);
+	}
 
 	pei->finished = true;
 }

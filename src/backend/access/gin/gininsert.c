@@ -1125,7 +1125,8 @@ _gin_end_parallel(GinLeader *ginleader, GinBuildState *state)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < ginleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&ginleader->bufferusage[i], &ginleader->walusage[i]);
+		InstrAccumParallelQuery(InstrQueryCurrent(),
+								&ginleader->bufferusage[i], &ginleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(ginleader->snapshot))
