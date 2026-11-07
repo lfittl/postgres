@@ -115,6 +115,13 @@ own, since they are only part of their statement's total.  The per-node
 breakdown of an aborted statement is lost, but its activity reaches the
 entry that was current when it started.
 
+If an entry is finalized while statement entries above it are still on the
+stack, as when an error unwinds through nested statements, those pass on
+what they have left right then, innermost first, while their parent is
+still right below them.  That keeps the activity of a failed nested
+statement attached to the statement that ran it, whatever order the
+resource owner cleanup releases the entries in later.
+
 Code that measures with a plain Instrumentation, outside of any statement
 entry, must instead stop and finalize it from a PG_FINALLY block, which
 also unwinds the stack.
@@ -144,6 +151,28 @@ apart from its own, and which EXPLAIN combines with them when it prints the
 plan; they are for display only.
 
 
+Each worker also reports its own activity to the cumulative statistics
+system, so the leader must never count it again: what it imports from its
+workers goes to a separate worker part of a statement entry, never to the
+counters of an entry on the stack, and so never to the session totals.  It
+goes to the statement that launched the workers, or, if that has no entry,
+or the work is e.g. a parallel index build, to the innermost statement
+entry on the stack.  If there is none, nobody is interested and it is
+dropped.  Unlike the statement's own activity, the worker part is not passed
+on step by step: it is added to every running enclosing statement entry right
+away.  Consumers read the complete totals, own activity and worker part,
+through InstrTotalUsage().
+
+As an exception to the rule that only entries tracking buffer or WAL usage
+go on the stack, statement entries go on it whenever they run, even if only
+time was requested, so that the innermost statement can always be found.
+
+Since plan node counters never receive worker usage, a plan node keeps a
+separate worker part for display, which receives what the workers of
+statements it ran did.  A query's own workers show on the nodes they ran
+instead, through their per-node statistics.
+
+
 Rules
 -----
 
@@ -155,3 +184,7 @@ Rules
   statement entry's own counters, which do not include its children.
 
 * Allocate child entries in their statement entry's memory context.
+
+* Never add what was imported from parallel workers to the counters of an
+  entry that may go on the stack; it belongs in a statement entry's worker
+  part.

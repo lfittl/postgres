@@ -1288,8 +1288,10 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	 * display only.
 	 *
 	 * A query that nobody asked to instrument has no entry of its own; its
-	 * workers' usage then goes to whatever entry is current, which is where a
-	 * nested statement's own activity ends up as well.
+	 * workers' usage then goes to the innermost query entry on the stack,
+	 * e.g. the top-level statement pg_stat_statements tracks, which is where
+	 * a nested statement's own activity ends up as well, and EXPLAIN
+	 * attributes it to the plan node of that statement that ran this query.
 	 */
 	qinstr = pei->planstate->state->es_query_instr;
 	if (qinstr != NULL)
@@ -1300,8 +1302,10 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	}
 	else
 	{
+		qinstr = InstrQueryCurrent();
 		for (i = 0; i < nworkers; i++)
-			InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+			InstrAccumParallelQuery(qinstr,
+									&pei->buffer_usage[i], &pei->wal_usage[i]);
 	}
 
 	pei->finished = true;
