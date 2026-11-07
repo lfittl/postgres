@@ -534,11 +534,14 @@ ProcessUtility(UtilityStmtDesc *desc)
 void
 standard_ProcessUtility(UtilityStmtDesc *desc)
 {
+	QueryInstrumentation *instr = &desc->instr;
+
 	/*
 	 * If a consumer asked for instrumentation (see UtilityStmtDesc), bracket
-	 * the command with its statement-level entry, so that the consumer can
-	 * read it afterwards.  Otherwise run the command without one, like
-	 * ExecutorStart does for queries.
+	 * the command with its statement-level entry, so that statements it runs
+	 * are accounted to it and the consumer can read it afterwards.  Otherwise
+	 * run the command without one, like ExecutorStart does for queries: its
+	 * activity is then accounted to whatever entry is current, if any.
 	 */
 	if (desc->instr_options == 0)
 	{
@@ -546,10 +549,19 @@ standard_ProcessUtility(UtilityStmtDesc *desc)
 		return;
 	}
 
-	InstrInitOptions(&desc->instr, desc->instr_options);
-	InstrStart(&desc->instr);
-	standard_ProcessUtilityInternal(desc);
-	InstrStop(&desc->instr);
+	InstrQueryInitLocal(instr, desc->instr_options);
+
+	/* Must be finalized even if the command fails, to keep the stack sane */
+	InstrQueryStart(instr);
+	PG_TRY();
+	{
+		standard_ProcessUtilityInternal(desc);
+	}
+	PG_FINALLY();
+	{
+		InstrQueryStopFinalize(instr);
+	}
+	PG_END_TRY();
 }
 
 static void

@@ -381,6 +381,23 @@ InstrQueryAlloc(int instrument_options)
 	return instr;
 }
 
+/*
+ * Set up a query entry that lives in caller-provided memory, such as the one
+ * embedded in a UtilityStmtDesc, and is finalized by the caller rather than
+ * through a resource owner.  The caller must ensure InstrQueryStopFinalize
+ * runs even on error, e.g. from a PG_FINALLY block.
+ */
+void
+InstrQueryInitLocal(QueryInstrumentation *qinstr, int instrument_options)
+{
+	memset(qinstr, 0, sizeof(QueryInstrumentation));
+	qinstr->instrument_options = instrument_options;
+
+	InstrInitOptions(&qinstr->instr, instrument_options);
+	qinstr->instr.need_stack = InstrNeedStack(instrument_options);
+	dlist_init(&qinstr->unfinalized_entries);
+}
+
 void
 InstrQueryStart(QueryInstrumentation *qinstr)
 {
@@ -389,9 +406,11 @@ InstrQueryStart(QueryInstrumentation *qinstr)
 	 * which stays responsible for it until InstrQueryStopFinalize (or abort).
 	 * It is intentionally not released at InstrQueryStop, so that an abort
 	 * between two start/stop pairs (e.g. between fetches from a cursor) still
-	 * accumulates what was measured so far.
+	 * accumulates what was measured so far.  Entries in caller-provided
+	 * memory (see InstrQueryInitLocal) are the caller's responsibility.
 	 */
-	if (qinstr->instr.need_stack && qinstr->owner == NULL)
+	if (qinstr->instr.need_stack && qinstr->instr_cxt != NULL &&
+		qinstr->owner == NULL)
 	{
 		Assert(CurrentResourceOwner != NULL);
 
@@ -425,6 +444,10 @@ InstrQueryStopFinalize(QueryInstrumentation *qinstr)
 		Assert(qinstr->owner == NULL);
 		return;
 	}
+
+	/* Entries in caller-provided memory have nothing further to release */
+	if (qinstr->instr_cxt == NULL)
+		return;
 
 	Assert(qinstr->owner != NULL);
 	ResourceOwnerForgetInstrumentation(qinstr->owner, qinstr);
