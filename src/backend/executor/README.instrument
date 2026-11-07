@@ -126,6 +126,11 @@ Code that measures with a plain Instrumentation, outside of any statement
 entry, must instead stop and finalize it from a PG_FINALLY block, which
 also unwinds the stack.
 
+A FATAL error exits the process without unwinding the C stack, so such
+PG_FINALLY blocks never run.  Whatever is left on the stack is therefore
+added to the session entry right before the session totals are reported
+for the last time.
+
 
 Memory
 ------
@@ -171,6 +176,10 @@ Since plan node counters never receive worker usage, a plan node keeps a
 separate worker part for display, which receives what the workers of
 statements it ran did.  A query's own workers show on the nodes they ran
 instead, through their per-node statistics.
+
+As a result, a process' session entry describes exactly what that process
+did, in a worker also after an error, and the cumulative statistics system
+can report it as is.
 
 
 Rules
