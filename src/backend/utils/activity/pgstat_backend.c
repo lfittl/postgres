@@ -42,10 +42,11 @@ static bool backend_has_iostats = false;
 static bool backend_has_lockstats = false;
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_flush_backend().  This is used to calculate how much WAL usage
- * happens between pgstat_flush_backend() calls, by subtracting the
- * previous counters from the current ones.
+ * WAL usage counters saved from the session totals in instr_top at the
+ * previous call to pgstat_flush_backend().  This is used to calculate how
+ * much WAL usage happens between pgstat_flush_backend() calls, by subtracting
+ * the previous counters from the current ones.  See pgstat_wal.c for why the
+ * session totals are complete and only describe this process at that point.
  */
 static WalUsage prevBackendWalUsage;
 
@@ -250,7 +251,7 @@ pgstat_flush_backend_entry_io(PgStat_EntryRef *entry_ref)
 static inline bool
 pgstat_backend_wal_have_pending(void)
 {
-	return (pgWalUsage.wal_records != prevBackendWalUsage.wal_records);
+	return (instr_top.walusage.wal_records != prevBackendWalUsage.wal_records);
 }
 
 /*
@@ -279,7 +280,7 @@ pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
 	 * Calculate how much WAL usage counters were increased by subtracting the
 	 * previous counters from the current ones.
 	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevBackendWalUsage);
+	WalUsageAccumDiff(&wal_usage_diff, &instr_top.walusage, &prevBackendWalUsage);
 
 #define WALSTAT_ACC(fld, var_to_add) \
 	(bktype_shstats->fld += var_to_add.fld)
@@ -293,7 +294,7 @@ pgstat_flush_backend_entry_wal(PgStat_EntryRef *entry_ref)
 	/*
 	 * Save the current counters for the subsequent calculation of WAL usage.
 	 */
-	prevBackendWalUsage = pgWalUsage;
+	prevBackendWalUsage = instr_top.walusage;
 }
 
 /*
@@ -413,11 +414,11 @@ pgstat_create_backend(ProcNumber procnum)
 	backend_has_lockstats = false;
 
 	/*
-	 * Initialize prevBackendWalUsage with pgWalUsage so that
-	 * pgstat_backend_flush_cb() can calculate how much pgWalUsage counters
-	 * are increased by subtracting prevBackendWalUsage from pgWalUsage.
+	 * Initialize prevBackendWalUsage with the session totals so that
+	 * pgstat_backend_flush_cb() can calculate how much the counters are
+	 * increased by subtracting prevBackendWalUsage from them.
 	 */
-	prevBackendWalUsage = pgWalUsage;
+	prevBackendWalUsage = instr_top.walusage;
 }
 
 /*

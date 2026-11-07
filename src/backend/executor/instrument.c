@@ -27,7 +27,6 @@
 static void InstrQueryFinalizeTruncated(QueryInstrumentation *qinstr);
 static void InstrQueryPassOnWorkerUsage(QueryInstrumentation *qinstr);
 
-WalUsage	pgWalUsage;
 Instrumentation instr_top;
 InstrStackState instr_stack = {
 	.stack_space = 0,
