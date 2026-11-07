@@ -166,6 +166,11 @@ static void ExplainSubPlans(List *plans, List *ancestors,
 							const char *relationship, ExplainState *es);
 static void ExplainCustomChildren(CustomScanState *css,
 								  List *ancestors, ExplainState *es);
+static void ExplainComputeNodeUsage(ExplainState *es, PlanState *planstate);
+static bool ExplainMaxPlanNodeId_walker(PlanState *planstate, void *context);
+static bool ExplainComputeNodeUsage_walker(PlanState *planstate, void *context);
+static ExplainNodeUsage *ExplainGetNodeUsage(ExplainState *es,
+											 PlanState *planstate);
 static ExplainWorkersState *ExplainCreateWorkersState(int num_workers);
 static void ExplainOpenWorker(int n, ExplainState *es);
 static void ExplainCloseWorker(int n, ExplainState *es);
@@ -777,6 +782,8 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 	es->deparse_cxt = deparse_context_for_plan_tree(queryDesc->plannedstmt,
 													es->rtable_names);
 	es->printed_subplans = NULL;
+	es->node_usage = NULL;
+	es->num_node_usage = 0;
 	es->rtable_size = list_length(es->rtable);
 	foreach(lc, es->rtable)
 	{
@@ -804,6 +811,15 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 		ps = outerPlanState(ps);
 		es->hide_workers = true;
 	}
+
+	/*
+	 * The executor keeps leader and worker stats apart, while EXPLAIN shows
+	 * every node with both combined.  Compute that up front, as ExplainNode
+	 * prints a node before recursing into its children.
+	 */
+	if (queryDesc->planstate->instrument)
+		ExplainComputeNodeUsage(es, queryDesc->planstate);
+
 	ExplainNode(ps, NIL, NULL, NULL, es);
 
 	/*
@@ -1837,9 +1853,10 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		InstrEndLoop(planstate->instrument);
 
 	if (es->analyze &&
-		planstate->instrument && planstate->instrument->nloops > 0)
+		planstate->instrument &&
+		ExplainGetNodeUsage(es, planstate)->stats.nloops > 0)
 	{
-		NodeInstrumentation *instr = planstate->instrument;
+		NodeInstrumentation *instr = &ExplainGetNodeUsage(es, planstate)->stats;
 		double		nloops = instr->nloops;
 		double		startup_ms = INSTR_TIME_GET_MILLISEC(instr->startup) / nloops;
 		double		total_ms = INSTR_TIME_GET_MILLISEC(instr->instr.total) / nloops;
@@ -2293,31 +2310,37 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
-	/* Show buffer/WAL usage */
-	if (es->buffers && planstate->instrument)
-		show_buffer_usage(es, &planstate->instrument->instr.bufusage);
-	if (es->wal && planstate->instrument)
-		show_wal_usage(es, &planstate->instrument->instr.walusage);
-
-	/* Prepare per-worker buffer/WAL usage */
-	if (es->workers_state && (es->buffers || es->wal) && es->verbose)
+	/* Show buffer/WAL usage, leader and workers combined */
+	if (planstate->instrument && (es->buffers || es->wal))
 	{
-		WorkerNodeInstrumentation *w = planstate->worker_instrument;
+		ExplainNodeUsage *usage = ExplainGetNodeUsage(es, planstate);
 
-		for (int n = 0; n < w->num_workers; n++)
+		if (es->buffers)
+			show_buffer_usage(es, &usage->bufusage);
+		if (es->wal)
+			show_wal_usage(es, &usage->walusage);
+
+		/* Prepare per-worker buffer/WAL usage */
+		if (es->workers_state && es->verbose)
 		{
-			NodeInstrumentation *instrument = &w->instrument[n];
-			double		nloops = instrument->nloops;
+			WorkerNodeInstrumentation *w = planstate->worker_instrument;
 
-			if (nloops <= 0)
-				continue;
+			Assert(usage->num_workers == w->num_workers);
 
-			ExplainOpenWorker(n, es);
-			if (es->buffers)
-				show_buffer_usage(es, &instrument->instr.bufusage);
-			if (es->wal)
-				show_wal_usage(es, &instrument->instr.walusage);
-			ExplainCloseWorker(n, es);
+			for (int n = 0; n < w->num_workers; n++)
+			{
+				double		nloops = w->instrument[n].nloops;
+
+				if (nloops <= 0)
+					continue;
+
+				ExplainOpenWorker(n, es);
+				if (es->buffers)
+					show_buffer_usage(es, &usage->worker_bufusage[n]);
+				if (es->wal)
+					show_wal_usage(es, &usage->worker_walusage[n]);
+				ExplainCloseWorker(n, es);
+			}
 		}
 	}
 
@@ -4207,14 +4230,17 @@ show_instrumentation_count(const char *qlabel, int which,
 	double		nfiltered;
 	double		nloops;
 
+	NodeInstrumentation *instr;
+
 	if (!es->analyze || !planstate->instrument)
 		return;
 
+	instr = &ExplainGetNodeUsage(es, planstate)->stats;
 	if (which == 2)
-		nfiltered = planstate->instrument->nfiltered2;
+		nfiltered = instr->nfiltered2;
 	else
-		nfiltered = planstate->instrument->nfiltered1;
-	nloops = planstate->instrument->nloops;
+		nfiltered = instr->nfiltered1;
+	nloops = instr->nloops;
 
 	/* In text mode, suppress zero counts; they're not interesting enough */
 	if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)
@@ -4937,11 +4963,9 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			double		insert_path;
 			double		other_path;
 
-			InstrEndLoop(outerPlanState(mtstate)->instrument);
-
 			/* count the number of source rows */
-			total = outerPlanState(mtstate)->instrument->ntuples;
-			other_path = mtstate->ps.instrument->ntuples2;
+			total = ExplainGetNodeUsage(es, outerPlanState(mtstate))->stats.ntuples;
+			other_path = ExplainGetNodeUsage(es, &mtstate->ps)->stats.ntuples2;
 			insert_path = total - other_path;
 
 			ExplainPropertyFloat("Tuples Inserted", NULL,
@@ -4961,10 +4985,8 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			double		delete_path;
 			double		skipped_path;
 
-			InstrEndLoop(outerPlanState(mtstate)->instrument);
-
 			/* count the number of source rows */
-			total = outerPlanState(mtstate)->instrument->ntuples;
+			total = ExplainGetNodeUsage(es, outerPlanState(mtstate))->stats.ntuples;
 			insert_path = mtstate->mt_merge_inserted;
 			update_path = mtstate->mt_merge_updated;
 			delete_path = mtstate->mt_merge_deleted;
@@ -5202,6 +5224,113 @@ ExplainCustomChildren(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	foreach(cell, css->custom_ps)
 		ExplainNode((PlanState *) lfirst(cell), ancestors, label, NULL, es);
+}
+
+/*
+ * Compute the instrumentation EXPLAIN shows for every plan node: the
+ * leader's and the workers' stats combined.
+ *
+ * The executor keeps the leader's per-node entry free of worker activity (see
+ * ExecParallelRetrieveInstrumentation), so this aggregates into
+ * es->node_usage, indexed by plan_node_id, without touching the executor's
+ * entries.  The walk order matches the one ExplainNode uses to print the
+ * tree, so a subplan shared between several SubPlan expressions is attributed
+ * to the node it gets printed under.
+ */
+static void
+ExplainComputeNodeUsage(ExplainState *es, PlanState *planstate)
+{
+	int			max_plan_node_id = -1;
+
+	(void) ExplainMaxPlanNodeId_walker(planstate, &max_plan_node_id);
+	Assert(max_plan_node_id >= 0);
+
+	es->num_node_usage = max_plan_node_id + 1;
+	es->node_usage = palloc0_array(ExplainNodeUsage, es->num_node_usage);
+
+	(void) ExplainComputeNodeUsage_walker(planstate, es);
+}
+
+static bool
+ExplainMaxPlanNodeId_walker(PlanState *planstate, void *context)
+{
+	int		   *max_plan_node_id = (int *) context;
+
+	if (planstate == NULL)
+		return false;
+
+	*max_plan_node_id = Max(*max_plan_node_id, planstate->plan->plan_node_id);
+
+	return planstate_tree_walker(planstate, ExplainMaxPlanNodeId_walker,
+								 context);
+}
+
+static bool
+ExplainComputeNodeUsage_walker(PlanState *planstate, void *context)
+{
+	ExplainState *es = (ExplainState *) context;
+	ExplainNodeUsage *usage;
+
+	if (planstate == NULL)
+		return false;
+
+	usage = ExplainGetNodeUsage(es, planstate);
+
+	/*
+	 * Several SubPlan expressions can reference the same physical subplan,
+	 * and thus share one PlanState.  Count it towards the first parent that
+	 * reaches it, which is where ExplainSubPlans prints it.
+	 */
+	if (usage->valid)
+		return false;
+	usage->valid = true;
+
+	/*
+	 * Start from the leader's own stats.  The per-worker copies have had
+	 * their loops ended by the worker before being reported.
+	 */
+	Assert(planstate->instrument != NULL);
+	InstrEndLoop(planstate->instrument);
+	usage->stats = *planstate->instrument;
+
+	/* Add the workers' own stats for this node */
+	if (planstate->worker_instrument)
+	{
+		WorkerNodeInstrumentation *w = planstate->worker_instrument;
+
+		usage->num_workers = w->num_workers;
+		usage->worker_bufusage = palloc_array(BufferUsage, w->num_workers);
+		usage->worker_walusage = palloc_array(WalUsage, w->num_workers);
+
+		for (int n = 0; n < w->num_workers; n++)
+		{
+			InstrAggNode(&usage->stats, &w->instrument[n]);
+
+			usage->worker_bufusage[n] = w->instrument[n].instr.bufusage;
+			usage->worker_walusage[n] = w->instrument[n].instr.walusage;
+		}
+	}
+
+	/* This node's combined buffer/WAL usage */
+	usage->bufusage = usage->stats.instr.bufusage;
+	usage->walusage = usage->stats.instr.walusage;
+
+	return planstate_tree_walker(planstate, ExplainComputeNodeUsage_walker,
+								 context);
+}
+
+/*
+ * Look up the instrumentation computed for a plan node.
+ */
+static ExplainNodeUsage *
+ExplainGetNodeUsage(ExplainState *es, PlanState *planstate)
+{
+	int			plan_node_id = planstate->plan->plan_node_id;
+
+	Assert(es->node_usage != NULL);
+	Assert(plan_node_id >= 0 && plan_node_id < es->num_node_usage);
+
+	return &es->node_usage[plan_node_id];
 }
 
 /*

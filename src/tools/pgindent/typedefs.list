@@ -802,6 +802,7 @@ ExplainExtensionOption
 ExplainForeignModify_function
 ExplainForeignScan_function
 ExplainFormat
+ExplainNodeUsage
 ExplainOneQuery_hook_type
 ExplainOptionGUCCheckHandler
 ExplainOptionHandler
