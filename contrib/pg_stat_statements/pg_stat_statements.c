@@ -920,22 +920,16 @@ pgss_planner(Query *parse,
 		&& pgss_track_planning && query_string
 		&& parse->queryId != INT64CONST(0))
 	{
-		instr_time	start;
-		instr_time	duration;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
-
-		/* We need to track buffer usage as the planner can access them. */
-		bufusage_start = pgBufferUsage;
+		Instrumentation instr = {0};
 
 		/*
+		 * We need to track buffer usage as the planner can access them.
+		 *
 		 * Similarly the planner could write some WAL records in some cases
 		 * (e.g. setting a hint bit with those being WAL-logged)
 		 */
-		walusage_start = pgWalUsage;
-		INSTR_TIME_SET_CURRENT(start);
+		InstrInitOptions(&instr, INSTRUMENT_ALL);
+		InstrStart(&instr);
 
 		nesting_level++;
 		PG_TRY();
@@ -949,20 +943,10 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
-
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -970,10 +954,10 @@ pgss_planner(Query *parse,
 				   parse->stmt_len,
 				   nesting_level == 0,
 				   PGSS_PLAN,
-				   INSTR_TIME_GET_MILLISEC(duration),
+				   INSTR_TIME_GET_MILLISEC(instr.total),
 				   0,
-				   &bufusage,
-				   &walusage,
+				   &instr.bufusage,
+				   &instr.walusage,
 				   NULL,
 				   NULL,
 				   0,
@@ -1098,16 +1082,22 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		qstate != NULL &&
 		pgss_enabled(qstate->nesting_level))
 	{
+		BufferUsage bufusage;
+		WalUsage	walusage;
+
+		/* Include what parallel workers did on behalf of this query */
+		InstrTotalUsage(queryDesc->query_instr, &bufusage, &walusage);
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
 				   queryDesc->plannedstmt->stmt_len,
 				   qstate->nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total),
+				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->query_instr->bufusage,
-				   &queryDesc->query_instr->walusage,
+				   &bufusage,
+				   &walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1172,17 +1162,26 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		!IsA(parsetree, ExecuteStmt) &&
 		!IsA(parsetree, PrepareStmt))
 	{
-		instr_time	start;
-		instr_time	duration;
 		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		QueryInstrumentation instr;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
-		bufusage_start = pgBufferUsage;
-		walusage_start = pgWalUsage;
-		INSTR_TIME_SET_CURRENT(start);
+		/*
+		 * Measure the command with a statement-level entry of our own,
+		 * bracketing the rest of the ProcessUtility hook chain, so that what
+		 * the command does is accounted to it even if a later hook executes
+		 * the command itself instead of calling standard_ProcessUtility.
+		 * Activity of statements run by the command and of parallel workers
+		 * it launches is accounted to this entry as well, being the innermost
+		 * statement-level entry on the stack.  The entry lives in our stack
+		 * frame rather than being tied to a resource owner, since the command
+		 * may end the transaction while running (transaction control
+		 * statements, CALL with COMMIT), and therefore has to be finalized
+		 * even on error.
+		 */
+		InstrQueryInit(&instr, INSTRUMENT_ALL);
+		InstrQueryStart(&instr);
 
 		nesting_level++;
 		PG_TRY();
@@ -1198,6 +1197,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		}
 		PG_FINALLY();
 		{
+			InstrQueryStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
@@ -1213,9 +1213,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 */
 		pstmt = NULL;
 
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
 		 * statements of COPY, FETCH, CREATE TABLE AS, CREATE MATERIALIZED
@@ -1227,13 +1224,8 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
+		/* Include what parallel workers did, e.g. for CREATE INDEX or VACUUM */
+		InstrTotalUsage(&instr, &bufusage, &walusage);
 
 		pgss_store(queryString,
 				   saved_queryId,
@@ -1241,7 +1233,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   saved_stmt_len,
 				   nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(duration),
+				   INSTR_TIME_GET_MILLISEC(instr.instr.total),
 				   rows,
 				   &bufusage,
 				   &walusage,
