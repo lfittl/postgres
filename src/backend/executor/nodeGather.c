@@ -422,6 +422,10 @@ ExecShutdownGather(GatherState *node)
 	/* Now destroy the parallel context. */
 	if (node->pei != NULL)
 	{
+		/* Keep what the workers did outside of plan nodes, for EXPLAIN */
+		node->worker_bufusage = node->pei->worker_bufusage;
+		node->worker_walusage = node->pei->worker_walusage;
+
 		ExecParallelCleanup(node->pei);
 		node->pei = NULL;
 	}

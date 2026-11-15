@@ -74,6 +74,8 @@ extern void ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into,
 extern void ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc);
 extern void ExplainPrintTriggers(ExplainState *es,
 								 QueryDesc *queryDesc);
+extern void ExplainPrintNestedStatements(ExplainState *es,
+										 QueryDesc *queryDesc);
 
 extern void ExplainPrintJITSummary(ExplainState *es,
 								   QueryDesc *queryDesc);

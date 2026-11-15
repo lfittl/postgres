@@ -362,11 +362,7 @@ static void pgss_ExecutorRun(QueryDesc *queryDesc,
 							 uint64 count);
 static void pgss_ExecutorFinish(QueryDesc *queryDesc);
 static void pgss_ExecutorEnd(QueryDesc *queryDesc);
-static void pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-								bool readOnlyTree,
-								ProcessUtilityContext context, ParamListInfo params,
-								QueryEnvironment *queryEnv,
-								DestReceiver *dest, QueryCompletion *qc);
+static void pgss_ProcessUtility(UtilityStmtDesc *desc);
 static void pgss_store(const char *query, int64 queryId,
 					   int query_location, int query_len,
 					   bool toplevel,
@@ -920,22 +916,16 @@ pgss_planner(Query *parse,
 		&& pgss_track_planning && query_string
 		&& parse->queryId != INT64CONST(0))
 	{
-		instr_time	start;
-		instr_time	duration;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
-
-		/* We need to track buffer usage as the planner can access them. */
-		bufusage_start = pgBufferUsage;
+		Instrumentation instr = {0};
 
 		/*
+		 * We need to track buffer usage as the planner can access them.
+		 *
 		 * Similarly the planner could write some WAL records in some cases
 		 * (e.g. setting a hint bit with those being WAL-logged)
 		 */
-		walusage_start = pgWalUsage;
-		INSTR_TIME_SET_CURRENT(start);
+		InstrInitOptions(&instr, INSTRUMENT_ALL);
+		InstrStart(&instr);
 
 		nesting_level++;
 		PG_TRY();
@@ -949,20 +939,10 @@ pgss_planner(Query *parse,
 		}
 		PG_FINALLY();
 		{
+			InstrStopFinalize(&instr);
 			nesting_level--;
 		}
 		PG_END_TRY();
-
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
 
 		pgss_store(query_string,
 				   parse->queryId,
@@ -970,10 +950,10 @@ pgss_planner(Query *parse,
 				   parse->stmt_len,
 				   nesting_level == 0,
 				   PGSS_PLAN,
-				   INSTR_TIME_GET_MILLISEC(duration),
+				   INSTR_TIME_GET_MILLISEC(instr.total),
 				   0,
-				   &bufusage,
-				   &walusage,
+				   &instr.bufusage,
+				   &instr.walusage,
 				   NULL,
 				   NULL,
 				   0,
@@ -1098,16 +1078,22 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		qstate != NULL &&
 		pgss_enabled(qstate->nesting_level))
 	{
+		BufferUsage bufusage;
+		WalUsage	walusage;
+
+		/* Include what parallel workers did on behalf of this query */
+		InstrTotalUsage(queryDesc->query_instr, &bufusage, &walusage);
+
 		pgss_store(queryDesc->sourceText,
 				   queryId,
 				   queryDesc->plannedstmt->stmt_location,
 				   queryDesc->plannedstmt->stmt_len,
 				   qstate->nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total),
+				   INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->instr.total),
 				   queryDesc->estate->es_total_processed,
-				   &queryDesc->query_instr->bufusage,
-				   &queryDesc->query_instr->walusage,
+				   &bufusage,
+				   &walusage,
 				   queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL,
 				   NULL,
 				   queryDesc->estate->es_parallel_workers_to_launch,
@@ -1125,12 +1111,11 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
  * ProcessUtility hook
  */
 static void
-pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-					bool readOnlyTree,
-					ProcessUtilityContext context,
-					ParamListInfo params, QueryEnvironment *queryEnv,
-					DestReceiver *dest, QueryCompletion *qc)
+pgss_ProcessUtility(UtilityStmtDesc *desc)
 {
+	PlannedStmt *pstmt = desc->pstmt;
+	const char *queryString = desc->queryString;
+	QueryCompletion *qc = desc->qc;
 	Node	   *parsetree = pstmt->utilityStmt;
 	int64		saved_queryId = pstmt->queryId;
 	int			saved_stmt_location = pstmt->stmt_location;
@@ -1172,29 +1157,28 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		!IsA(parsetree, ExecuteStmt) &&
 		!IsA(parsetree, PrepareStmt))
 	{
-		instr_time	start;
-		instr_time	duration;
 		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		WalUsage	walusage_start,
-					walusage;
+		QueryInstrumentation instr;
+		BufferUsage bufusage;
+		WalUsage	walusage;
 
-		bufusage_start = pgBufferUsage;
-		walusage_start = pgWalUsage;
-		INSTR_TIME_SET_CURRENT(start);
+		/*
+		 * Request statement-level instrumentation (timing, buffers and WAL)
+		 * for the command, which standard_ProcessUtility brackets with the
+		 * entry we provide, the same way we read query_instr for optimizable
+		 * statements.  Activity of statements run by the command and of
+		 * parallel workers it launches is accounted to it.
+		 */
+		InstrQueryInitLocal(&instr, INSTRUMENT_ALL);
+		desc->instr = &instr;
 
 		nesting_level++;
 		PG_TRY();
 		{
 			if (prev_ProcessUtility)
-				prev_ProcessUtility(pstmt, queryString, readOnlyTree,
-									context, params, queryEnv,
-									dest, qc);
+				prev_ProcessUtility(desc);
 			else
-				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-										context, params, queryEnv,
-										dest, qc);
+				standard_ProcessUtility(desc);
 		}
 		PG_FINALLY();
 		{
@@ -1213,9 +1197,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 */
 		pstmt = NULL;
 
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
 		/*
 		 * Track the total number of rows retrieved or affected by the utility
 		 * statements of COPY, FETCH, CREATE TABLE AS, CREATE MATERIALIZED
@@ -1227,13 +1208,8 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					   qc->commandTag == CMDTAG_REFRESH_MATERIALIZED_VIEW)) ?
 			qc->nprocessed : 0;
 
-		/* calc differences of buffer counters. */
-		memset(&bufusage, 0, sizeof(BufferUsage));
-		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
-
-		/* calc differences of WAL counters. */
-		memset(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
+		/* Include what parallel workers did, e.g. for CREATE INDEX or VACUUM */
+		InstrTotalUsage(&instr, &bufusage, &walusage);
 
 		pgss_store(queryString,
 				   saved_queryId,
@@ -1241,7 +1217,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 				   saved_stmt_len,
 				   nesting_level == 0,
 				   PGSS_EXEC,
-				   INSTR_TIME_GET_MILLISEC(duration),
+				   INSTR_TIME_GET_MILLISEC(instr.instr.total),
 				   rows,
 				   &bufusage,
 				   &walusage,
@@ -1274,13 +1250,9 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		PG_TRY();
 		{
 			if (prev_ProcessUtility)
-				prev_ProcessUtility(pstmt, queryString, readOnlyTree,
-									context, params, queryEnv,
-									dest, qc);
+				prev_ProcessUtility(desc);
 			else
-				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-										context, params, queryEnv,
-										dest, qc);
+				standard_ProcessUtility(desc);
 		}
 		PG_FINALLY();
 		{

@@ -32,6 +32,9 @@ typedef struct ParallelExecutorInfo
 	dsa_area   *area;			/* points to DSA area in DSM */
 	dsa_pointer param_exec;		/* serialized PARAM_EXEC parameters */
 	bool		finished;		/* set true by ExecParallelFinish */
+	/* total of the workers' usage outside of plan nodes, across launches */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
 	/* These two arrays have pcxt->nworkers_launched entries: */
 	shm_mq_handle **tqueue;		/* tuple queues for worker output */
 	struct TupleQueueReader **reader;	/* tuple reader/writer support */

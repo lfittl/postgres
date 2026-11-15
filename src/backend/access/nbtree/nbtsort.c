@@ -1466,8 +1466,8 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	 * and PARALLEL_KEY_BUFFER_USAGE.
 	 *
 	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgWalUsage or
-	 * pgBufferUsage, so do it unconditionally.
+	 * have no way of knowing whether anyone's looking at instrumentation, so
+	 * do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
 						   mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -1620,7 +1620,8 @@ _bt_end_parallel(BTLeader *btleader)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < btleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&btleader->bufferusage[i], &btleader->walusage[i]);
+		InstrAccumParallelQuery(InstrQueryCurrent(),
+								&btleader->bufferusage[i], &btleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(btleader->snapshot))
@@ -1753,6 +1754,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
+	QueryInstrumentation *instr;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -1828,7 +1830,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	}
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/* Perform sorting of spool, and possibly a spool2 */
 	sortmem = maintenance_work_mem / btshared->scantuplesortstates;
@@ -1838,7 +1840,8 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &bufferusage[ParallelWorkerNumber],
 						  &walusage[ParallelWorkerNumber]);
 
 #ifdef BTREE_BUILD_STATS

@@ -262,6 +262,7 @@ ExecEndIndexOnlyScan(IndexOnlyScanState *node)
 		 */
 		winstrument->nsearches += node->ioss_Instrument->nsearches;
 		winstrument->ntabletuplefetches += node->ioss_Instrument->ntabletuplefetches;
+		InstrAccumStack(&winstrument->table_instr, &node->ioss_Instrument->table_instr);
 	}
 
 	/*
@@ -417,16 +418,36 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 		ExecInitQual(node->recheckqual, (PlanState *) indexstate);
 
 	/*
+	 * Set up instrumentation of index-only scans if requested.  Like the
+	 * node's own instrumentation (see ExecInitNode), this must exist even
+	 * when we are only doing EXPLAIN, since EXPLAIN (BUFFERS) reads it
+	 * regardless of whether the plan was run.
+	 */
+	if (estate->es_instrument)
+	{
+		indexstate->ioss_Instrument = MemoryContextAllocZero(estate->es_query_instr->instr_cxt, sizeof(IndexScanInstrumentation));
+
+		/*
+		 * Track table and index access separately. We intentionally don't
+		 * collect timing (even if enabled), since we don't need it, and the
+		 * table AM calls InstrPushStack / InstrPopStack around its table
+		 * fetches (instead of the full InstrNode*) to reduce overhead.
+		 */
+		if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		{
+			InstrInitOptions(&indexstate->ioss_Instrument->table_instr, INSTRUMENT_BUFFERS);
+			indexstate->ioss_Instrument->table_instr.kind = INSTR_KIND_NODE_DETAIL;
+			InstrQueryRememberChild(estate->es_query_instr, &indexstate->ioss_Instrument->table_instr);
+		}
+	}
+
+	/*
 	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
 	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing
 	 * references to nonexistent indexes.
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return indexstate;
-
-	/* Set up instrumentation of index-only scans if requested */
-	if (estate->es_instrument)
-		indexstate->ioss_Instrument = palloc0_object(IndexScanInstrumentation);
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -655,6 +676,19 @@ ExecIndexOnlyScanInstrumentInitDSM(IndexOnlyScanState *node,
 	/* Each per-worker area must start out as zeroes */
 	memset(node->ioss_SharedInfo, 0, size);
 	node->ioss_SharedInfo->num_workers = pcxt->nworkers;
+
+	/*
+	 * Initialize each worker's table_instr with the same options as the
+	 * leader's own entry (see ExecInitIndexOnlyScan), so that accumulating
+	 * from it works once the worker has added its stats.
+	 */
+	if ((node->ss.ps.state->es_instrument & INSTRUMENT_BUFFERS) != 0)
+	{
+		for (int i = 0; i < pcxt->nworkers; i++)
+			InstrInitOptions(&node->ioss_SharedInfo->winstrument[i].table_instr,
+							 INSTRUMENT_BUFFERS);
+	}
+
 	shm_toc_insert(pcxt->toc,
 				   node->ss.ps.plan->plan_node_id +
 				   PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
@@ -698,4 +732,13 @@ ExecIndexOnlyScanRetrieveInstrumentation(IndexOnlyScanState *node)
 		SharedInfo->num_workers * sizeof(IndexScanInstrumentation);
 	node->ioss_SharedInfo = palloc(size);
 	memcpy(node->ioss_SharedInfo, SharedInfo, size);
+
+	/*
+	 * Import workers' table buffer/WAL usage into the query entry.  The
+	 * leader's own table_instr stays leader-only; EXPLAIN combines it with
+	 * the per-worker copies kept in ioss_SharedInfo.
+	 */
+	for (int i = 0; i < node->ioss_SharedInfo->num_workers; i++)
+		InstrAccumWorkerNodeUsage(node->ss.ps.state->es_query_instr,
+								  &node->ioss_SharedInfo->winstrument[i].table_instr);
 }

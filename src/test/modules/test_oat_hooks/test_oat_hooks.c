@@ -55,12 +55,7 @@ static void REGRESS_object_access_hook_str(ObjectAccessType access,
 static void REGRESS_object_access_hook(ObjectAccessType access, Oid classId,
 									   Oid objectId, int subId, void *arg);
 static bool REGRESS_exec_check_perms(List *rangeTabls, List *rteperminfos, bool do_abort);
-static void REGRESS_utility_command(PlannedStmt *pstmt,
-									const char *queryString, bool readOnlyTree,
-									ProcessUtilityContext context,
-									ParamListInfo params,
-									QueryEnvironment *queryEnv,
-									DestReceiver *dest, QueryCompletion *qc);
+static void REGRESS_utility_command(UtilityStmtDesc *desc);
 
 /* Helper functions */
 static char *accesstype_to_string(ObjectAccessType access, int subId);
@@ -376,16 +371,9 @@ REGRESS_exec_check_perms(List *rangeTabls, List *rteperminfos, bool do_abort)
 }
 
 static void
-REGRESS_utility_command(PlannedStmt *pstmt,
-						const char *queryString,
-						bool readOnlyTree,
-						ProcessUtilityContext context,
-						ParamListInfo params,
-						QueryEnvironment *queryEnv,
-						DestReceiver *dest,
-						QueryCompletion *qc)
+REGRESS_utility_command(UtilityStmtDesc *desc)
 {
-	Node	   *parsetree = pstmt->utilityStmt;
+	Node	   *parsetree = desc->pstmt->utilityStmt;
 	const char *action = GetCommandTagName(CreateCommandTag(parsetree));
 
 	audit_attempt("process utility",
@@ -400,13 +388,9 @@ REGRESS_utility_command(PlannedStmt *pstmt,
 
 	/* Forward to next hook in the chain */
 	if (next_ProcessUtility_hook)
-		(*next_ProcessUtility_hook) (pstmt, queryString, readOnlyTree,
-									 context, params, queryEnv,
-									 dest, qc);
+		(*next_ProcessUtility_hook) (desc);
 	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-								context, params, queryEnv,
-								dest, qc);
+		standard_ProcessUtility(desc);
 
 	/* We're done */
 	audit_success("process utility",

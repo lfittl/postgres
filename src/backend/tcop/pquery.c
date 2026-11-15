@@ -1226,6 +1226,8 @@ PortalRunUtility(Portal portal, PlannedStmt *pstmt,
 				 bool isTopLevel, bool setHoldSnapshot,
 				 DestReceiver *dest, QueryCompletion *qc)
 {
+	UtilityStmtDesc utilityDesc = {0};
+
 	/*
 	 * Set snapshot if utility stmt needs one.
 	 */
@@ -1253,14 +1255,16 @@ PortalRunUtility(Portal portal, PlannedStmt *pstmt,
 	else
 		portal->portalSnapshot = NULL;
 
-	ProcessUtility(pstmt,
-				   portal->sourceText,
-				   (portal->cplan != NULL), /* protect tree if in plancache */
-				   isTopLevel ? PROCESS_UTILITY_TOPLEVEL : PROCESS_UTILITY_QUERY,
-				   portal->portalParams,
-				   portal->queryEnv,
-				   dest,
-				   qc);
+	utilityDesc.pstmt = pstmt;
+	utilityDesc.queryString = portal->sourceText;
+	utilityDesc.readOnlyTree = (portal->cplan != NULL); /* protect tree if in
+														 * plancache */
+	utilityDesc.context = isTopLevel ? PROCESS_UTILITY_TOPLEVEL : PROCESS_UTILITY_QUERY;
+	utilityDesc.params = portal->portalParams;
+	utilityDesc.queryEnv = portal->queryEnv;
+	utilityDesc.dest = dest;
+	utilityDesc.qc = qc;
+	ProcessUtility(&utilityDesc);
 
 	/* Some utility statements may change context on us */
 	MemoryContextSwitchTo(portal->portalContext);
