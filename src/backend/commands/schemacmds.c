@@ -208,6 +208,7 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 	{
 		Node	   *node = (Node *) lfirst(parsetree_item);
 		PlannedStmt *wrapper;
+		UtilityStmtDesc utilityDesc = {0};
 
 		/* need to make a wrapper PlannedStmt */
 		wrapper = makeNode(PlannedStmt);
@@ -219,14 +220,11 @@ CreateSchemaCommand(ParseState *pstate, CreateSchemaStmt *stmt,
 		wrapper->planOrigin = PLAN_STMT_INTERNAL;
 
 		/* do this step */
-		ProcessUtility(wrapper,
-					   pstate->p_sourcetext,
-					   false,
-					   PROCESS_UTILITY_SUBCOMMAND,
-					   NULL,
-					   NULL,
-					   None_Receiver,
-					   NULL);
+		utilityDesc.pstmt = wrapper;
+		utilityDesc.queryString = pstate->p_sourcetext;
+		utilityDesc.context = PROCESS_UTILITY_SUBCOMMAND;
+		utilityDesc.dest = None_Receiver;
+		ProcessUtility(&utilityDesc);
 
 		/* make sure later steps can see the object created here */
 		CommandCounterIncrement();

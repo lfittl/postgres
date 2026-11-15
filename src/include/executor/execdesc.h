@@ -53,8 +53,12 @@ typedef struct QueryDesc
 	/* This field is set by ExecutePlan */
 	bool		already_executed;	/* true if previously executed */
 
-	/* This field is allocated by ExecutorStart if needed */
-	struct Instrumentation *query_instr;	/* query level instrumentation */
+	/*
+	 * Set up by ExecutorStart if query_instr_options or instrument_options
+	 * are set, with the timing, buffer and WAL tracking they asked for; NULL
+	 * otherwise.
+	 */
+	struct QueryInstrumentation *query_instr;	/* query level instrumentation */
 
 	/* Private state of extensions; see GetQueryDescExtensionId() */
 	void	  **extension_state;

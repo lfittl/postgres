@@ -41,6 +41,8 @@ typedef struct SerializeDestReceiver
 	MemoryContext tmpcontext;	/* per-row temporary memory context */
 	StringInfoData buf;			/* buffer to hold the constructed message */
 	SerializeMetrics metrics;	/* collected metrics */
+	QueryInstrumentation *qinstr;	/* parent instrumentation to accumulate to */
+	Instrumentation *instr;		/* per-tuple measurement, a child of qinstr */
 } SerializeDestReceiver;
 
 /*
@@ -110,15 +112,10 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext oldcontext;
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
-	instr_time	start,
-				end;
-	BufferUsage instr_start;
+	Instrumentation *instr = myState->instr;
 
-	/* only measure time, buffers if requested */
-	if (myState->es->timing)
-		INSTR_TIME_SET_CURRENT(start);
-	if (myState->es->buffers)
-		instr_start = pgBufferUsage;
+	/* Start per-tuple measurement */
+	InstrStart(instr);
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -186,18 +183,8 @@ serializeAnalyzeReceive(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextReset(myState->tmpcontext);
 
-	/* Update timing data */
-	if (myState->es->timing)
-	{
-		INSTR_TIME_SET_CURRENT(end);
-		INSTR_TIME_ACCUM_DIFF(myState->metrics.timeSpent, end, start);
-	}
-
-	/* Update buffer metrics */
-	if (myState->es->buffers)
-		BufferUsageAccumDiff(&myState->metrics.bufferUsage,
-							 &pgBufferUsage,
-							 &instr_start);
+	/* Stop per-tuple measurement */
+	InstrStop(instr);
 
 	return true;
 }
@@ -209,6 +196,7 @@ static void
 serializeAnalyzeStartup(DestReceiver *self, int operation, TupleDesc typeinfo)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+	int			instrument_options = 0;
 
 	Assert(receiver->es != NULL);
 
@@ -233,9 +221,25 @@ serializeAnalyzeStartup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	/* The output buffer is re-used across rows, as in printtup.c */
 	initStringInfo(&receiver->buf);
 
-	/* Initialize results counters */
+	/* Initialize metrics */
 	memset(&receiver->metrics, 0, sizeof(SerializeMetrics));
-	INSTR_TIME_SET_ZERO(receiver->metrics.timeSpent);
+
+	/*
+	 * Set up the per-tuple instrumentation as a child of the query
+	 * instrumentation, so the usage measured below reaches the session totals
+	 * even on error, when serializeAnalyzeShutdown (which finalizes it on
+	 * success) is not called.  Like all children, it must live in the query's
+	 * instrumentation context, which outlives this receiver on abort.
+	 */
+	Assert(receiver->qinstr != NULL);
+	if (receiver->es->timing)
+		instrument_options |= INSTRUMENT_TIMER;
+	if (receiver->es->buffers)
+		instrument_options |= INSTRUMENT_BUFFERS;
+	receiver->instr = MemoryContextAllocZero(receiver->qinstr->instr_cxt,
+											 sizeof(Instrumentation));
+	InstrInitOptions(receiver->instr, instrument_options);
+	InstrQueryRememberChild(receiver->qinstr, receiver->instr);
 }
 
 /*
@@ -245,6 +249,13 @@ static void
 serializeAnalyzeShutdown(DestReceiver *self)
 {
 	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	/*
+	 * Accumulate what we measured to the query instrumentation, and keep a
+	 * copy in the metrics, which outlive the query's instrumentation context.
+	 */
+	InstrFinalizeChild(receiver->instr, &receiver->qinstr->instr);
+	receiver->metrics.instr = *receiver->instr;
 
 	if (receiver->finfos)
 		pfree(receiver->finfos);
@@ -290,22 +301,34 @@ CreateExplainSerializeDestReceiver(ExplainState *es)
 }
 
 /*
- * GetSerializationMetrics - collect metrics
+ * Set the query instrumentation that a serialize receiver accumulates to.
  *
- * We have to be careful here since the receiver could be an IntoRel
- * receiver if the subject statement is CREATE TABLE AS.  In that
- * case, return all-zeroes stats.
+ * Must be called after ExecutorStart has created the instrumentation and
+ * before the query runs.  A no-op for other receivers.
  */
-SerializeMetrics
+void
+SetExplainSerializeQueryInstr(DestReceiver *self, QueryInstrumentation *qinstr)
+{
+	SerializeDestReceiver *receiver = (SerializeDestReceiver *) self;
+
+	if (receiver->pub.mydest != DestExplainSerialize)
+		return;
+
+	receiver->qinstr = qinstr;
+}
+
+/*
+ * GetSerializationMetrics - get serialization metrics
+ *
+ * Returns a pointer to the SerializeMetrics inside the dest receiver,
+ * or NULL if the receiver is not a SerializeDestReceiver (e.g. an IntoRel
+ * receiver for CREATE TABLE AS).
+ */
+SerializeMetrics *
 GetSerializationMetrics(DestReceiver *dest)
 {
-	SerializeMetrics empty;
-
 	if (dest->mydest == DestExplainSerialize)
-		return ((SerializeDestReceiver *) dest)->metrics;
+		return &((SerializeDestReceiver *) dest)->metrics;
 
-	memset(&empty, 0, sizeof(SerializeMetrics));
-	INSTR_TIME_SET_ZERO(empty.timeSpent);
-
-	return empty;
+	return NULL;
 }

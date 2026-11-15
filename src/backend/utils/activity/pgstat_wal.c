@@ -22,10 +22,18 @@
 
 
 /*
- * WAL usage counters saved from pgWalUsage at the previous call to
- * pgstat_report_wal(). This is used to calculate how much WAL usage
- * happens between pgstat_report_wal() calls, by subtracting
- * the previous counters from the current ones.
+ * WAL usage counters saved from the session totals in instr_top at the
+ * previous call to pgstat_report_wal(). This is used to calculate how much
+ * WAL usage happens between pgstat_report_wal() calls, by subtracting the
+ * previous counters from the current ones.
+ *
+ * instr_top is updated whenever an instrumentation stack entry is finalized,
+ * and the stack is empty at the points where the WAL statistics get flushed
+ * (between transactions, when idle, in auxiliary processes, and at process
+ * exit after the stack was finalized), so the totals reflect all activity so
+ * far.  They only describe this process' own activity: what a parallel query
+ * leader imports from its workers, which report themselves, never reaches
+ * instr_top.
  */
 static WalUsage prevWalUsage;
 
@@ -77,7 +85,7 @@ pgstat_fetch_stat_wal(void)
 static inline bool
 pgstat_wal_have_pending(void)
 {
-	return pgWalUsage.wal_records != prevWalUsage.wal_records;
+	return instr_top.walusage.wal_records != prevWalUsage.wal_records;
 }
 
 /*
@@ -109,7 +117,7 @@ pgstat_wal_flush_cb(bool nowait)
 	 * Calculate how much WAL usage counters were increased by subtracting the
 	 * previous counters from the current ones.
 	 */
-	WalUsageAccumDiff(&wal_usage_diff, &pgWalUsage, &prevWalUsage);
+	WalUsageAccumDiff(&wal_usage_diff, &instr_top.walusage, &prevWalUsage);
 
 	if (!nowait)
 		LWLockAcquire(&stats_shmem->lock, LW_EXCLUSIVE);
@@ -130,7 +138,7 @@ pgstat_wal_flush_cb(bool nowait)
 	/*
 	 * Save the current counters for the subsequent calculation of WAL usage.
 	 */
-	prevWalUsage = pgWalUsage;
+	prevWalUsage = instr_top.walusage;
 
 	return false;
 }
@@ -139,11 +147,11 @@ void
 pgstat_wal_init_backend_cb(void)
 {
 	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_wal_flush_cb()
-	 * can calculate how much pgWalUsage counters are increased by subtracting
-	 * prevWalUsage from pgWalUsage.
+	 * Initialize prevWalUsage with the session totals so that
+	 * pgstat_wal_flush_cb() can calculate how much the counters are increased
+	 * by subtracting prevWalUsage from them.
 	 */
-	prevWalUsage = pgWalUsage;
+	prevWalUsage = instr_top.walusage;
 }
 
 void
