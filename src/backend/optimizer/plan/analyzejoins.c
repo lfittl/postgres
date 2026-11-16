@@ -1272,6 +1272,22 @@ remove_self_join_rel(PlannerInfo *root,
 					   toKeep->relid, 0);
 
 	/*
+	 * Transfer any rows overrides mentioning the removed relation to the kept
+	 * one, so that an override registered for either side of the self join
+	 * still applies to the scan that survives.
+	 */
+	foreach_node(RowsOverride, override, root->rows_overrides)
+	{
+		if (bms_is_member(toRemove->relid, override->relids))
+		{
+			override->relids = bms_del_member(override->relids,
+											  toRemove->relid);
+			override->relids = bms_add_member(override->relids,
+											  toKeep->relid);
+		}
+	}
+
+	/*
 	 * As in remove_useless_outer_joins, discard the securityQuals of the
 	 * removed rel, so that later passes don't visit them.  We know the kept
 	 * rel has the same quals.  (tablesample is already known NULL.)

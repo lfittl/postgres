@@ -195,6 +195,10 @@ extern void compute_semi_anti_join_factors(PlannerInfo *root,
 										   SpecialJoinInfo *sjinfo,
 										   List *restrictlist,
 										   SemiAntiJoinFactors *semifactors);
+extern void add_rows_override(PlannerInfo *root, Relids relids,
+							  RowsOverrideKind kind, double value);
+extern RowsOverride *find_rows_override(PlannerInfo *root, Relids relids);
+extern double inherited_rows_scale(PlannerInfo *root, RelOptInfo *rel);
 extern void set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel);
 extern double get_parameterized_baserel_size(PlannerInfo *root,
 											 RelOptInfo *rel,
