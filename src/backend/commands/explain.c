@@ -69,6 +69,8 @@ typedef struct ExplainPreScanContext
 {
 	Bitmapset  *rels_used;		/* RTEs referenced by the plan */
 	int			max_plan_node_id;	/* highest plan_node_id in the tree */
+	Bitmapset  *cte_plan_ids;	/* plan_node_ids of CTE subplans that have a
+								 * CTE Scan referencing them */
 } ExplainPreScanContext;
 
 static void ExplainOneQuery(Query *query, int cursorOptions,
@@ -818,9 +820,11 @@ ExplainPrintPlan(ExplainState *es, QueryDesc *queryDesc)
 	}
 
 	/*
-	 * The executor keeps leader and worker stats apart, while EXPLAIN shows
-	 * every node with both combined.  Compute that up front, as ExplainNode
-	 * prints a node before recursing into its children.
+	 * The executor keeps leader and worker stats apart, and its per-node
+	 * buffer/WAL counters only cover each node's own activity, while EXPLAIN
+	 * shows every node combined and inclusive of its children.  Compute that
+	 * up front, as ExplainNode prints a node before recursing into its
+	 * children.
 	 */
 	if (queryDesc->planstate->instrument)
 		ExplainComputeNodeUsage(es, queryDesc->planstate, &prescan);
@@ -1206,7 +1210,8 @@ elapsed_time(instr_time *starttime)
  * that never appear in the EXPLAIN output (such as inheritance parents).
  *
  * Along the way, this collects what ExplainComputeNodeUsage needs to know
- * about the tree up front: the highest plan_node_id.
+ * about the tree up front: the highest plan_node_id, and which subplans are
+ * read by a CTE Scan.
  */
 static bool
 ExplainPreScanNode(PlanState *planstate, void *context)
@@ -1217,6 +1222,14 @@ ExplainPreScanNode(PlanState *planstate, void *context)
 
 	prescan->max_plan_node_id = Max(prescan->max_plan_node_id,
 									plan->plan_node_id);
+
+	if (IsA(planstate, CteScanState))
+	{
+		CteScanState *css = castNode(CteScanState, planstate);
+
+		prescan->cte_plan_ids = bms_add_member(prescan->cte_plan_ids,
+											   css->cteplanstate->plan->plan_node_id);
+	}
 
 	switch (nodeTag(plan))
 	{
@@ -2324,7 +2337,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		}
 	}
 
-	/* Show buffer/WAL usage, leader and workers combined */
+	/* Show buffer/WAL usage, leader and workers combined, including children */
 	if (planstate->instrument && (es->buffers || es->wal))
 	{
 		ExplainNodeUsage *usage = ExplainGetNodeUsage(es, planstate);
@@ -5310,38 +5323,75 @@ ExplainCustomChildren(CustomScanState *css, List *ancestors, ExplainState *es)
 }
 
 /*
- * Compute the instrumentation EXPLAIN shows for every plan node: the
- * leader's and the workers' stats combined.
+ * Compute the instrumentation EXPLAIN shows for every plan node: leader and
+ * worker stats combined, and buffer/WAL usage inclusive of children, for both
+ * the combined view and the per-worker details.
  *
  * The executor keeps the leader's per-node entry free of worker activity (see
- * ExecParallelRetrieveInstrumentation), so this aggregates into
+ * ExecParallelRetrieveInstrumentation) and leaves per-node buffer/WAL counters
+ * exclusive (see InstrQueryFinalizeChildren), so this aggregates into
  * es->node_usage, indexed by plan_node_id, without touching the executor's
  * entries.  The walk order matches the one ExplainNode uses to print the
  * tree, so a subplan shared between several SubPlan expressions is attributed
  * to the node it gets printed under.
+ *
+ * The subplan of a CTE is the exception: it is printed under the node it is
+ * attached to as an InitPlan, but it runs when a CTE Scan pulls tuples from
+ * it.  To have the CTE Scan and the nodes above it include that activity, as
+ * their timing does, the subplan is counted towards the "leader" CTE Scan
+ * (see nodeCtescan.c) rather than the node it is attached to.  Which of
+ * several scans of the same CTE pulled how much is not recorded, so the
+ * leader is attributed all of it.  The node the subplan is attached to still
+ * includes it, since it is above every scan of the CTE.
  */
+typedef struct ExplainNodeUsageContext
+{
+	ExplainState *es;
+	Bitmapset  *cte_plan_ids;	/* see ExplainPreScanContext */
+	bool		from_cte_scan;	/* reached through the leader CTE Scan? */
+	ExplainNodeUsage *parent;	/* parent's entry, NULL at the root */
+	ExplainNodeUsage *worker_parent;	/* nearest ancestor's entry that has
+										 * per-worker details, or NULL */
+} ExplainNodeUsageContext;
+
 static void
 ExplainComputeNodeUsage(ExplainState *es, PlanState *planstate,
 						ExplainPreScanContext *prescan)
 {
+	ExplainNodeUsageContext ctx;
+
 	Assert(prescan->max_plan_node_id >= 0);
 
 	es->num_node_usage = prescan->max_plan_node_id + 1;
 	es->node_usage = palloc0_array(ExplainNodeUsage, es->num_node_usage);
 
-	(void) ExplainComputeNodeUsage_walker(planstate, es);
+	ctx.es = es;
+	ctx.cte_plan_ids = prescan->cte_plan_ids;
+	ctx.from_cte_scan = false;
+	ctx.parent = NULL;
+	ctx.worker_parent = NULL;
+	(void) ExplainComputeNodeUsage_walker(planstate, &ctx);
 }
 
 static bool
 ExplainComputeNodeUsage_walker(PlanState *planstate, void *context)
 {
-	ExplainState *es = (ExplainState *) context;
+	ExplainNodeUsageContext *ctx = (ExplainNodeUsageContext *) context;
+	ExplainNodeUsageContext childctx;
 	ExplainNodeUsage *usage;
 
 	if (planstate == NULL)
 		return false;
 
-	usage = ExplainGetNodeUsage(es, planstate);
+	/*
+	 * A CTE's subplan is counted towards the leader CTE Scan, which walks it
+	 * explicitly below, so skip it where it is attached as an InitPlan.
+	 */
+	if (!ctx->from_cte_scan &&
+		bms_is_member(planstate->plan->plan_node_id, ctx->cte_plan_ids))
+		return false;
+
+	usage = ExplainGetNodeUsage(ctx->es, planstate);
 
 	/*
 	 * Several SubPlan expressions can reference the same physical subplan,
@@ -5378,12 +5428,52 @@ ExplainComputeNodeUsage_walker(PlanState *planstate, void *context)
 		}
 	}
 
-	/* This node's combined buffer/WAL usage */
+	/* This node's own combined buffer/WAL usage, before adding children */
 	usage->bufusage = usage->stats.instr.bufusage;
 	usage->walusage = usage->stats.instr.walusage;
 
-	return planstate_tree_walker(planstate, ExplainComputeNodeUsage_walker,
-								 context);
+	/* Children first, so this node's entry is complete before we add it up */
+	childctx.es = ctx->es;
+	childctx.cte_plan_ids = ctx->cte_plan_ids;
+	childctx.from_cte_scan = false;
+	childctx.parent = usage;
+	childctx.worker_parent = usage->num_workers > 0 ? usage : ctx->worker_parent;
+	(void) planstate_tree_walker(planstate, ExplainComputeNodeUsage_walker,
+								 &childctx);
+
+	/* The leader CTE Scan accounts for the CTE's subplan, see above */
+	if (IsA(planstate, CteScanState))
+	{
+		CteScanState *css = castNode(CteScanState, planstate);
+
+		if (css->leader == css)
+		{
+			childctx.from_cte_scan = true;
+			(void) ExplainComputeNodeUsage_walker(css->cteplanstate, &childctx);
+		}
+	}
+
+	if (ctx->parent)
+	{
+		BufferUsageAdd(&ctx->parent->bufusage, &usage->bufusage);
+		WalUsageAdd(&ctx->parent->walusage, &usage->walusage);
+	}
+
+	if (ctx->worker_parent)
+	{
+		int			nworkers = Min(usage->num_workers,
+								   ctx->worker_parent->num_workers);
+
+		for (int n = 0; n < nworkers; n++)
+		{
+			BufferUsageAdd(&ctx->worker_parent->worker_bufusage[n],
+						   &usage->worker_bufusage[n]);
+			WalUsageAdd(&ctx->worker_parent->worker_walusage[n],
+						&usage->worker_walusage[n]);
+		}
+	}
+
+	return false;
 }
 
 /*

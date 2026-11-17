@@ -47,19 +47,21 @@ typedef struct ExplainWorkersState
  * Instrumentation of a plan node as shown by EXPLAIN.
  *
  * The executor keeps the leader's and each parallel worker's per-node stats
- * apart.  ExplainPrintPlan computes one of these per node before printing the
- * plan, combining leader and workers.
+ * apart, and its buffer/WAL counters only cover a node's own activity.
+ * ExplainPrintPlan computes one of these per node before printing the plan,
+ * combining leader and workers and summing buffer/WAL usage over the subtree.
  */
 typedef struct ExplainNodeUsage
 {
 	bool		valid;			/* entry has been computed */
-	NodeInstrumentation stats;	/* leader + workers */
-	BufferUsage bufusage;		/* leader + workers */
+	NodeInstrumentation stats;	/* leader + workers; buffer/WAL usage in here
+								 * is this node's own only */
+	BufferUsage bufusage;		/* leader + workers, including children */
 	WalUsage	walusage;		/* ditto */
 	/* per-worker details, present for nodes run by parallel workers */
 	int			num_workers;	/* length of the arrays below, 0 if none */
-	BufferUsage *worker_bufusage;
-	WalUsage   *worker_walusage;
+	BufferUsage *worker_bufusage;	/* including children */
+	WalUsage   *worker_walusage;	/* ditto */
 } ExplainNodeUsage;
 
 typedef struct ExplainState
@@ -91,7 +93,7 @@ typedef struct ExplainState
 	bool		hide_workers;	/* set if we find an invisible Gather */
 	int			rtable_size;	/* length of rtable excluding the RTE_GROUP
 								 * entry */
-	ExplainNodeUsage *node_usage;	/* per-node instrumentation as shown,
+	ExplainNodeUsage *node_usage;	/* inclusive per-node buffer/WAL usage,
 									 * indexed by plan_node_id; NULL if not
 									 * shown */
 	int			num_node_usage; /* length of node_usage */
