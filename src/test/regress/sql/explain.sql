@@ -471,9 +471,9 @@ DROP FUNCTION check_cte_explain_buffers;
 DROP TABLE cte_buf_test;
 
 -- Test trigger instrumentation.
--- Buffer usage of a BEFORE ROW trigger should be reported on the plan node
--- that fired it.  The trigger scans a multi-page temporary table, so the
--- ModifyTable node must show at least one local block access per page of it.
+-- The trigger scans a multi-page temporary table, so wherever its buffer
+-- usage is reported, there must be at least one local block access per page
+-- of it.
 CREATE TEMP TABLE trig_test_tab (a int);
 CREATE TEMP TABLE trig_work_tab (a int);
 INSERT INTO trig_work_tab SELECT generate_series(1, 10000);
@@ -489,30 +489,42 @@ CREATE TRIGGER trig_test_trig
     BEFORE INSERT ON trig_test_tab
     FOR EACH ROW EXECUTE FUNCTION trig_test_func();
 
-CREATE FUNCTION check_trigger_explain_buffers() RETURNS boolean AS $$
+-- The buffer usage of a trigger is reported for the trigger itself, whether
+-- it is a BEFORE or an AFTER trigger, and is not part of any plan node, not
+-- even the ModifyTable node that fires BEFORE triggers.
+CREATE FUNCTION check_trigger_own_buffers(
+    OUT calls int, OUT on_trigger boolean, OUT on_node boolean) AS $$
 DECLARE
     plan_json json;
     node json;
     trig json;
-    node_buf int;
     pages int;
 BEGIN
     EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
         INSERT INTO trig_test_tab VALUES (1)' INTO plan_json;
     node := plan_json->0->'Plan';
     trig := plan_json->0->'Triggers'->0;
-    node_buf :=
-        COALESCE((node->>'Local Hit Blocks')::int, 0) +
-        COALESCE((node->>'Local Read Blocks')::int, 0);
     pages := pg_relation_size('trig_work_tab') / current_setting('block_size')::int;
-    RETURN COALESCE((trig->>'Calls')::int, 0) = 1 AND
-        pages > 1 AND node_buf >= pages;
+    calls := (trig->>'Calls')::int;
+    on_trigger :=
+        COALESCE((trig->>'Local Hit Blocks')::int, 0) +
+        COALESCE((trig->>'Local Read Blocks')::int, 0) >= pages;
+    on_node :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0) >= pages;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT check_trigger_explain_buffers() AS trigger_buffers_visible;
+SELECT * FROM check_trigger_own_buffers();
 
-DROP FUNCTION check_trigger_explain_buffers;
+DROP TRIGGER trig_test_trig ON trig_test_tab;
+CREATE TRIGGER trig_test_trig
+    AFTER INSERT ON trig_test_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_test_func();
+
+SELECT * FROM check_trigger_own_buffers();
+
+DROP FUNCTION check_trigger_own_buffers;
 DROP TRIGGER trig_test_trig ON trig_test_tab;
 DROP FUNCTION trig_test_func;
 DROP TABLE trig_test_tab;
@@ -560,6 +572,54 @@ SELECT check_nested_parallel_buffers() AS nested_parallel_buffers_on_node;
 
 DROP FUNCTION check_nested_parallel_buffers;
 DROP FUNCTION nested_parallel_count;
+
+-- Likewise, EXPLAIN (ANALYZE, BUFFERS) should report the buffer usage of
+-- parallel workers launched by a statement a trigger ran with the trigger.
+CREATE TEMP TABLE trig_par_tab (a int);
+
+CREATE FUNCTION trig_par_func() RETURNS trigger AS $$
+BEGIN
+    PERFORM count(*) FROM tenk1;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trig_par_trig
+    BEFORE INSERT ON trig_par_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_par_func();
+
+CREATE FUNCTION check_trigger_parallel_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    trig json;
+    trig_buf int;
+    pages int;
+BEGIN
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_indexonlyscan = off;
+    SET LOCAL enable_bitmapscan = off;
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        INSERT INTO trig_par_tab VALUES (1)' INTO plan_json;
+    trig := plan_json->0->'Triggers'->0;
+    trig_buf :=
+        COALESCE((trig->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((trig->>'Shared Read Blocks')::int, 0);
+    pages := pg_relation_size('tenk1') / current_setting('block_size')::int;
+    RETURN trig_buf >= pages;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT check_trigger_parallel_buffers() AS trigger_parallel_buffers;
+
+DROP FUNCTION check_trigger_parallel_buffers;
+DROP TRIGGER trig_par_trig ON trig_par_tab;
+DROP FUNCTION trig_par_func;
+DROP TABLE trig_par_tab;
 
 -- EXPLAIN (ANALYZE, BUFFERS) should report the buffer usage of a parallel
 -- scan on the scan node, combined across the leader and its workers.  Each

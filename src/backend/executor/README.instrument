@@ -33,6 +33,12 @@ QueryInstrumentation   A statement entry, for a query, a utility command or
 NodeInstrumentation    A child entry with per-plan-node statistics (tuple
                        counts, loops, startup time, etc.).
 
+TriggerInstrumentation A child entry per trigger, counting its firings.  Its
+                       buffer/WAL usage, including that of parallel workers
+                       launched by statements it ran, is shown with the
+                       trigger, and is not included in the plan node that
+                       fired it.
+
 Other code can register child entries with a statement entry as well, to
 measure a part of its execution separately.
 

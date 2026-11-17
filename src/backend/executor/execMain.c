@@ -252,12 +252,12 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 
 	/*
 	 * Set up the query-level instrumentation entry, if anybody asked for
-	 * instrumentation: it is the parent of the node instrumentation of
-	 * EXPLAIN (ANALYZE), it receives what parallel workers did on behalf of
-	 * the query, and it is the innermost query entry on the instrumentation
-	 * stack while the query runs (see InstrQueryCurrent). Extensions request
-	 * timing, buffer or WAL usage via query_instr_options and read
-	 * query_instr afterwards; ensure none has allocated it itself.
+	 * instrumentation: it is the parent of the node and trigger
+	 * instrumentation of EXPLAIN (ANALYZE), it receives what parallel workers
+	 * did on behalf of the query, and it is the innermost query entry on the
+	 * instrumentation stack while the query runs (see InstrQueryCurrent).
+	 * Extensions request timing, buffer or WAL usage via query_instr_options
+	 * and read query_instr afterwards; ensure none has allocated it itself.
 	 *
 	 * A query without an entry (e.g. a statement nested in a top-level one
 	 * that pg_stat_statements tracks) is accounted to whatever entry is
@@ -1300,7 +1300,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 				  Relation resultRelationDesc,
 				  Index resultRelationIndex,
 				  ResultRelInfo *partition_root_rri,
-				  int instrument_options)
+				  int instrument_options,
+				  QueryInstrumentation *qinstr)
 {
 	MemSet(resultRelInfo, 0, sizeof(ResultRelInfo));
 	resultRelInfo->type = T_ResultRelInfo;
@@ -1321,8 +1322,19 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 			palloc0_array(FmgrInfo, n);
 		resultRelInfo->ri_TrigWhenExprs = (ExprState **)
 			palloc0_array(ExprState *, n);
+
+		/*
+		 * Per-trigger instrumentation is only needed when per-node
+		 * instrumentation (EXPLAIN ANALYZE) is requested.  Query-level
+		 * instrumentation alone (e.g. pg_stat_statements) accounts for
+		 * trigger activity through the stack entry current while the trigger
+		 * runs, so don't allocate anything in that case.
+		 */
 		if (instrument_options)
-			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(n, instrument_options);
+		{
+			Assert(qinstr != NULL);
+			resultRelInfo->ri_TrigInstrument = InstrAllocTrigger(qinstr, n, instrument_options);
+		}
 	}
 	else
 	{
@@ -1460,7 +1472,8 @@ ExecGetTriggerResultRel(EState *estate, Oid relid,
 					  rel,
 					  0,		/* dummy rangetable index */
 					  rootRelInfo,
-					  estate->es_instrument);
+					  estate->es_instrument,
+					  estate->es_query_instr);
 	estate->es_trig_target_relations =
 		lappend(estate->es_trig_target_relations, rInfo);
 	MemoryContextSwitchTo(oldcontext);
@@ -1521,9 +1534,14 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);
 
-			/* dummy rangetable index */
-			InitResultRelInfo(rInfo, ancRel, 0, NULL,
-							  estate->es_instrument);
+			/*
+			 * Dummy rangetable index, and no trigger instrumentation: these
+			 * ResultRelInfos are only used to queue AFTER triggers (see
+			 * ExecCrossPartitionUpdateForeignKey).  When those fire, the
+			 * relation is looked up again via ExecGetTriggerResultRel, and
+			 * the ResultRelInfo found there carries the instrumentation.
+			 */
+			InitResultRelInfo(rInfo, ancRel, 0, NULL, 0, NULL);
 			ancResultRels = lappend(ancResultRels, rInfo);
 		}
 		ancResultRels = lappend(ancResultRels, rootRelInfo);

@@ -276,18 +276,18 @@ InstrStackFinalizeAll(void)
  * further, and must see the activity that caused, rather than leaving all of
  * it to whichever statement happens to close the cursor.
  *
- * The child entries registered with InstrQueryRememberChild (plan nodes) are
- * never added to the entry's own counters: per-node stats stay exclusive of
- * child nodes, i.e. they only reflect activity that happened while the node
- * itself was the top of the instrumentation stack (which includes statements
- * it ran, e.g. through a function), and EXPLAIN computes the inclusive
- * numbers it displays by summing subtrees at display time.  The total of the
- * statement is therefore computed here, as the entry's own counters plus
- * those of all its children, and remembered in passed_usage, which is what
- * InstrTotalUsage reports.  What is passed on is the difference to the total
- * arrived at last time, and goes to the current entry, like the counters of
- * any other entry.  Calling this again without any activity in between
- * passes on nothing, so the normal and the abort path can never count
+ * The child entries registered with InstrQueryRememberChild (plan nodes,
+ * triggers) are never added to the entry's own counters: per-node stats stay
+ * exclusive of child nodes, i.e. they only reflect activity that happened
+ * while the node itself was the top of the instrumentation stack (which
+ * includes statements it ran, e.g. through a function), and EXPLAIN computes
+ * the inclusive numbers it displays by summing subtrees at display time.  The
+ * total of the statement is therefore computed here, as the entry's own
+ * counters plus those of all its children, and remembered in passed_usage,
+ * which is what InstrTotalUsage reports.  What is passed on is the difference
+ * to the total arrived at last time, and goes to the current entry, like the
+ * counters of any other entry.  Calling this again without any activity in
+ * between passes on nothing, so the normal and the abort path can never count
  * anything twice.
  *
  * This relies on a child's counters only changing while its query entry is
@@ -389,7 +389,7 @@ InstrQueryAlloc(int instrument_options)
 	 * since the abort cleanup needs to access it after the caller's memory
 	 * may already be gone.
 	 *
-	 * All child instrumentation allocations (i.e. plan nodes) must be
+	 * All child instrumentation allocations (plan nodes, triggers) must be
 	 * allocated within this context to ensure correct clean up on abort.
 	 */
 	instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -632,7 +632,7 @@ InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUs
  * of them sees it as part of its total from then on.  For EXPLAIN, the usage
  * is also attributed to the entry right below each running query entry on the
  * stack, i.e. what ran that statement, if it keeps a worker part for that,
- * which only plan nodes do (see Instrumentation.nested_worker_usage).
+ * which plan nodes and triggers do (see Instrumentation.nested_worker_usage).
  *
  * If the entry is not running, e.g. because the query's executor shutdown and
  * with it the import was deferred until after it was finalized, only the
@@ -701,11 +701,11 @@ InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
  * worker reports its activity to the cumulative statistics system itself.
  *
  * For EXPLAIN, the usage is additionally attributed to the entry that is
- * current on the stack, if it keeps a worker part for that, which only plan
- * nodes do: that is the node that ran the nested statement whose workers
- * these are, and the node the statement's own counters go to as well.  If a
- * query or plain entry (e.g. planning) is current, no node is responsible,
- * matching where those counters go.
+ * current on the stack, if it keeps a worker part for that, which plan nodes
+ * and triggers do: that is the node or trigger that ran the nested statement
+ * whose workers these are, and the entry the statement's own counters go to
+ * as well.  If a query or plain entry (e.g. planning) is current, no node or
+ * trigger is responsible, matching where those counters go.
  */
 void
 InstrAccumParallelQuery(QueryInstrumentation *qinstr,
@@ -967,25 +967,46 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 /*
  * Trigger instrumentation handling
  *
- * Only the time spent in a trigger and the number of times it fired are
- * tracked per trigger.  A trigger has no stack entry of its own, so its
- * buffer/WAL usage is recorded in whichever entry is current while it runs:
- * the plan node that fired it for BEFORE and INSTEAD OF triggers, and the
- * query entry for AFTER triggers, which run once the plan has completed.
+ * Besides the time spent in a trigger and the number of times it fired, the
+ * buffer/WAL usage of a trigger is tracked when requested.  For that, the
+ * trigger's entry goes on the instrumentation stack while the trigger runs,
+ * and is registered as a child of the query entry like a plan node, so that
+ * it counts towards the query's total, also if a firing is cut short by an
+ * error.  Its counters accumulate across all firings and are what EXPLAIN
+ * shows for the trigger; they are not included in the plan node that fired
+ * the trigger, which only measures the time spent in it.
  */
 TriggerInstrumentation *
-InstrAllocTrigger(int n, int instrument_options)
+InstrAllocTrigger(QueryInstrumentation *qinstr, int n, int instrument_options)
 {
-	TriggerInstrumentation *tginstr = palloc0_array(TriggerInstrumentation, n);
+	TriggerInstrumentation *tginstr;
 	int			i;
 
 	/*
-	 * Only request timing: the buffer/WAL usage of a trigger is recorded in
-	 * whichever entry is current while it runs.
+	 * Allocate in the query's dedicated instrumentation context, since the
+	 * abort handling accesses registered entries after the per-query memory
+	 * may be gone.
 	 */
+	Assert(qinstr != NULL && qinstr->instr_cxt != NULL);
+	tginstr = MemoryContextAllocZero(qinstr->instr_cxt,
+									 n * sizeof(TriggerInstrumentation));
+
 	for (i = 0; i < n; i++)
-		InstrInitOptions(&tginstr[i].instr,
-						 instrument_options & INSTRUMENT_TIMER);
+	{
+		InstrInitOptions(&tginstr[i].instr, instrument_options);
+
+		/*
+		 * Like a plan node, a trigger can run statements that launch parallel
+		 * workers, whose usage is shown with the trigger, see
+		 * InstrAccumParallelQuery.  Allocate the worker part up front, so
+		 * that importing worker usage never needs to allocate.
+		 */
+		if (tginstr[i].instr.need_stack)
+			tginstr[i].instr.nested_worker_usage =
+				MemoryContextAllocZero(qinstr->instr_cxt, sizeof(InstrUsage));
+
+		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
+	}
 
 	return tginstr;
 }
@@ -993,8 +1014,6 @@ InstrAllocTrigger(int n, int instrument_options)
 void
 InstrStartTrigger(TriggerInstrumentation *tginstr)
 {
-	Assert(!tginstr->instr.need_stack);
-
 	InstrStart(&tginstr->instr);
 }
 

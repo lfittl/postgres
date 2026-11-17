@@ -1192,6 +1192,33 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 			ExplainPropertyInteger("Calls", NULL, tginstr->firings, es);
 		}
 
+		/*
+		 * Show buffer/WAL usage of the trigger, across all of its firings,
+		 * including what the parallel workers of statements it ran did
+		 */
+		if (es->buffers || es->wal)
+		{
+			BufferUsage bufusage = tginstr->instr.bufusage;
+			WalUsage	walusage = tginstr->instr.walusage;
+
+			if (tginstr->instr.nested_worker_usage)
+			{
+				BufferUsageAdd(&bufusage,
+							   &tginstr->instr.nested_worker_usage->bufusage);
+				WalUsageAdd(&walusage,
+							&tginstr->instr.nested_worker_usage->walusage);
+			}
+
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+				es->indent++;
+			if (es->buffers)
+				show_buffer_usage(es, &bufusage);
+			if (es->wal)
+				show_wal_usage(es, &walusage);
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+				es->indent--;
+		}
+
 		if (conname)
 			pfree(conname);
 

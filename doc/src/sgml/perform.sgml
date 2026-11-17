@@ -1151,6 +1151,10 @@ EXPLAIN UPDATE gtest_parent SET f1 = CURRENT_DATE WHERE f2 = 101;
     <literal>AFTER</literal> triggers are fired after completion of the whole plan.
     The total time spent in each trigger
     (either <literal>BEFORE</literal> or <literal>AFTER</literal>) is also shown separately.
+    With the <literal>BUFFERS</literal> and <literal>WAL</literal> options,
+    the buffer and WAL usage of each trigger is shown separately as well,
+    but unlike the time, the usage of <literal>BEFORE</literal> triggers is
+    not included in the related node.
     Note that deferred constraint triggers will not be executed
     until end of transaction and are thus not considered at all by
     <command>EXPLAIN ANALYZE</command>.

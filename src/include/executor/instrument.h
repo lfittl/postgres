@@ -125,8 +125,8 @@ typedef struct Instrumentation
 	 * InstrAccumParallelQuery). Kept apart from the counters above, which
 	 * only ever describe this process' activity and are accumulated to the
 	 * session totals.  Only set up for entries that want such usage
-	 * attributed to them, i.e. plan nodes with buffer/WAL instrumentation,
-	 * NULL otherwise.
+	 * attributed to them, i.e. plan nodes and triggers with buffer/WAL
+	 * instrumentation, NULL otherwise.
 	 */
 	InstrUsage *nested_worker_usage;
 } Instrumentation;
@@ -137,7 +137,7 @@ typedef struct Instrumentation
  * A QueryInstrumentation is the entry for a statement, whether a query or a
  * utility command, or for a comparable unit of work such as a parallel
  * worker's run or VACUUM of one relation.  It is referred to as a query entry
- * throughout, as opposed to the plan node and plain entries.
+ * throughout, as opposed to the plan node, trigger and plain entries.
  *
  * Usage:
  * - Allocate on the heap using InstrQueryAlloc (required for abort handling)
@@ -169,9 +169,10 @@ typedef struct Instrumentation
  * InstrQueryCurrent).  That is where work done by parallel workers is
  * imported.  A statement run while another one executes (a nested statement,
  * e.g. through SPI from a function) accumulates to whatever entry is current
- * when it is stopped, typically the plan node that ran it, so that the
- * enclosing statement sees its activity like any other; a nested statement
- * without an entry of its own writes to that entry directly while it runs.
+ * when it is stopped, typically the plan node or trigger entry that ran it,
+ * so that the enclosing statement sees its activity like any other; a nested
+ * statement without an entry of its own writes to that entry directly while
+ * it runs.
  *
  * Besides the process' own activity in instr, a query entry collects what
  * parallel workers did on behalf of the statement (worker_usage, see
@@ -222,19 +223,19 @@ typedef struct QueryInstrumentation
 
 	/*
 	 * Dedicated memory context for all instrumentation allocations belonging
-	 * to this query (i.e. node instrumentation). Initially a child of the
-	 * context current at InstrQueryAlloc, moved under TopMemoryContext by
-	 * InstrQueryStart while the ResourceOwner is responsible for it (so it
-	 * survives transaction abort for the cleanup), and reassigned to the
-	 * current memory context on InstrQueryStopFinalize. NULL for entries set
-	 * up with InstrQueryInit.
+	 * to this query (node instrumentation, trigger instrumentation, etc.).
+	 * Initially a child of the context current at InstrQueryAlloc, moved
+	 * under TopMemoryContext by InstrQueryStart while the ResourceOwner is
+	 * responsible for it (so it survives transaction abort for the cleanup),
+	 * and reassigned to the current memory context on InstrQueryStopFinalize.
+	 * NULL for entries set up with InstrQueryInit.
 	 */
 	MemoryContext instr_cxt;
 
 	/*
 	 * Child entries whose counters are part of the statement's total, see
-	 * InstrQueryPassOnUsage. Contains the node instrumentation entries linked
-	 * via instr.child_node.
+	 * InstrQueryPassOnUsage. Contains both node and trigger instrumentation
+	 * entries linked via instr.child_node.
 	 */
 	dlist_head	children;
 } QueryInstrumentation;
@@ -280,6 +281,14 @@ typedef struct WorkerNodeInstrumentation
 	pg_attribute_counted_by(num_workers) NodeInstrumentation instrument[FLEXIBLE_ARRAY_MEMBER];
 } WorkerNodeInstrumentation;
 
+/*
+ * Trigger instrumentation
+ *
+ * Measures time and, when requested, buffer/WAL usage across all firings of
+ * a trigger.  Like a plan node entry, the entry is a child of the query
+ * entry, whose total it is part of, and its counters are what EXPLAIN shows
+ * for the trigger.
+ */
 typedef struct TriggerInstrumentation
 {
 	Instrumentation instr;
@@ -407,7 +416,8 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
-extern TriggerInstrumentation *InstrAllocTrigger(int n, int instrument_options);
+extern TriggerInstrumentation *InstrAllocTrigger(QueryInstrumentation *qinstr,
+												 int n, int instrument_options);
 extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings);
 
