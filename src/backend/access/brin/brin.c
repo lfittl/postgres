@@ -2434,8 +2434,8 @@ _brin_begin_parallel(BrinBuildState *buildstate, Relation heap, Relation index,
 	 * and PARALLEL_KEY_BUFFER_USAGE.
 	 *
 	 * If there are no extensions loaded that care, we could skip this.  We
-	 * have no way of knowing whether anyone's looking at pgWalUsage or
-	 * pgBufferUsage, so do it unconditionally.
+	 * have no way of knowing whether anyone's looking at instrumentation, so
+	 * do it unconditionally.
 	 */
 	shm_toc_estimate_chunk(&pcxt->estimator,
 						   mul_size(sizeof(WalUsage), pcxt->nworkers));
@@ -2573,7 +2573,8 @@ _brin_end_parallel(BrinLeader *brinleader, BrinBuildState *state)
 	 * or we might get incomplete data.)
 	 */
 	for (i = 0; i < brinleader->pcxt->nworkers_launched; i++)
-		InstrAccumParallelQuery(&brinleader->bufferusage[i], &brinleader->walusage[i]);
+		InstrAccumParallelQuery(InstrQueryCurrent(),
+								&brinleader->bufferusage[i], &brinleader->walusage[i]);
 
 	/* Free last reference to MVCC snapshot, if one was used */
 	if (IsMVCCSnapshot(brinleader->snapshot))
@@ -2887,6 +2888,7 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	Relation	indexRel;
 	LOCKMODE	heapLockmode;
 	LOCKMODE	indexLockmode;
+	QueryInstrumentation *instr;
 	WalUsage   *walusage;
 	BufferUsage *bufferusage;
 	int			sortmem;
@@ -2936,7 +2938,7 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	tuplesort_attach_shared(sharedsort, seg);
 
 	/* Prepare to track buffer usage during parallel execution */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Might as well use reliable figure when doling out maintenance_work_mem
@@ -2951,7 +2953,8 @@ _brin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* Report WAL/buffer usage during parallel execution */
 	bufferusage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	walusage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&bufferusage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &bufferusage[ParallelWorkerNumber],
 						  &walusage[ParallelWorkerNumber]);
 
 	index_close(indexRel, indexLockmode);

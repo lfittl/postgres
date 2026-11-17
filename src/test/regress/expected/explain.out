@@ -261,6 +261,69 @@ explain_filter
 ]
 (1 row)
 \a
+-- Index scans track table buffer accesses separately; make sure EXPLAIN
+-- (BUFFERS) copes without ANALYZE, i.e. when the plan was never run
+select explain_filter('explain (buffers, costs off) select * from tenk1 where unique1 = 42');
+             explain_filter              
+-----------------------------------------
+ Index Scan using tenk1_unique1 on tenk1
+   Index Cond: (unique1 = N)
+(2 rows)
+
+\a
+select explain_filter('explain (buffers, costs off, format json) select * from tenk1 where unique1 = 42');
+explain_filter
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "tenk1_unique1",
+      "Relation Name": "tenk1",
+      "Alias": "tenk1",
+      "Disabled": false,
+      "Index Cond": "(unique1 = N)",
+      "Table Buffers": {
+        "Shared Hit Blocks": N,
+        "Shared Read Blocks": N,
+        "Shared Dirtied Blocks": N,
+        "Shared Written Blocks": N,
+        "Local Hit Blocks": N,
+        "Local Read Blocks": N,
+        "Local Dirtied Blocks": N,
+        "Local Written Blocks": N,
+        "Temp Read Blocks": N,
+        "Temp Written Blocks": N
+      },
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    },
+    "Planning": {
+      "Shared Hit Blocks": N,
+      "Shared Read Blocks": N,
+      "Shared Dirtied Blocks": N,
+      "Shared Written Blocks": N,
+      "Local Hit Blocks": N,
+      "Local Read Blocks": N,
+      "Local Dirtied Blocks": N,
+      "Local Written Blocks": N,
+      "Temp Read Blocks": N,
+      "Temp Written Blocks": N
+    }
+  }
+]
+(1 row)
+\a
 -- Check expansion of window definitions
 select explain_filter('explain verbose select sum(unique1) over w, sum(unique2) over (w order by hundred), sum(tenthous) over (w order by hundred) from tenk1 window w as (partition by ten)');
                                             explain_filter                                             
@@ -869,3 +932,470 @@ select explain_filter('explain (analyze,buffers off,costs off) select count(*) f
 (5 rows)
 
 reset work_mem;
+-- EXPLAIN (ANALYZE, BUFFERS) should report buffer usage from PL/pgSQL
+-- EXCEPTION blocks, even after subtransaction rollback.
+CREATE TEMP TABLE explain_exc_tab (a int, b char(20));
+INSERT INTO explain_exc_tab VALUES (0, 'zzz');
+CREATE FUNCTION explain_exc_func() RETURNS void AS $$
+DECLARE
+    v int;
+BEGIN
+    WITH ins AS (INSERT INTO explain_exc_tab VALUES (1, 'aaa') RETURNING a)
+    SELECT a / 0 INTO v FROM ins;
+EXCEPTION WHEN division_by_zero THEN
+    NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION check_explain_exception_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    total_buffers int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT explain_exc_func()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    total_buffers :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+    RETURN total_buffers > 0;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_explain_exception_buffers() AS exception_buffers_visible;
+ exception_buffers_visible 
+---------------------------
+ t
+(1 row)
+
+-- Also test with nested EXPLAIN ANALYZE (two levels of instrumentation)
+CREATE FUNCTION check_explain_exception_buffers_nested() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    total_buffers int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT check_explain_exception_buffers()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    total_buffers :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+    RETURN total_buffers > 0;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_explain_exception_buffers_nested() AS exception_buffers_nested_visible;
+ exception_buffers_nested_visible 
+----------------------------------
+ t
+(1 row)
+
+DROP FUNCTION check_explain_exception_buffers_nested;
+DROP FUNCTION check_explain_exception_buffers;
+DROP FUNCTION explain_exc_func;
+DROP TABLE explain_exc_tab;
+-- Cursor instrumentation test.
+-- Verify that buffer usage is correctly tracked through cursor execution paths.
+-- Non-scrollable cursors exercise ExecShutdownNode after each ExecutorRun
+-- (EXEC_FLAG_BACKWARD is not set), while for scrollable cursors
+-- ExecShutdownNode never runs and nodes are only cleaned up in ExecutorEnd.
+-- In both cases, buffer usage from the inner cursor scan should be
+-- correctly reported.  The table is temporary, so that its local buffer
+-- accesses can be told apart from the shared buffer accesses of catalog
+-- lookups, and compared exactly.
+CREATE TEMP TABLE cursor_buf_test AS SELECT * FROM tenk1;
+CREATE FUNCTION cursor_noscroll_scan() RETURNS bigint AS $$
+DECLARE
+    cur NO SCROLL CURSOR FOR SELECT * FROM cursor_buf_test;
+    rec RECORD;
+    cnt bigint := 0;
+BEGIN
+    OPEN cur;
+    LOOP
+        FETCH NEXT FROM cur INTO rec;
+        EXIT WHEN NOT FOUND;
+        cnt := cnt + 1;
+    END LOOP;
+    CLOSE cur;
+    RETURN cnt;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION cursor_scroll_scan() RETURNS bigint AS $$
+DECLARE
+    cur SCROLL CURSOR FOR SELECT * FROM cursor_buf_test;
+    rec RECORD;
+    cnt bigint := 0;
+BEGIN
+    OPEN cur;
+    LOOP
+        FETCH NEXT FROM cur INTO rec;
+        EXIT WHEN NOT FOUND;
+        cnt := cnt + 1;
+    END LOOP;
+    CLOSE cur;
+    RETURN cnt;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION check_cursor_explain_buffers() RETURNS TABLE(noscroll_ok boolean, scroll_ok boolean) AS $$
+DECLARE
+    plan_json json;
+    node json;
+    direct_buf int;
+    noscroll_buf int;
+    scroll_buf int;
+    pages int;
+BEGIN
+    pages := pg_relation_size('cursor_buf_test') / current_setting('block_size')::int;
+
+    -- Direct scan: get leaf Seq Scan node buffers.  As the first scan of the
+    -- table this can access more blocks than the table has pages, since it
+    -- also sets hint bits and updates the visibility map, which the later
+    -- scans then do not have to repeat.
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT * FROM cursor_buf_test' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    direct_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Non-scrollable cursor path: ExecShutdownNode runs after each ExecutorRun
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT cursor_noscroll_scan()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    noscroll_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Scrollable cursor path: ExecShutdownNode is skipped
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT cursor_scroll_scan()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    scroll_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+
+    -- Both cursor paths should report exactly one local buffer access per
+    -- page of the table, neither lost nor double-counted
+    RETURN QUERY SELECT
+        (direct_buf >= pages AND noscroll_buf = pages),
+        (direct_buf >= pages AND scroll_buf = pages);
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM check_cursor_explain_buffers();
+ noscroll_ok | scroll_ok 
+-------------+-----------
+ t           | t
+(1 row)
+
+DROP FUNCTION check_cursor_explain_buffers;
+DROP FUNCTION cursor_noscroll_scan;
+DROP FUNCTION cursor_scroll_scan;
+DROP TABLE cursor_buf_test;
+-- Test buffer usage of CTEs.
+-- The subplan of a CTE runs when a CTE Scan pulls tuples from it, so its
+-- buffer usage should be included in the CTE Scan and in the nodes above it,
+-- once.  With several scans of the same CTE it is reported on one of them.
+CREATE TEMP TABLE cte_buf_test AS SELECT a FROM generate_series(1, 1000) a;
+CREATE FUNCTION check_cte_explain_buffers(query text,
+    OUT cte_scans int, OUT on_cte_scan boolean, OUT on_parent boolean,
+    OUT on_top boolean) AS $$
+DECLARE
+    plan jsonb;
+    seq_buf int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON) ' || query
+        INTO plan;
+    plan := plan->0->'Plan';
+
+    SELECT (n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int
+        INTO seq_buf
+        FROM jsonb_path_query(plan, 'strict $.**?(@."Node Type" == "Seq Scan")') n;
+
+    SELECT count(*),
+           seq_buf > 0 AND
+           sum((n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int) = seq_buf
+        INTO cte_scans, on_cte_scan
+        FROM jsonb_path_query(plan, 'strict $.**?(@."Node Type" == "CTE Scan")') n;
+
+    -- The node between the top node, which the CTE is attached to, and the
+    -- CTE Scan(s)
+    SELECT (n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int = seq_buf
+        INTO on_parent
+        FROM jsonb_path_query(plan, '$.Plans[*]?(@."Parent Relationship" != "InitPlan")') n;
+
+    on_top := (plan->>'Local Hit Blocks')::int + (plan->>'Local Read Blocks')::int = seq_buf;
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM check_cte_explain_buffers($$
+    WITH c AS MATERIALIZED (SELECT * FROM cte_buf_test)
+    SELECT * FROM c ORDER BY a LIMIT 1$$);
+ cte_scans | on_cte_scan | on_parent | on_top 
+-----------+-------------+-----------+--------
+         1 | t           | t         | t
+(1 row)
+
+SELECT * FROM check_cte_explain_buffers($$
+    WITH c AS MATERIALIZED (SELECT * FROM cte_buf_test)
+    SELECT * FROM (SELECT count(*) FROM c c1, c c2 WHERE c1.a = c2.a) s LIMIT 1$$);
+ cte_scans | on_cte_scan | on_parent | on_top 
+-----------+-------------+-----------+--------
+         2 | t           | t         | t
+(1 row)
+
+DROP FUNCTION check_cte_explain_buffers;
+DROP TABLE cte_buf_test;
+-- Test trigger instrumentation.
+-- Buffer usage of a BEFORE ROW trigger should be reported on the plan node
+-- that fired it.  The trigger scans a multi-page temporary table, so the
+-- ModifyTable node must show at least one local block access per page of it.
+CREATE TEMP TABLE trig_test_tab (a int);
+CREATE TEMP TABLE trig_work_tab (a int);
+INSERT INTO trig_work_tab SELECT generate_series(1, 10000);
+CREATE FUNCTION trig_test_func() RETURNS trigger AS $$
+BEGIN
+    PERFORM * FROM trig_work_tab;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trig_test_trig
+    BEFORE INSERT ON trig_test_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_test_func();
+CREATE FUNCTION check_trigger_explain_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    trig json;
+    node_buf int;
+    pages int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        INSERT INTO trig_test_tab VALUES (1)' INTO plan_json;
+    node := plan_json->0->'Plan';
+    trig := plan_json->0->'Triggers'->0;
+    node_buf :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0);
+    pages := pg_relation_size('trig_work_tab') / current_setting('block_size')::int;
+    RETURN COALESCE((trig->>'Calls')::int, 0) = 1 AND
+        pages > 1 AND node_buf >= pages;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_trigger_explain_buffers() AS trigger_buffers_visible;
+ trigger_buffers_visible 
+-------------------------
+ t
+(1 row)
+
+-- The buffer usage of a trigger is also reported for the trigger itself,
+-- whether it is a BEFORE or an AFTER trigger.  AFTER triggers fire once the
+-- plan has completed, so their usage is not part of any plan node.
+CREATE FUNCTION check_trigger_own_buffers(
+    OUT calls int, OUT on_trigger boolean, OUT on_node boolean) AS $$
+DECLARE
+    plan_json json;
+    node json;
+    trig json;
+    pages int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        INSERT INTO trig_test_tab VALUES (1)' INTO plan_json;
+    node := plan_json->0->'Plan';
+    trig := plan_json->0->'Triggers'->0;
+    pages := pg_relation_size('trig_work_tab') / current_setting('block_size')::int;
+    calls := (trig->>'Calls')::int;
+    on_trigger :=
+        COALESCE((trig->>'Local Hit Blocks')::int, 0) +
+        COALESCE((trig->>'Local Read Blocks')::int, 0) >= pages;
+    on_node :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0) >= pages;
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM check_trigger_own_buffers();
+ calls | on_trigger | on_node 
+-------+------------+---------
+     1 | t          | t
+(1 row)
+
+DROP TRIGGER trig_test_trig ON trig_test_tab;
+CREATE TRIGGER trig_test_trig
+    AFTER INSERT ON trig_test_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_test_func();
+SELECT * FROM check_trigger_own_buffers();
+ calls | on_trigger | on_node 
+-------+------------+---------
+     1 | t          | f
+(1 row)
+
+DROP FUNCTION check_trigger_own_buffers;
+DROP FUNCTION check_trigger_explain_buffers;
+DROP TRIGGER trig_test_trig ON trig_test_tab;
+DROP FUNCTION trig_test_func;
+DROP TABLE trig_test_tab;
+DROP TABLE trig_work_tab;
+-- EXPLAIN (ANALYZE, BUFFERS) should report buffer usage of parallel workers
+-- launched by a nested statement on the plan node that ran the function.
+-- With the leader not participating, the workers do all the scanning, so the
+-- node must show at least one block access per page of the table (given a
+-- sequential scan, which is forced so that the page count is a known
+-- quantity).
+CREATE FUNCTION nested_parallel_count() RETURNS bigint AS $$
+BEGIN
+    RETURN (SELECT count(*) FROM tenk1);
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION check_nested_parallel_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    node_buf int;
+    pages int;
+BEGIN
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_indexonlyscan = off;
+    SET LOCAL enable_bitmapscan = off;
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT nested_parallel_count()' INTO plan_json;
+    node := plan_json->0->'Plan';
+    node_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+    pages := pg_relation_size('tenk1') / current_setting('block_size')::int;
+    RETURN node_buf >= pages;
+END;
+$$ LANGUAGE plpgsql;
+SELECT check_nested_parallel_buffers() AS nested_parallel_buffers_on_node;
+ nested_parallel_buffers_on_node 
+---------------------------------
+ t
+(1 row)
+
+DROP FUNCTION check_nested_parallel_buffers;
+DROP FUNCTION nested_parallel_count;
+-- EXPLAIN (ANALYZE, BUFFERS) should report the buffer usage of a parallel
+-- scan on the scan node, combined across the leader and its workers.  Each
+-- page of the table is scanned by exactly one process, so with a sequential
+-- scan the node must show exactly one block access per page, however many
+-- workers were launched.  The Gather node above includes its children.
+CREATE FUNCTION check_parallel_scan_buffers()
+    RETURNS TABLE(is_parallel_scan boolean, scan_ok boolean, gather_ok boolean) AS $$
+DECLARE
+    plan_json json;
+    node json;
+    gather json;
+    scan_buf int;
+    gather_buf int;
+    pages int;
+BEGIN
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_indexonlyscan = off;
+    SET LOCAL enable_bitmapscan = off;
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(*) FROM tenk1' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        IF node->>'Node Type' = 'Gather' THEN
+            gather := node;
+        END IF;
+        node := node->'Plans'->0;
+    END LOOP;
+    scan_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+    gather_buf :=
+        COALESCE((gather->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((gather->>'Shared Read Blocks')::int, 0);
+    pages := pg_relation_size('tenk1') / current_setting('block_size')::int;
+    RETURN QUERY SELECT
+        (node->>'Node Type' = 'Seq Scan' AND (node->>'Parallel Aware')::boolean),
+        scan_buf = pages,
+        gather_buf >= scan_buf;
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM check_parallel_scan_buffers();
+ is_parallel_scan | scan_ok | gather_ok 
+------------------+---------+-----------
+ t                | t       | t
+(1 row)
+
+DROP FUNCTION check_parallel_scan_buffers;
+-- Parallel index scan buffer usage.
+-- Table accesses of an index scan are tracked separately from the index
+-- accesses, and parallel workers report them to the leader separately as
+-- well.  Verify that the total shown for the scan node matches between a
+-- serial and a parallel execution where only workers do the scanning.
+CREATE TABLE par_idx_buf_test AS SELECT * FROM tenk1;
+CREATE INDEX ON par_idx_buf_test (unique1);
+VACUUM ANALYZE par_idx_buf_test;
+CREATE FUNCTION check_parallel_indexscan_buffers() RETURNS boolean AS $$
+DECLARE
+    plan_json json;
+    node json;
+    serial_buf int;
+    parallel_buf int;
+BEGIN
+    -- Serial index scan: get the leaf scan node buffers as baseline
+    SET LOCAL max_parallel_workers_per_gather = 0;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(stringu1) FROM par_idx_buf_test WHERE unique1 >= 0' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    IF node->>'Node Type' <> 'Index Scan' THEN
+        RAISE EXCEPTION 'expected Index Scan, got %', node->>'Node Type';
+    END IF;
+    serial_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    -- Parallel index scan with only workers scanning
+    SET LOCAL parallel_setup_cost = 0;
+    SET LOCAL parallel_tuple_cost = 0;
+    SET LOCAL min_parallel_index_scan_size = 0;
+    SET LOCAL min_parallel_table_scan_size = 0;
+    SET LOCAL max_parallel_workers_per_gather = 2;
+    SET LOCAL parallel_leader_participation = off;
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        SELECT count(stringu1) FROM par_idx_buf_test WHERE unique1 >= 0' INTO plan_json;
+    node := plan_json->0->'Plan';
+    WHILE node->'Plans' IS NOT NULL LOOP
+        node := node->'Plans'->0;
+    END LOOP;
+    IF node->>'Node Type' <> 'Index Scan' OR NOT (node->>'Parallel Aware')::bool THEN
+        RAISE EXCEPTION 'expected Parallel Index Scan, got %', node->>'Node Type';
+    END IF;
+    parallel_buf :=
+        COALESCE((node->>'Shared Hit Blocks')::int, 0) +
+        COALESCE((node->>'Shared Read Blocks')::int, 0);
+
+    -- Workers may each fetch some heap pages the other also fetched, so
+    -- allow for a little slack, but the totals must be in the same ballpark.
+    RETURN parallel_buf >= serial_buf * 0.9 AND parallel_buf <= serial_buf * 1.5;
+END;
+$$ LANGUAGE plpgsql;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexonlyscan = off;
+SELECT check_parallel_indexscan_buffers() AS parallel_indexscan_buffers_match;
+ parallel_indexscan_buffers_match 
+----------------------------------
+ t
+(1 row)
+
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_indexonlyscan;
+DROP FUNCTION check_parallel_indexscan_buffers;
+DROP TABLE par_idx_buf_test;

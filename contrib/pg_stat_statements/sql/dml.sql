@@ -93,3 +93,36 @@ SELECT
 FROM pg_stat_statements;
 
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+-- Buffer usage of an AFTER trigger should be counted towards the statement
+-- that fired it.  AFTER triggers run once the plan has finished executing, so
+-- this usage is not part of any plan node.  The trigger scans a multi-page
+-- temporary table, so the statement must show at least one local block access
+-- per page of it.
+CREATE TEMP TABLE pgss_trig_tab (a int);
+CREATE TEMP TABLE pgss_trig_work_tab (a int);
+INSERT INTO pgss_trig_work_tab SELECT generate_series(1, 10000);
+CREATE FUNCTION pgss_trig_func() RETURNS trigger AS $$
+BEGIN
+    PERFORM count(*) FROM pgss_trig_work_tab;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER pgss_trig AFTER INSERT ON pgss_trig_tab
+    FOR EACH ROW EXECUTE FUNCTION pgss_trig_func();
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+
+INSERT INTO pgss_trig_tab VALUES (1);
+
+SELECT query, calls,
+  local_blks_hit + local_blks_read >=
+    pg_relation_size('pgss_trig_work_tab') / current_setting('block_size')::int
+    AS has_trigger_block_accesses
+  FROM pg_stat_statements
+  WHERE query LIKE 'INSERT INTO pgss_trig_tab%'
+  ORDER BY query COLLATE "C";
+
+DROP TABLE pgss_trig_tab;
+DROP TABLE pgss_trig_work_tab;
+DROP FUNCTION pgss_trig_func;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
