@@ -916,7 +916,8 @@ ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 					  resultRelationDesc,
 					  rti,
 					  NULL,
-					  estate->es_instrument);
+					  estate->es_instrument,
+					  estate->es_query_instr);
 
 	if (estate->es_result_relations == NULL)
 		estate->es_result_relations = palloc0_array(ResultRelInfo *,

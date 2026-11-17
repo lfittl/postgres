@@ -254,7 +254,8 @@ extern void InitResultRelInfo(ResultRelInfo *resultRelInfo,
 							  Relation resultRelationDesc,
 							  Index resultRelationIndex,
 							  ResultRelInfo *partition_root_rri,
-							  int instrument_options);
+							  int instrument_options,
+							  QueryInstrumentation *qinstr);
 extern ResultRelInfo *ExecGetTriggerResultRel(EState *estate, Oid relid,
 											  ResultRelInfo *rootRelInfo);
 extern List *ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo);

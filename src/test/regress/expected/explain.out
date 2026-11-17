@@ -1125,6 +1125,48 @@ SELECT check_trigger_explain_buffers() AS trigger_buffers_visible;
  t
 (1 row)
 
+-- The buffer usage of a trigger is also reported for the trigger itself,
+-- whether it is a BEFORE or an AFTER trigger.  AFTER triggers fire once the
+-- plan has completed, so their usage is not part of any plan node.
+CREATE FUNCTION check_trigger_own_buffers(
+    OUT calls int, OUT on_trigger boolean, OUT on_node boolean) AS $$
+DECLARE
+    plan_json json;
+    node json;
+    trig json;
+    pages int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON)
+        INSERT INTO trig_test_tab VALUES (1)' INTO plan_json;
+    node := plan_json->0->'Plan';
+    trig := plan_json->0->'Triggers'->0;
+    pages := pg_relation_size('trig_work_tab') / current_setting('block_size')::int;
+    calls := (trig->>'Calls')::int;
+    on_trigger :=
+        COALESCE((trig->>'Local Hit Blocks')::int, 0) +
+        COALESCE((trig->>'Local Read Blocks')::int, 0) >= pages;
+    on_node :=
+        COALESCE((node->>'Local Hit Blocks')::int, 0) +
+        COALESCE((node->>'Local Read Blocks')::int, 0) >= pages;
+END;
+$$ LANGUAGE plpgsql;
+SELECT * FROM check_trigger_own_buffers();
+ calls | on_trigger | on_node 
+-------+------------+---------
+     1 | t          | t
+(1 row)
+
+DROP TRIGGER trig_test_trig ON trig_test_tab;
+CREATE TRIGGER trig_test_trig
+    AFTER INSERT ON trig_test_tab
+    FOR EACH ROW EXECUTE FUNCTION trig_test_func();
+SELECT * FROM check_trigger_own_buffers();
+ calls | on_trigger | on_node 
+-------+------------+---------
+     1 | t          | f
+(1 row)
+
+DROP FUNCTION check_trigger_own_buffers;
 DROP FUNCTION check_trigger_explain_buffers;
 DROP TRIGGER trig_test_trig ON trig_test_tab;
 DROP FUNCTION trig_test_func;

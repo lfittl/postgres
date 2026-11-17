@@ -51,9 +51,10 @@ QueryInstrumentation   Extends Instrumentation for query-level tracking.  When
 NodeInstrumentation    Extends Instrumentation for per-plan-node statistics
                        (startup time, tuple counts, loop counts, etc).
 
-TriggerInstrumentation Extends Instrumentation with a firing count.  Only
-                       tracks time: a trigger's buffer/WAL usage goes to the
-                       entry that is current while it runs.
+TriggerInstrumentation Extends Instrumentation with a firing count and the
+                       trigger's total buffer/WAL usage.  After each firing,
+                       the usage is also passed on to the entry that fired
+                       the trigger.
 
 
 Stack-based instrumentation
@@ -143,12 +144,12 @@ or transaction-lifetime memory).  Query entries are always on the stack while
 started, whatever options were requested, so that
 the innermost query entry on the stack is the innermost instrumented statement
 that is executing (InstrQueryCurrent).  Every entry carries a kind (InstrKind)
-to tell query entries apart from plan node and plain entries.
+to tell query entries apart from plan node, trigger and plain entries.
 
 A statement run while another one executes, e.g. through SPI from a function
 or a trigger, or a utility command run from PL/pgSQL, is a nested statement.
 If it has an entry, that entry accumulates to whatever entry is current when
-it is finalized, typically the plan node that ran it, so that
+it is finalized, typically the plan node or trigger entry that ran it, so that
 the enclosing statement sees its activity like any other.  A nested statement
 without an entry, the common case e.g. under pg_stat_statements with track =
 top, is cheaper still: its activity goes straight to the current entry while
@@ -238,13 +239,20 @@ reported for the last time (see pgstat_shutdown_hook).
 
 Both mechanisms add overhead, so neither is suitable for high-frequency
 instrumentation like per-node measurements in the executor.  Instead,
-plan node children rely on their parent QueryInstrumentation for abort
-safety: they are allocated in the parent's memory context and
+plan node and trigger children rely on their parent QueryInstrumentation
+for abort safety: they are allocated in the parent's memory context and
 registered in its unfinalized-entries list, so the parent's abort handler
 recovers their data automatically.  In normal execution, the executor
 finalizes all of them from the same list at ExecutorFinish
 (InstrQueryFinalizeChildren), so the normal and the abort path cover exactly
 the same entries.
+
+Trigger entries differ from plan node entries in one respect: a trigger passes
+its buffer/WAL usage on to the entry that fired it after each firing
+(InstrStopTrigger), so that this entry accounts for it the same way it would
+without per-trigger tracking, and keeps its own totals for EXPLAIN apart from
+the stack.  A trigger entry therefore only ever holds the usage of a firing in
+progress, which is what the finalization recovers if that firing fails.
 
 Parallel Query
 --------------
@@ -257,9 +265,10 @@ leader imports these totals into the worker part of its query entry
 (InstrAccumParallelQuery), so that query-level consumers such as EXPLAIN and
 pg_stat_statements see the complete activity (InstrTotalUsage).  The worker
 part is kept apart from the leader's own activity and only ever passed on to
-an enclosing query entry (InstrQueryPassOnWorkerUsage), never to a plan node
-or plain entry, and never to the session totals in instr_top: each
-worker reports its own activity to the cumulative statistics system itself,
+an enclosing query entry (InstrQueryPassOnWorkerUsage), never to the counters
+of a plan node, trigger or plain entry, and never to the session totals in
+instr_top: each worker reports its own activity to the cumulative statistics
+system itself,
 so the leader must not report it again.  A query without an entry of its own,
 as well as parallel index builds and parallel vacuum, import into the
 innermost query entry on the stack (InstrQueryCurrent), i.e. the entry of the
@@ -300,7 +309,7 @@ Memory Handling
 Instrumentation objects that use the stack must survive until finalization
 runs, including the abort case.  To ensure this, QueryInstrumentation
 creates a dedicated "Instrumentation" MemoryContext (instr_cxt).  All child
-instrumentation (i.e. plan nodes) should be allocated in this context.
+instrumentation (nodes, triggers) should be allocated in this context.
 
 The parent of instr_cxt follows ownership.  It is created as a child of the
 context current at InstrQueryAlloc (the per-query context in the executor),

@@ -1191,6 +1191,19 @@ report_triggers(ResultRelInfo *rInfo, bool show_relname, ExplainState *es)
 			ExplainPropertyInteger("Calls", NULL, tginstr->firings, es);
 		}
 
+		/* Show buffer/WAL usage of the trigger, across all of its firings */
+		if (es->buffers || es->wal)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+				es->indent++;
+			if (es->buffers)
+				show_buffer_usage(es, &tginstr->bufusage);
+			if (es->wal)
+				show_wal_usage(es, &tginstr->walusage);
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+				es->indent--;
+		}
+
 		if (conname)
 			pfree(conname);
 

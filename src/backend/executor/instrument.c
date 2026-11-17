@@ -286,7 +286,7 @@ InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent)
 
 /*
  * Finalize all entries registered with InstrQueryRememberChild that have not
- * been finalized yet (i.e. plan nodes), accumulating each one's
+ * been finalized yet (plan nodes, triggers), accumulating each one's
  * buffer/WAL usage directly to the target.
  *
  * The executor calls this at ExecutorFinish with the query entry as the
@@ -323,13 +323,13 @@ InstrQueryFinalizeChildren(QueryInstrumentation *qinstr, Instrumentation *target
  * the statement it is nested in.
  *
  * Unlike the entry's own counters, which go to the current entry like those
- * of any other entry, the worker part must never reach a plan node or plain
- * entry: those accumulate to the session totals in instr_top
- * eventually, which only ever describe the process' own activity, since each
- * worker reports what it did itself.  So it is imported into the innermost
- * query entry on the stack instead, see InstrAccumParallelQuery, which also
- * takes care of attributing it to the plan node that ran this statement, for
- * EXPLAIN.
+ * of any other entry, the worker part must never reach the counters of a plan
+ * node, trigger or plain entry: those accumulate to the session totals in
+ * instr_top eventually, which only ever describe the process' own activity,
+ * since each worker reports what it did itself.  So it is imported into the
+ * innermost query entry on the stack instead, see InstrAccumParallelQuery,
+ * which also takes care of attributing it to the plan node that ran this
+ * statement, for EXPLAIN.
  */
 static void
 InstrQueryPassOnWorkerUsage(QueryInstrumentation *qinstr)
@@ -382,7 +382,7 @@ ResOwnerReleaseInstrumentation(Datum res)
 		Assert(!qinstr->instr.on_stack);
 	else
 	{
-		/* Accumulate the unfinalized child entries (plan nodes) */
+		/* Accumulate the unfinalized child entries (plan nodes, triggers) */
 		InstrQueryFinalizeChildren(qinstr, &qinstr->instr);
 
 		/*
@@ -415,7 +415,7 @@ InstrQueryAlloc(int instrument_options)
 	 * since the abort cleanup needs to access it after the caller's memory
 	 * may already be gone.
 	 *
-	 * All child instrumentation allocations (i.e. plan nodes) must be
+	 * All child instrumentation allocations (plan nodes, triggers) must be
 	 * allocated within this context to ensure correct clean up on abort.
 	 */
 	instr_cxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -645,23 +645,42 @@ InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
  * For EXPLAIN, the usage is additionally attributed to the plan node that is
  * current on the stack, if any, i.e. the node that ran the nested statement
  * whose workers these are.  That is the node the statement's own counters go
- * to as well.  A query or plain entry (e.g. planning) being current means
- * no node is responsible, matching where those counters go.  This runs during
- * abort cleanup too, where no memory can be allocated, which is why the
- * node's worker part is allocated up front.
+ * to as well.  If a trigger is current, the usage is added to the per-trigger
+ * totals, and the entry that fired the trigger is considered instead, since
+ * that is where the trigger passes its own counters on to (see
+ * InstrStopTrigger).  A query or plain entry (e.g. planning) being current
+ * means no node is responsible, matching where those counters go.  This runs
+ * during abort cleanup too, where no memory can be allocated, which is why
+ * the node's worker part is allocated up front.
  */
 void
 InstrAccumParallelQuery(QueryInstrumentation *qinstr,
 						const BufferUsage *bufusage, const WalUsage *walusage)
 {
+	Instrumentation *responsible = instr_stack.current;
+
 	if (qinstr == NULL)
 		return;
 
 	InstrQueryAddWorkerUsage(qinstr, bufusage, walusage);
 
-	if (instr_stack.current->kind == INSTR_KIND_NODE)
+	if (responsible->kind == INSTR_KIND_TRIGGER)
 	{
-		NodeInstrumentation *node = (NodeInstrumentation *) instr_stack.current;
+		TriggerInstrumentation *tginstr = (TriggerInstrumentation *) responsible;
+
+		BufferUsageAdd(&tginstr->bufusage, bufusage);
+		WalUsageAdd(&tginstr->walusage, walusage);
+
+		/* A trigger entry is on the stack, so there is one below it or none */
+		Assert(instr_stack.stack_size >= 1);
+		responsible = instr_stack.stack_size >= 2
+			? instr_stack.entries[instr_stack.stack_size - 2]
+			: &instr_top;
+	}
+
+	if (responsible->kind == INSTR_KIND_NODE)
+	{
+		NodeInstrumentation *node = (NodeInstrumentation *) responsible;
 
 		if (node->worker_usage != NULL)
 		{
@@ -914,29 +933,44 @@ InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add)
 /*
  * Trigger instrumentation handling
  *
- * Only the time spent in a trigger and the number of times it fired are
- * tracked per trigger.  A trigger has no stack entry of its own, so its
- * buffer/WAL usage is recorded in whichever entry is current while it runs:
- * the plan node that fired it for BEFORE and INSTEAD OF triggers, and the
- * query entry for AFTER triggers, which run once the plan has completed.
+ * Besides the time spent in a trigger and the number of times it fired, the
+ * buffer/WAL usage of a trigger is tracked when requested.  For that, the
+ * trigger's entry goes on the instrumentation stack while the trigger runs.
+ *
+ * Unlike plan nodes, a trigger entry does not keep what it captured until
+ * the end of the query: after each firing the usage is passed on to the
+ * entry that fired the trigger, and added to the per-trigger totals shown by
+ * EXPLAIN.  That way the trigger's activity is accounted for in the same
+ * place as without per-trigger tracking, i.e. the plan node that fired it for
+ * BEFORE and INSTEAD OF triggers, and the query entry for AFTER triggers,
+ * which run once the plan has completed.
+ *
+ * The entries are registered with the query entry like plan nodes are, so
+ * that a firing cut short by an error is not lost: what it did until then is
+ * still in the entry, and is accumulated to the query entry by the abort
+ * handling.
  */
 TriggerInstrumentation *
-InstrAllocTrigger(int n, int instrument_options)
+InstrAllocTrigger(QueryInstrumentation *qinstr, int instrument_options, int n)
 {
-	TriggerInstrumentation *tginstr = palloc0_array(TriggerInstrumentation, n);
+	TriggerInstrumentation *tginstr;
 	int			i;
 
 	/*
-	 * Only request timing. While tracking buffer/WAL usage per trigger would
-	 * be possible, its not shown separately at the moment, and enabling it
-	 * here needs more work: the trigger entries would have to go on the stack
-	 * stack and be handled like plan nodes (see InstrQueryRememberChild), and
-	 * their usage would have to be added back to the plan node that fired them
-	 * where EXPLAIN is expected to include it, which is implicit currently.
+	 * Allocate in the query's dedicated instrumentation context, since the
+	 * abort handling accesses registered entries after the per-query memory
+	 * may be gone.
 	 */
+	Assert(qinstr != NULL && qinstr->instr_cxt != NULL);
+	tginstr = MemoryContextAllocZero(qinstr->instr_cxt,
+									 n * sizeof(TriggerInstrumentation));
+
 	for (i = 0; i < n; i++)
-		InstrInitOptions(&tginstr[i].instr,
-						 instrument_options & INSTRUMENT_TIMER);
+	{
+		InstrInitOptions(&tginstr[i].instr, instrument_options);
+		tginstr[i].instr.kind = INSTR_KIND_TRIGGER;
+		InstrQueryRememberChild(qinstr, &tginstr[i].instr);
+	}
 
 	return tginstr;
 }
@@ -944,16 +978,31 @@ InstrAllocTrigger(int n, int instrument_options)
 void
 InstrStartTrigger(TriggerInstrumentation *tginstr)
 {
-	Assert(!tginstr->instr.need_stack);
-
 	InstrStart(&tginstr->instr);
 }
 
 void
 InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings)
 {
-	InstrStop(&tginstr->instr);
+	Instrumentation *instr = &tginstr->instr;
+
+	InstrStop(instr);
 	tginstr->firings += firings;
+
+	if (instr->need_stack)
+	{
+		/*
+		 * Pass the usage of this firing on to the entry that fired the
+		 * trigger, which is current again, and keep it in the per-trigger
+		 * totals.  The entry itself starts over, so that it only ever holds
+		 * the usage of a firing in progress.
+		 */
+		InstrAccumStack(instr_stack.current, instr);
+		BufferUsageAdd(&tginstr->bufusage, &instr->bufusage);
+		WalUsageAdd(&tginstr->walusage, &instr->walusage);
+		memset(&instr->bufusage, 0, sizeof(BufferUsage));
+		memset(&instr->walusage, 0, sizeof(WalUsage));
+	}
 }
 
 void
