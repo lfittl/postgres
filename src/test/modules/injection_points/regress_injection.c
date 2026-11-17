@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "executor/instrument.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
@@ -102,4 +103,19 @@ removable_cutoff(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FULLTRANSACTIONID(FullTransactionIdFromAllowableAt(next_fxid,
 																 xid));
+}
+
+/*
+ * Number of entries on the instrumentation stack.  Between statements, this
+ * must be zero, with the session's entry as the current one: anything else
+ * means that a statement left an entry behind, e.g. after an error.
+ */
+PG_FUNCTION_INFO_V1(instr_stack_depth);
+Datum
+instr_stack_depth(PG_FUNCTION_ARGS)
+{
+	if (instr_stack.stack_size == 0 && instr_stack.current != &instr_top)
+		elog(ERROR, "instrumentation stack is empty, but its current entry is not the session's");
+
+	PG_RETURN_INT32(instr_stack.stack_size);
 }

@@ -1132,11 +1132,13 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 	/*
 	 * Store the per-worker detail, for EXPLAIN to combine with the leader's
 	 * own per-node entry at display time.  The leader's entry is left alone:
-	 * it only describes the leader's activity.
+	 * it only describes the leader's activity.  The buffer/WAL usage in here
+	 * is already part of the totals each worker reported (see
+	 * ExecParallelFinish), so nothing is imported into the query entry.
 	 *
-	 * Worker instrumentation should be allocated in the same context as the
-	 * regular instrumentation information, which is the per-query context.
-	 * Switch into per-query memory context.
+	 * Ensure worker instrumentation is allocated in the per-query context. We
+	 * don't need to place this in the instrumentation context since no more
+	 * stack-based instrumentation work is being done.
 	 */
 	oldcontext = MemoryContextSwitchTo(planstate->state->es_query_cxt);
 	ibytes = mul_size(instrumentation->num_workers, sizeof(NodeInstrumentation));
@@ -1245,6 +1247,7 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 {
 	int			nworkers = pei->pcxt->nworkers_launched;
 	int			i;
+	QueryInstrumentation *qinstr;
 
 	/* Make this be a no-op if called twice in a row. */
 	if (pei->finished)
@@ -1278,11 +1281,28 @@ ExecParallelFinish(ParallelExecutorInfo *pei)
 	WaitForParallelWorkersToFinish(pei->pcxt);
 
 	/*
-	 * Next, accumulate buffer/WAL usage.  (This must wait for the workers to
-	 * finish, or we might get incomplete data.)
+	 * Next, accumulate buffer/WAL usage into the query entry.  (This must
+	 * wait for the workers to finish, or we might get incomplete data.)  The
+	 * totals each worker reports cover everything it did, including what its
+	 * plan nodes did; the per-node copies retrieved later are for EXPLAIN's
+	 * display only.
+	 *
+	 * A query that nobody asked to instrument has no entry of its own; its
+	 * workers' usage then goes to whatever entry is current, which is where a
+	 * nested statement's own activity ends up as well.
 	 */
-	for (i = 0; i < nworkers; i++)
-		InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	qinstr = pei->planstate->state->es_query_instr;
+	if (qinstr != NULL)
+	{
+		for (i = 0; i < nworkers; i++)
+			InstrQueryAddWorkerUsage(qinstr,
+									 &pei->buffer_usage[i], &pei->wal_usage[i]);
+	}
+	else
+	{
+		for (i = 0; i < nworkers; i++)
+			InstrAccumParallelQuery(&pei->buffer_usage[i], &pei->wal_usage[i]);
+	}
 
 	pei->finished = true;
 }
@@ -1546,6 +1566,7 @@ void
 ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 {
 	FixedParallelExecutorState *fpes;
+	QueryInstrumentation *instr;
 	BufferUsage *buffer_usage;
 	WalUsage   *wal_usage;
 	DestReceiver *receiver;
@@ -1606,7 +1627,7 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	 * leader, which also doesn't count buffer accesses and WAL activity that
 	 * occur during executor startup.
 	 */
-	InstrStartParallelQuery();
+	instr = InstrStartParallelQuery();
 
 	/*
 	 * Run the plan.  If we specified a tuple bound, be careful not to demand
@@ -1622,7 +1643,8 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 	/* Report buffer/WAL usage during parallel execution. */
 	buffer_usage = shm_toc_lookup(toc, PARALLEL_KEY_BUFFER_USAGE, false);
 	wal_usage = shm_toc_lookup(toc, PARALLEL_KEY_WAL_USAGE, false);
-	InstrEndParallelQuery(&buffer_usage[ParallelWorkerNumber],
+	InstrEndParallelQuery(instr,
+						  &buffer_usage[ParallelWorkerNumber],
 						  &wal_usage[ParallelWorkerNumber]);
 
 	/* Report instrumentation data if any instrumentation options are set. */

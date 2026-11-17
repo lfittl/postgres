@@ -62,6 +62,7 @@ tests += {
     'sql': [
       'injection_points',
       'hashagg',
+      'instrumentation',
       'portal_bind',
       'reindex_conc',
       'vacuum',

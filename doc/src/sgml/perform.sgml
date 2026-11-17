@@ -1049,6 +1049,13 @@ EXPLAIN (ANALYZE, BUFFERS OFF) SELECT * FROM tenk1 WHERE unique1 &lt; 100 AND un
    </para>
 
    <para>
+    The child nodes of a node include the initplans and subplans shown under
+    it.  The subplan of a CTE is shown under the top node of the query that
+    defines the CTE, so its buffer usage is included there, but not in any
+    CTE Scan nodes reading its result.
+   </para>
+
+   <para>
     Keep in mind that because <command>EXPLAIN ANALYZE</command> actually
     runs the query, any side-effects will happen as usual, even though
     whatever results the query might output are discarded in favor of

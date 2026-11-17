@@ -151,6 +151,7 @@ CreateExecutorState(void)
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
+	estate->es_query_instr = NULL;
 	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
@@ -229,7 +230,10 @@ FreeExecutorState(EState *estate)
 
 	/*
 	 * Free the per-query memory context, thereby releasing all working
-	 * memory, including the EState node itself.
+	 * memory, including the EState node itself.  This includes the
+	 * instrumentation context (see InstrQueryAlloc), unless it is still
+	 * registered with a resource owner, which cannot be the case here since
+	 * ExecutorFinish has run or ExecutorRun was never called.
 	 */
 	MemoryContextDelete(estate->es_query_cxt);
 }

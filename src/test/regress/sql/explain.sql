@@ -422,6 +422,54 @@ DROP FUNCTION cursor_noscroll_scan;
 DROP FUNCTION cursor_scroll_scan;
 DROP TABLE cursor_buf_test;
 
+-- Test buffer usage of CTEs.
+-- The subplan of a CTE is printed as an InitPlan under the node it is attached
+-- to.  Like that of any child, its buffer usage should be included there and
+-- in the nodes above, once, and not in the CTE Scan(s) reading from it, nor in
+-- the nodes between them and the node the CTE is attached to.
+CREATE TEMP TABLE cte_buf_test AS SELECT a FROM generate_series(1, 1000) a;
+
+CREATE FUNCTION check_cte_explain_buffers(query text,
+    OUT cte_scans int, OUT on_cte_scan boolean, OUT on_parent boolean,
+    OUT on_top boolean) AS $$
+DECLARE
+    plan jsonb;
+    seq_buf int;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON) ' || query
+        INTO plan;
+    plan := plan->0->'Plan';
+
+    SELECT (n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int
+        INTO seq_buf
+        FROM jsonb_path_query(plan, 'strict $.**?(@."Node Type" == "Seq Scan")') n;
+
+    SELECT count(*),
+           bool_or((n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int > 0)
+        INTO cte_scans, on_cte_scan
+        FROM jsonb_path_query(plan, 'strict $.**?(@."Node Type" == "CTE Scan")') n;
+
+    -- The node between the top node, which the CTE is attached to, and the
+    -- CTE Scan(s)
+    SELECT (n->>'Local Hit Blocks')::int + (n->>'Local Read Blocks')::int > 0
+        INTO on_parent
+        FROM jsonb_path_query(plan, '$.Plans[*]?(@."Parent Relationship" != "InitPlan")') n;
+
+    on_top := seq_buf > 0 AND
+        (plan->>'Local Hit Blocks')::int + (plan->>'Local Read Blocks')::int = seq_buf;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT * FROM check_cte_explain_buffers($$
+    WITH c AS MATERIALIZED (SELECT * FROM cte_buf_test)
+    SELECT * FROM c ORDER BY a LIMIT 1$$);
+SELECT * FROM check_cte_explain_buffers($$
+    WITH c AS MATERIALIZED (SELECT * FROM cte_buf_test)
+    SELECT * FROM (SELECT count(*) FROM c c1, c c2 WHERE c1.a = c2.a) s LIMIT 1$$);
+
+DROP FUNCTION check_cte_explain_buffers;
+DROP TABLE cte_buf_test;
+
 -- Test trigger instrumentation.
 -- Buffer usage of a BEFORE ROW trigger should be reported on the plan node
 -- that fired it.  The trigger scans a multi-page temporary table, so the
