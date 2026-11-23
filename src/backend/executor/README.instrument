@@ -1,0 +1,205 @@
+src/backend/executor/README.instrument
+
+Instrumentation
+===============
+
+The instrumentation subsystem measures time, buffer usage and WAL activity
+of query execution and similar work.  EXPLAIN ANALYZE, pg_stat_statements
+and other consumers build on it.
+
+It is designed so that:
+
+* measuring a section of code is cheap, even when the section runs very
+  often and only the aggregate matters, as with per-node instrumentation in
+  the executor;
+
+* nested measurements add up correctly, also when execution is aborted by
+  an error.
+
+The data structures are defined in src/include/executor/instrument.h, and
+the implementation lives in src/backend/executor/instrument.c.
+
+
+Entries
+-------
+
+An Instrumentation is the basic unit of measurement: it collects time,
+buffer and WAL usage.  Specialized variants build on it:
+
+QueryInstrumentation   A statement entry, for a query, a utility command or
+                       a comparable unit of work.  It is the parent of the
+                       child entries below, and takes care of abort cleanup.
+
+NodeInstrumentation    A child entry with per-plan-node statistics (tuple
+                       counts, loops, startup time, etc.).
+
+TriggerInstrumentation A child entry per trigger, counting its firings.  Its
+                       buffer/WAL usage, including that of parallel workers
+                       launched by statements it ran, is shown with the
+                       trigger, and is not included in the plan node that
+                       fired it.
+
+Other code can register child entries with a statement entry as well, to
+measure a part of its execution separately.
+
+
+The Stack
+---------
+
+Buffer and WAL counters are not measured by taking a snapshot of global
+counters and computing the difference afterwards: with a dozen or so
+fields, doing that around every call of every plan node is too expensive.
+Instead, there is a per-backend stack of entries, and the buffer manager,
+WAL insertion etc. add their counts directly to the entry on top of it, the
+current entry.  Entries start out zeroed, so each one holds exactly what
+happened while it was on top.  Below the stack is a session-level entry,
+which is current when nothing else is.
+
+For example, while a query runs a Seq Scan below a NestLoop, the stack is:
+
+    session entry          (implicit bottom)
+    0: statement entry
+    1: NestLoop
+    2: Seq Scan            <-- current
+
+Entries are pushed when they start and popped when they stop.  Only entries
+that track buffer or WAL usage go on the stack; time is measured
+independently of it.
+
+Plan node counters are thus exclusive of the nodes below: they only count
+what happened while the node itself was on top, which includes statements
+it ran, e.g. through a function.  EXPLAIN computes the inclusive numbers it
+shows by summing subtrees when it prints the plan.  Plan node counters are
+never modified after the fact, which also keeps them comparable between the
+leader and parallel workers.
+
+
+Statement Totals
+----------------
+
+The total of a statement is its own counters plus those of all its child
+entries.  It is computed whenever the statement entry is stopped; child
+entries are never added to anything themselves.
+
+A statement can be run in several steps: each FETCH from a cursor runs the
+cursor's query a bit further, with other statements running in between.
+The activity of each step belongs to what ran that step, not to the
+statement that closes the cursor in the end.  So each time a statement
+entry is stopped, it passes on what its total gained since the previous
+stop to the entry that is current at that point, its parent.  When the
+entry is finalized, it passes on whatever is left.
+
+A statement run while another one executes, e.g. through SPI from a
+function, is a nested statement.  If it has an entry, passing on its total
+takes its activity to what ran it, typically a plan node of the enclosing
+statement.  Statements that nobody asked to instrument have no entry: their
+activity goes straight to the current entry while they run, with the same
+end result.
+
+Utility statements are measured by their consumer, e.g. pg_stat_statements,
+with a statement entry that lives in the consumer's stack frame rather than
+being tied to a resource owner, since the command may end the transaction
+while running.  The consumer must finalize it from a PG_FINALLY block.
+
+
+Abort Safety
+------------
+
+An error can abandon a statement at any point, leaving entries on the stack
+that will never be stopped.  A statement entry is therefore registered with
+the resource owner that is current when it first starts, and it stays
+registered until it is finalized, in particular also between the steps of a
+cursor.  On abort, the resource owner cleanup unwinds the stack to below the
+entry, popping everything above it, and passes on what the entry's total
+has not passed on yet.
+
+That is exactly what a regular stop does, and passing on again without any
+activity in between passes on nothing.  Hence the normal and the abort path
+can never count anything twice, and the order in which the resource owner
+releases entries does not matter.  Child entries need no cleanup of their
+own, since they are only part of their statement's total.  The per-node
+breakdown of an aborted statement is lost, but its activity reaches the
+entry that was current when it started.
+
+If an entry is finalized while statement entries above it are still on the
+stack, as when an error unwinds through nested statements, those pass on
+what they have left right then, innermost first, while their parent is
+still right below them.  That keeps the activity of a failed nested
+statement attached to the statement that ran it, whatever order the
+resource owner cleanup releases the entries in later.
+
+Code that measures with a plain Instrumentation, outside of any statement
+entry, must instead stop and finalize it from a PG_FINALLY block, which
+also unwinds the stack.
+
+A FATAL error exits the process without unwinding the C stack, so such
+PG_FINALLY blocks never run.  Whatever is left on the stack is therefore
+added to the session entry right before the session totals are reported
+for the last time.
+
+
+Memory
+------
+
+Entries must stay valid until their final pass-on, which on abort happens
+after portal memory has already been released.  A statement entry that goes
+on the stack therefore has a dedicated memory context, in which its child
+entries must be allocated as well.  The context starts out below the
+caller's memory, so that it goes away with it if the statement never runs,
+moves under TopMemoryContext while a resource owner is responsible for it,
+and goes back below the caller's memory once the entry is finalized.
+
+
+Parallel Query
+--------------
+
+Each parallel worker measures its own buffer and WAL activity during its
+part of the query, and reports the totals, which include what its plan nodes
+did, to the leader when it is done.  The leader adds them to the totals of
+the statement that launched the workers.  When per-node instrumentation is
+active, a worker also reports its per-node statistics, which the leader keeps
+apart from its own, and which EXPLAIN combines with them when it prints the
+plan; they are for display only.
+
+
+Each worker also reports its own activity to the cumulative statistics
+system, so the leader must never count it again: what it imports from its
+workers goes to a separate worker part of a statement entry, never to the
+counters of an entry on the stack, and so never to the session totals.  It
+goes to the statement that launched the workers, or, if that has no entry,
+or the work is e.g. a parallel index build, to the innermost statement
+entry on the stack.  If there is none, nobody is interested and it is
+dropped.  Unlike the statement's own activity, the worker part is not passed
+on step by step: it is added to every running enclosing statement entry right
+away.  Consumers read the complete totals, own activity and worker part,
+through InstrTotalUsage().
+
+As an exception to the rule that only entries tracking buffer or WAL usage
+go on the stack, statement entries go on it whenever they run, even if only
+time was requested, so that the innermost statement can always be found.
+
+Since plan node counters never receive worker usage, a plan node keeps a
+separate worker part for display, which receives what the workers of
+statements it ran did.  A query's own workers show on the nodes they ran
+instead, through their per-node statistics.
+
+As a result, a process' session entry describes exactly what that process
+did, in a worker also after an error, and the cumulative statistics system
+can report it as is.
+
+
+Rules
+-----
+
+* A child entry's counters must only change while its statement entry is
+  running, i.e. between a start and the following stop.  Otherwise the
+  activity is passed on to the wrong parent.
+
+* Read the totals of a statement with InstrTotalUsage(), not from the
+  statement entry's own counters, which do not include its children.
+
+* Allocate child entries in their statement entry's memory context.
+
+* Never add what was imported from parallel workers to the counters of an
+  entry that may go on the stack; it belongs in a statement entry's worker
+  part.

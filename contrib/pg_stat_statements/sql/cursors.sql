@@ -71,3 +71,28 @@ FETCH BACKWARD -1 pgss_cursor;
 FETCH BACKWARD ALL pgss_cursor;
 COMMIT;
 SELECT calls, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+
+-- Buffer usage of a cursor's query is attributed to the statements that
+-- fetch from it, rather than to the one that closes the cursor.
+SET pg_stat_statements.track = 'all';
+CREATE TEMP TABLE pgss_cursor_tab AS SELECT a FROM generate_series(1, 1000) a;
+-- Scan the table once, so that the scan below does not have to set hint bits
+SELECT count(*) FROM pgss_cursor_tab;
+SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+BEGIN;
+DECLARE pgss_cursor CURSOR FOR SELECT FROM pgss_cursor_tab;
+FETCH 500 pgss_cursor;
+FETCH ALL pgss_cursor;
+CLOSE pgss_cursor;
+COMMIT;
+SELECT query, calls, local_blks_hit + local_blks_read > 0 AS local_blks
+  FROM pg_stat_statements
+  WHERE query LIKE 'FETCH%' OR query LIKE 'CLOSE%' OR query LIKE 'COMMIT%'
+  ORDER BY query COLLATE "C";
+SELECT sum(local_blks_hit + local_blks_read) =
+       pg_relation_size('pgss_cursor_tab') / current_setting('block_size')::int
+       AS fetches_cover_table
+  FROM pg_stat_statements
+  WHERE query LIKE 'FETCH%';
+DROP TABLE pgss_cursor_tab;
+RESET pg_stat_statements.track;
