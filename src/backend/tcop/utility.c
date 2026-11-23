@@ -72,6 +72,7 @@ ProcessUtility_hook_type ProcessUtility_hook = NULL;
 
 /* local function declarations */
 static int	ClassifyUtilityCommandAsReadOnly(Node *parsetree);
+static void standard_ProcessUtilityInternal(UtilityStmtDesc *desc);
 static void ProcessUtilitySlow(ParseState *pstate,
 							   PlannedStmt *pstmt,
 							   const char *queryString,
@@ -498,19 +499,12 @@ CheckRestrictedOperation(const char *cmdname)
  * and stmt_len that were given for the whole statement.
  */
 void
-ProcessUtility(PlannedStmt *pstmt,
-			   const char *queryString,
-			   bool readOnlyTree,
-			   ProcessUtilityContext context,
-			   ParamListInfo params,
-			   QueryEnvironment *queryEnv,
-			   DestReceiver *dest,
-			   QueryCompletion *qc)
+ProcessUtility(UtilityStmtDesc *desc)
 {
-	Assert(IsA(pstmt, PlannedStmt));
-	Assert(pstmt->commandType == CMD_UTILITY);
-	Assert(queryString != NULL);	/* required as of 8.4 */
-	Assert(qc == NULL || qc->commandTag == CMDTAG_UNKNOWN);
+	Assert(IsA(desc->pstmt, PlannedStmt));
+	Assert(desc->pstmt->commandType == CMD_UTILITY);
+	Assert(desc->queryString != NULL);	/* required as of 8.4 */
+	Assert(desc->qc == NULL || desc->qc->commandTag == CMDTAG_UNKNOWN);
 
 	/*
 	 * We provide a function hook variable that lets loadable plugins get
@@ -518,13 +512,9 @@ ProcessUtility(PlannedStmt *pstmt,
 	 * call standard_ProcessUtility().
 	 */
 	if (ProcessUtility_hook)
-		(*ProcessUtility_hook) (pstmt, queryString, readOnlyTree,
-								context, params, queryEnv,
-								dest, qc);
+		(*ProcessUtility_hook) (desc);
 	else
-		standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-								context, params, queryEnv,
-								dest, qc);
+		standard_ProcessUtility(desc);
 }
 
 /*
@@ -542,15 +532,50 @@ ProcessUtility(PlannedStmt *pstmt,
  * event-trigger.sgml is kept up to date.
  */
 void
-standard_ProcessUtility(PlannedStmt *pstmt,
-						const char *queryString,
-						bool readOnlyTree,
-						ProcessUtilityContext context,
-						ParamListInfo params,
-						QueryEnvironment *queryEnv,
-						DestReceiver *dest,
-						QueryCompletion *qc)
+standard_ProcessUtility(UtilityStmtDesc *desc)
 {
+	QueryInstrumentation *instr = &desc->instr;
+
+	/*
+	 * If a consumer asked for instrumentation (see UtilityStmtDesc), bracket
+	 * the command with its statement-level entry, so that statements it runs
+	 * and parallel workers it launches are accounted to it and the consumer
+	 * can read it afterwards.  Otherwise run the command without one, like
+	 * ExecutorStart does for queries: its activity is then accounted to
+	 * whatever entry is current, if any.
+	 */
+	if (desc->instr_options == 0)
+	{
+		standard_ProcessUtilityInternal(desc);
+		return;
+	}
+
+	InstrQueryInitLocal(instr, desc->instr_options);
+
+	/* Must be finalized even if the command fails, to keep the stack sane */
+	InstrQueryStart(instr);
+	PG_TRY();
+	{
+		standard_ProcessUtilityInternal(desc);
+	}
+	PG_FINALLY();
+	{
+		InstrQueryStopFinalize(instr);
+	}
+	PG_END_TRY();
+}
+
+static void
+standard_ProcessUtilityInternal(UtilityStmtDesc *desc)
+{
+	PlannedStmt *pstmt = desc->pstmt;
+	const char *queryString = desc->queryString;
+	bool		readOnlyTree = desc->readOnlyTree;
+	ProcessUtilityContext context = desc->context;
+	ParamListInfo params = desc->params;
+	QueryEnvironment *queryEnv = desc->queryEnv;
+	DestReceiver *dest = desc->dest;
+	QueryCompletion *qc = desc->qc;
 	Node	   *parsetree;
 	bool		isTopLevel = (context == PROCESS_UTILITY_TOPLEVEL);
 	bool		isAtomicContext = (!(context == PROCESS_UTILITY_TOPLEVEL || context == PROCESS_UTILITY_QUERY_NONATOMIC) || IsTransactionBlock());
@@ -1236,6 +1261,7 @@ ProcessUtilitySlow(ParseState *pstate,
 							 * event trigger context.
 							 */
 							PlannedStmt *wrapper;
+							UtilityStmtDesc subDesc = {0};
 
 							wrapper = makeNode(PlannedStmt);
 							wrapper->commandType = CMD_UTILITY;
@@ -1245,14 +1271,12 @@ ProcessUtilitySlow(ParseState *pstate,
 							wrapper->stmt_len = pstmt->stmt_len;
 							wrapper->planOrigin = PLAN_STMT_INTERNAL;
 
-							ProcessUtility(wrapper,
-										   queryString,
-										   false,
-										   PROCESS_UTILITY_SUBCOMMAND,
-										   params,
-										   NULL,
-										   None_Receiver,
-										   NULL);
+							subDesc.pstmt = wrapper;
+							subDesc.queryString = queryString;
+							subDesc.context = PROCESS_UTILITY_SUBCOMMAND;
+							subDesc.params = params;
+							subDesc.dest = None_Receiver;
+							ProcessUtility(&subDesc);
 						}
 
 						/* Need CCI between commands */
@@ -1976,6 +2000,7 @@ void
 ProcessUtilityForAlterTable(Node *stmt, AlterTableUtilityContext *context)
 {
 	PlannedStmt *wrapper;
+	UtilityStmtDesc subDesc = {0};
 
 	/*
 	 * For event triggers, we must "close" the current complex-command set,
@@ -1993,14 +2018,13 @@ ProcessUtilityForAlterTable(Node *stmt, AlterTableUtilityContext *context)
 	wrapper->stmt_len = context->pstmt->stmt_len;
 	wrapper->planOrigin = PLAN_STMT_INTERNAL;
 
-	ProcessUtility(wrapper,
-				   context->queryString,
-				   false,
-				   PROCESS_UTILITY_SUBCOMMAND,
-				   context->params,
-				   context->queryEnv,
-				   None_Receiver,
-				   NULL);
+	subDesc.pstmt = wrapper;
+	subDesc.queryString = context->queryString;
+	subDesc.context = PROCESS_UTILITY_SUBCOMMAND;
+	subDesc.params = context->params;
+	subDesc.queryEnv = context->queryEnv;
+	subDesc.dest = None_Receiver;
+	ProcessUtility(&subDesc);
 
 	EventTriggerAlterTableStart(context->pstmt->utilityStmt);
 	EventTriggerAlterTableRelid(context->relid);

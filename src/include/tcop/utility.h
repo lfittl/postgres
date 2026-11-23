@@ -14,6 +14,7 @@
 #ifndef UTILITY_H
 #define UTILITY_H
 
+#include "executor/instrument.h"
 #include "tcop/cmdtag.h"
 #include "tcop/tcopprot.h"
 
@@ -67,26 +68,63 @@ typedef struct AlterTableUtilityContext
 	 COMMAND_OK_IN_PARALLEL_MODE)
 #define COMMAND_IS_NOT_READ_ONLY	0
 
+/*
+ * UtilityStmtDesc bundles everything needed to execute one utility statement,
+ * the way QueryDesc does for optimizable statements.  Collecting these into a
+ * single struct keeps ProcessUtility() and its hook from having to grow a new
+ * parameter -- and break every ProcessUtility_hook -- each time a new piece of
+ * per-statement state is needed.
+ */
+typedef struct UtilityStmtDesc
+{
+	PlannedStmt *pstmt;			/* the utility statement to execute */
+	const char *queryString;	/* source text of the command */
+	bool		readOnlyTree;	/* if true, pstmt's node tree must not be
+								 * modified */
+	ProcessUtilityContext context;	/* identifies source of the command */
+	ParamListInfo params;		/* parameters to use during execution */
+	QueryEnvironment *queryEnv; /* environment for parse analysis, etc. */
+	DestReceiver *dest;			/* where to send results, if any */
+	QueryCompletion *qc;		/* where to store command completion status,
+								 * or NULL */
+
+	/*
+	 * Statement-level instrumentation, the utility command counterpart of
+	 * QueryDesc's query_instr_options and query_instr.  A consumer (e.g.
+	 * pg_stat_statements) that wants timing, buffer or WAL usage ORs the
+	 * InstrumentOption flags into instr_options before calling
+	 * standard_ProcessUtility and reads instr afterwards.
+	 *
+	 * If instr_options is set, standard_ProcessUtility brackets the command
+	 * with the entry, so that statements run by the command and parallel
+	 * workers it launches (e.g. for CREATE INDEX or VACUUM) are accounted to
+	 * it.  Otherwise the command runs without an entry and is accounted to
+	 * whatever entry is current, if any.  The entry is embedded here rather
+	 * than allocated, since a command may end the transaction and with it any
+	 * resource owner or transaction-lifetime memory, while the descriptor
+	 * lives in the caller's stack frame for the whole command.
+	 *
+	 * The entry is owned by standard_ProcessUtility, which sets it up, runs
+	 * the command inside it and finalizes it before returning, so it only
+	 * ever describes the command's own processing.  Work a ProcessUtility
+	 * hook does before or after calling standard_ProcessUtility is accounted
+	 * to whatever entry is current around the hook instead, the same way the
+	 * executor's query entry excludes what ExecutorStart and ExecutorEnd
+	 * hooks do.  Likewise, if a hook handles the command itself without
+	 * calling standard_ProcessUtility, or passes it a different descriptor,
+	 * the entry stays empty, just as query_instr stays NULL when
+	 * standard_ExecutorStart is not reached.
+	 */
+	int			instr_options;	/* OR of InstrumentOption flags for instr */
+	QueryInstrumentation instr; /* set up by standard_ProcessUtility */
+} UtilityStmtDesc;
+
 /* Hook for plugins to get control in ProcessUtility() */
-typedef void (*ProcessUtility_hook_type) (PlannedStmt *pstmt,
-										  const char *queryString,
-										  bool readOnlyTree,
-										  ProcessUtilityContext context,
-										  ParamListInfo params,
-										  QueryEnvironment *queryEnv,
-										  DestReceiver *dest, QueryCompletion *qc);
+typedef void (*ProcessUtility_hook_type) (UtilityStmtDesc *desc);
 extern PGDLLIMPORT ProcessUtility_hook_type ProcessUtility_hook;
 
-extern void ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-						   bool readOnlyTree,
-						   ProcessUtilityContext context, ParamListInfo params,
-						   QueryEnvironment *queryEnv,
-						   DestReceiver *dest, QueryCompletion *qc);
-extern void standard_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
-									bool readOnlyTree,
-									ProcessUtilityContext context, ParamListInfo params,
-									QueryEnvironment *queryEnv,
-									DestReceiver *dest, QueryCompletion *qc);
+extern void ProcessUtility(UtilityStmtDesc *desc);
+extern void standard_ProcessUtility(UtilityStmtDesc *desc);
 
 extern void ProcessUtilityForAlterTable(Node *stmt,
 										AlterTableUtilityContext *context);

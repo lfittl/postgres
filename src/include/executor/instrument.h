@@ -13,6 +13,7 @@
 #ifndef INSTRUMENT_H
 #define INSTRUMENT_H
 
+#include "lib/ilist.h"
 #include "portability/instr_time.h"
 
 
@@ -57,7 +58,7 @@ typedef struct WalUsage
 	int64		wal_buffers_full;	/* # of times the WAL buffers became full */
 } WalUsage;
 
-/* Flag bits included in InstrAlloc's instrument_options bitmask */
+/* Flag bits included in the instrument_options bitmask */
 typedef enum InstrumentOption
 {
 	INSTRUMENT_TIMER = 1 << 0,	/* needs timer (and row counts) */
@@ -69,35 +70,183 @@ typedef enum InstrumentOption
 } InstrumentOption;
 
 /*
- * General purpose instrumentation that can capture time and WAL/buffer usage
+ * Instrumentation base class for capturing time and WAL/buffer usage
  *
- * Initialized through InstrAlloc, followed by one or more calls to a pair of
- * InstrStart/InstrStop (activity is measured in between).
+ * If used directly:
+ * - Allocate on the stack and zero initialize the struct
+ * - Call InstrInitOptions to set instrumentation options
+ * - Call InstrStart before the activity you want to measure
+ * - Call InstrStop / InstrStopFinalize after the activity to capture totals
+ *
+ * InstrStart/InstrStop may be called multiple times. The last stop call must
+ * be to InstrStopFinalize to ensure parent stack entries get the accumulated
+ * totals. If there is risk of transaction aborts you must call
+ * InstrStopFinalize in a PG_TRY/PG_FINALLY block to avoid corrupting the
+ * instrumentation stack.
+ *
+ * In a query context use QueryInstrumentation instead, which handles aborts
+ * using the resource owner logic.
+ *
+ * The buffer/WAL usage only ever describes the activity of this process.
+ * What a parallel query leader imports from its workers is kept apart, on the
+ * statement-level QueryInstrumentation entries (see InstrAccumParallelQuery),
+ * so that the session totals in instr_top never include it.
  */
+typedef enum InstrKind
+{
+	INSTR_KIND_PLAIN = 0,		/* standalone entry, e.g. around a utility
+								 * statement or planning */
+	INSTR_KIND_QUERY,			/* QueryInstrumentation */
+	INSTR_KIND_NODE,			/* NodeInstrumentation of a plan node */
+	INSTR_KIND_NODE_DETAIL,		/* part of a plan node, e.g. the table access
+								 * of an index scan */
+	INSTR_KIND_TRIGGER,			/* TriggerInstrumentation */
+} InstrKind;
+
 typedef struct Instrumentation
 {
 	/* Parameters set at creation: */
 	bool		need_timer;		/* true if we need timer data */
-	bool		need_bufusage;	/* true if we need buffer usage data */
-	bool		need_walusage;	/* true if we need WAL usage data */
+	bool		need_stack;		/* true if we need WAL/buffer usage data, i.e.
+								 * the entry goes on the stack while running
+								 * (always set for query entries) */
 	/* Internal state keeping: */
+	bool		on_stack;		/* true if currently on instr_stack */
+	bool		finalized;		/* true once accumulated to a parent via
+								 * InstrFinalizeChild, or for a query entry
+								 * popped off the stack by an outer entry's
+								 * finalization on abort */
+	InstrKind	kind;			/* what this entry describes */
 	instr_time	starttime;		/* start time of last InstrStart */
-	BufferUsage bufusage_start; /* buffer usage at start */
-	WalUsage	walusage_start; /* WAL usage at start */
 	/* Accumulated statistics: */
 	instr_time	total;			/* total runtime */
 	BufferUsage bufusage;		/* total buffer usage */
 	WalUsage	walusage;		/* total WAL usage */
+	/* Abort handling: link in parent QueryInstrumentation's unfinalized list */
+	dlist_node	unfinalized_entry;
 } Instrumentation;
+
+/* Buffer/WAL usage of parallel workers, see QueryInstrumentation */
+typedef struct InstrWorkerUsage
+{
+	BufferUsage bufusage;
+	WalUsage	walusage;
+} InstrWorkerUsage;
+
+/*
+ * Query-related instrumentation tracking.
+ *
+ * A QueryInstrumentation is the entry for a statement, whether a query or a
+ * utility command, or for a comparable unit of work such as a parallel
+ * worker's run or VACUUM of one relation.  It is referred to as a query entry
+ * throughout, as opposed to the plan node, trigger and plain entries.
+ *
+ * Usage:
+ * - Allocate on the heap using InstrQueryAlloc (required for abort handling)
+ * - Call InstrQueryStart before the activity you want to measure
+ * - Call InstrQueryStop / InstrQueryStopFinalize afterwards to capture totals
+ *
+ * InstrQueryStart/InstrQueryStop may be called multiple times. The last stop
+ * call must be to InstrQueryStopFinalize to ensure parent stack entries get
+ * the accumulated totals.
+ *
+ * Uses resource owner mechanism for handling aborts: the first InstrQueryStart
+ * registers the entry with the current resource owner, and it stays registered
+ * (also across InstrQueryStop / InstrQueryStart pairs) until
+ * InstrQueryStopFinalize. In the case of an abort, logic equivalent to
+ * InstrQueryStopFinalize is run by the resource owner cleanup, so the caller
+ * must not release that resource owner without an abort before having called
+ * InstrQueryStopFinalize.
+ *
+ * A statement gets a query entry when somebody asked for instrumentation (see
+ * ExecutorStart and standard_ProcessUtility), and query entries are always
+ * on the instrumentation stack while started.  So while a statement runs,
+ * the innermost query entry on the stack is the entry of the innermost
+ * instrumented statement (see InstrQueryCurrent), which is where work done by
+ * parallel workers is imported.  A statement run while another one executes
+ * (a nested statement, e.g. through SPI from a function) accumulates to
+ * whatever entry is current when it is finalized, typically the plan node or
+ * trigger entry that ran it, so that the enclosing statement sees its
+ * activity like any other; a nested statement without an entry of its own
+ * writes to that entry directly while it runs.
+ *
+ * Besides the process' own activity in instr, a query entry collects what
+ * parallel workers did on behalf of the statement (worker_bufusage and
+ * worker_walusage, see InstrAccumParallelQuery).  That part is passed on to
+ * the enclosing query entry when finalized, but never reaches plain entries,
+ * plan node entries or the session totals, since each worker reports its
+ * activity itself and plan node entries accumulate to the session totals in
+ * turn.  Consumers that want the complete picture use InstrTotalUsage.  For
+ * EXPLAIN to still show the activity of a nested statement's workers on the
+ * plan node that ran the statement, a plan node entry with buffer/WAL
+ * instrumentation keeps a separate worker part of its own, for display only
+ * (see NodeInstrumentation.worker_usage).
+ *
+ * Utility statements use the entry embedded in their UtilityStmtDesc (see
+ * InstrQueryInitLocal), which is neither tied to a resource owner nor owns
+ * memory, as transaction control statements release both while running.
+ */
+struct ResourceOwnerData;
+typedef struct QueryInstrumentation
+{
+	Instrumentation instr;
+
+	/* Original instrument_options flags used to create this instrumentation */
+	int			instrument_options;
+
+	/* Usage imported from parallel workers, see InstrAccumParallelQuery */
+	bool		has_worker_usage;	/* anything imported yet? */
+	BufferUsage worker_bufusage;
+	WalUsage	worker_walusage;
+
+	/* Resource owner used for cleanup for aborts between InstrStart/InstrStop */
+	struct ResourceOwnerData *owner;
+
+	bool		started;		/* InstrQueryStart has been called */
+
+	/*
+	 * Dedicated memory context for all instrumentation allocations belonging
+	 * to this query (node instrumentation, trigger instrumentation, etc.).
+	 * Initially a child of the context current at InstrQueryAlloc, moved
+	 * under TopMemoryContext by InstrQueryStart while the ResourceOwner is
+	 * responsible for it (so it survives transaction abort for the cleanup),
+	 * and reassigned to the current memory context on InstrQueryStopFinalize.
+	 * NULL for entries set up with InstrQueryInitLocal.
+	 */
+	MemoryContext instr_cxt;
+
+	/*
+	 * Child entries that need to be cleaned up on abort, since they are not
+	 * registered as a resource owner themselves. Contains both node and
+	 * trigger instrumentation entries linked via instr.unfinalized_entry.
+	 */
+	dlist_head	unfinalized_entries;
+} QueryInstrumentation;
 
 /*
  * Specialized instrumentation for per-node execution statistics
+ *
+ * Relies on an outer QueryInstrumentation having been set up to handle the
+ * stack used for WAL/buffer usage statistics, and relies on it for managing
+ * aborts. Solely intended for the executor and anyone reporting about its
+ * activities (e.g. EXPLAIN ANALYZE).
  */
 typedef struct NodeInstrumentation
 {
 	Instrumentation instr;
 	/* Parameters set at node creation: */
 	bool		async_mode;		/* true if node is in async mode */
+
+	/*
+	 * What the parallel workers launched by a statement this node ran (e.g.
+	 * through a function) did, for EXPLAIN only (see
+	 * InstrAccumParallelQuery).  Kept apart from the node's own counters in
+	 * instr, which only ever describe this process' activity and are
+	 * accumulated to the session totals.  Only allocated for nodes with
+	 * buffer/WAL instrumentation, NULL otherwise.
+	 */
+	InstrWorkerUsage *worker_usage;
+
 	/* Info about current plan cycle: */
 	bool		running;		/* true if we've completed first tuple */
 	instr_time	counter;		/* accumulated runtime for this node */
@@ -112,6 +261,13 @@ typedef struct NodeInstrumentation
 	double		nfiltered2;		/* # of tuples removed by "other" quals */
 } NodeInstrumentation;
 
+/*
+ * Care must be taken with any pointers contained within this struct, as this
+ * gets copied across processes during parallel query execution.  The entries
+ * are only ever filled through InstrAggNode, which copies the counters but
+ * not the pointers (unfinalized_entry, worker_usage), so those stay NULL in
+ * every copy and must never be dereferenced on one.
+ */
 typedef struct WorkerNodeInstrumentation
 {
 	int			num_workers;	/* # of structures that follow */
@@ -125,15 +281,115 @@ typedef struct TriggerInstrumentation
 								 * was fired */
 } TriggerInstrumentation;
 
-extern PGDLLIMPORT BufferUsage pgBufferUsage;
-extern PGDLLIMPORT WalUsage pgWalUsage;
+/*
+ * Dynamic array-based stack for tracking current WAL/buffer usage context.
+ *
+ * When the stack is empty, 'current' points to instr_top which accumulates
+ * session-level totals.
+ */
+typedef struct InstrStackState
+{
+	int			stack_space;	/* allocated capacity of entries array */
+	int			stack_size;		/* current number of entries */
 
-extern Instrumentation *InstrAlloc(int instrument_options);
+	Instrumentation **entries;	/* dynamic array of pointers */
+	Instrumentation *current;	/* top of stack, or &instr_top when empty */
+} InstrStackState;
+
+/*
+ * The top instrumentation represents a running total of the current backend
+ * WAL/buffer usage information. This will not be updated immediately, but
+ * rather when the current stack entry gets accumulated which typically happens
+ * at query end.
+ *
+ * It only ever describes this process' own activity, which is what the
+ * cumulative statistics system reports.  Usage imported from parallel workers
+ * stays on the statement-level query entries (see InstrAccumParallelQuery)
+ * and never reaches it.
+ */
+extern PGDLLIMPORT Instrumentation instr_top;
+
+/*
+ * The instrumentation stack state. The 'current' field points to the
+ * currently active stack entry that is getting updated as activity happens,
+ * and will be accumulated to parent stacks when it gets finalized by
+ * InstrStop (for non-executor use cases), InstrQueryFinalizeChildren
+ * (executor finish) or ResOwnerReleaseInstrumentation on abort.
+ */
+extern PGDLLIMPORT InstrStackState instr_stack;
+
+extern void InstrStackGrow(void);
+
+/*
+ * Pushes the stack so that all WAL/buffer usage updates go to the passed in
+ * instrumentation entry.
+ *
+ * See note on InstrPopStack regarding safe use of these functions.
+ */
+static inline void
+InstrPushStack(Instrumentation *instr)
+{
+	if (unlikely(instr_stack.stack_size == instr_stack.stack_space))
+		InstrStackGrow();
+
+	instr_stack.entries[instr_stack.stack_size++] = instr;
+	instr_stack.current = instr;
+	instr->on_stack = true;
+}
+
+/*
+ * Pops the stack entry back to the previous one that was effective at
+ * InstrPushStack.
+ *
+ * Callers must ensure that no intermediate stack entries are skipped, to
+ * handle aborts correctly. If you're thinking of calling this in a PG_FINALLY
+ * block, consider instead using InstrStart + InstrStopFinalize which can skip
+ * intermediate stack entries.
+ */
+static inline void
+InstrPopStack(Instrumentation *instr)
+{
+	Assert(instr_stack.stack_size > 0);
+	Assert(instr_stack.entries[instr_stack.stack_size - 1] == instr);
+	instr_stack.stack_size--;
+	instr_stack.current = instr_stack.stack_size > 0
+		? instr_stack.entries[instr_stack.stack_size - 1]
+		: &instr_top;
+	instr->on_stack = false;
+}
+
 extern void InstrInitOptions(Instrumentation *instr, int instrument_options);
 extern void InstrStart(Instrumentation *instr);
 extern void InstrStop(Instrumentation *instr);
+extern void InstrStopFinalize(Instrumentation *instr);
+extern void InstrStackFinalizeAll(void);
+extern void InstrFinalizeChild(Instrumentation *instr, Instrumentation *parent);
+extern void InstrQueryFinalizeChildren(QueryInstrumentation *qinstr,
+									   Instrumentation *target);
+extern void InstrAccumStack(Instrumentation *dst, Instrumentation *add);
 
-extern NodeInstrumentation *InstrAllocNode(int instrument_options,
+extern QueryInstrumentation *InstrQueryAlloc(int instrument_options);
+extern void InstrQueryInitLocal(QueryInstrumentation *qinstr,
+								int instrument_options);
+extern void InstrTotalUsage(const QueryInstrumentation *qinstr,
+							BufferUsage *bufusage, WalUsage *walusage);
+extern void InstrQueryStart(QueryInstrumentation *instr);
+extern void InstrQueryStop(QueryInstrumentation *instr);
+extern void InstrQueryStopFinalize(QueryInstrumentation *instr);
+extern void InstrQueryRememberChild(QueryInstrumentation *parent, Instrumentation *instr);
+extern QueryInstrumentation *InstrQueryCurrent(void);
+
+pg_nodiscard extern QueryInstrumentation *InstrStartParallelQuery(void);
+extern void InstrEndParallelQuery(QueryInstrumentation *qinstr, BufferUsage *bufusage, WalUsage *walusage);
+extern void InstrQueryAddWorkerUsage(QueryInstrumentation *qinstr,
+									 const BufferUsage *bufusage,
+									 const WalUsage *walusage);
+extern void InstrAccumParallelQuery(QueryInstrumentation *qinstr,
+									const BufferUsage *bufusage,
+									const WalUsage *walusage);
+
+extern NodeInstrumentation *InstrAllocNode(QueryInstrumentation *qinstr,
+										   int instrument_options,
 										   bool async_mode);
 extern void InstrInitNode(NodeInstrumentation *instr, int instrument_options,
 						  bool async_mode);
@@ -143,16 +399,34 @@ extern void InstrUpdateTupleCount(NodeInstrumentation *instr, double nTuples);
 extern void InstrEndLoop(NodeInstrumentation *instr);
 extern void InstrAggNode(NodeInstrumentation *dst, NodeInstrumentation *add);
 
-extern TriggerInstrumentation *InstrAllocTrigger(int n, int instrument_options);
+extern TriggerInstrumentation *InstrAllocTrigger(QueryInstrumentation *qinstr,
+												 int instrument_options, int n);
 extern void InstrStartTrigger(TriggerInstrumentation *tginstr);
 extern void InstrStopTrigger(TriggerInstrumentation *tginstr, int64 firings);
 
-extern void InstrStartParallelQuery(void);
-extern void InstrEndParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void InstrAccumParallelQuery(BufferUsage *bufusage, WalUsage *walusage);
-extern void BufferUsageAccumDiff(BufferUsage *dst,
-								 const BufferUsage *add, const BufferUsage *sub);
+extern void BufferUsageAdd(BufferUsage *dst, const BufferUsage *add);
+extern void WalUsageAdd(WalUsage *dst, const WalUsage *add);
 extern void WalUsageAccumDiff(WalUsage *dst, const WalUsage *add,
 							  const WalUsage *sub);
+
+#define INSTR_BUFUSAGE_INCR(fld) do { \
+		instr_stack.current->bufusage.fld++; \
+	} while (0)
+#define INSTR_BUFUSAGE_ADD(fld,val) do { \
+		instr_stack.current->bufusage.fld += (val); \
+	} while (0)
+#define INSTR_BUFUSAGE_TIME_ADD(fld,val) do { \
+		INSTR_TIME_ADD(instr_stack.current->bufusage.fld, val); \
+	} while (0)
+#define INSTR_BUFUSAGE_TIME_ACCUM_DIFF(fld,endval,startval) do { \
+		INSTR_TIME_ACCUM_DIFF(instr_stack.current->bufusage.fld, endval, startval); \
+	} while (0)
+
+#define INSTR_WALUSAGE_INCR(fld) do { \
+		instr_stack.current->walusage.fld++; \
+	} while (0)
+#define INSTR_WALUSAGE_ADD(fld,val) do { \
+		instr_stack.current->walusage.fld += (val); \
+	} while (0)
 
 #endif							/* INSTRUMENT_H */

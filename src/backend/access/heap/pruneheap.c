@@ -795,8 +795,8 @@ heap_page_will_freeze(bool did_tuple_hint_fpi,
 		 * anyway and if doing so means that we can set the page all-frozen
 		 * afterwards (might not happen until VACUUM's final heap pass).
 		 *
-		 * XXX: Previously, we knew if pruning emitted an FPI by checking
-		 * pgWalUsage.wal_fpi before and after pruning.  Once the freeze and
+		 * XXX: Previously, we knew if pruning emitted an FPI by checking the
+		 * wal_fpi counter before and after pruning.  Once the freeze and
 		 * prune records were combined, this heuristic couldn't be used
 		 * anymore.  The opportunistic freeze heuristic must be improved;
 		 * however, for now, try to approximate the old logic.
@@ -1156,7 +1156,7 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 	bool		do_hint_prune;
 	bool		do_set_vm;
 	bool		did_tuple_hint_fpi;
-	int64		fpi_before = pgWalUsage.wal_fpi;
+	int64		fpi_before = instr_stack.current->walusage.wal_fpi;
 	TransactionId conflict_xid;
 
 	/* Initialize prstate */
@@ -1216,7 +1216,7 @@ heap_page_prune_and_freeze(PruneFreezeParams *params,
 	 * checking tuple visibility information in prune_freeze_plan() may have
 	 * caused an FPI to be emitted.
 	 */
-	did_tuple_hint_fpi = fpi_before != pgWalUsage.wal_fpi;
+	did_tuple_hint_fpi = fpi_before != instr_stack.current->walusage.wal_fpi;
 
 	do_prune = prstate.nredirected > 0 ||
 		prstate.ndead > 0 ||

@@ -313,16 +313,9 @@ sepgsql_exec_check_perms(List *rangeTbls, List *rteperminfos, bool abort)
  * break whole of the things if nefarious user would use.
  */
 static void
-sepgsql_utility_command(PlannedStmt *pstmt,
-						const char *queryString,
-						bool readOnlyTree,
-						ProcessUtilityContext context,
-						ParamListInfo params,
-						QueryEnvironment *queryEnv,
-						DestReceiver *dest,
-						QueryCompletion *qc)
+sepgsql_utility_command(UtilityStmtDesc *desc)
 {
-	Node	   *parsetree = pstmt->utilityStmt;
+	Node	   *parsetree = desc->pstmt->utilityStmt;
 	sepgsql_context_info_t saved_context_info = sepgsql_context_info;
 	ListCell   *cell;
 
@@ -381,13 +374,9 @@ sepgsql_utility_command(PlannedStmt *pstmt,
 		}
 
 		if (next_ProcessUtility_hook)
-			(*next_ProcessUtility_hook) (pstmt, queryString, readOnlyTree,
-										 context, params, queryEnv,
-										 dest, qc);
+			(*next_ProcessUtility_hook) (desc);
 		else
-			standard_ProcessUtility(pstmt, queryString, readOnlyTree,
-									context, params, queryEnv,
-									dest, qc);
+			standard_ProcessUtility(desc);
 	}
 	PG_FINALLY();
 	{
